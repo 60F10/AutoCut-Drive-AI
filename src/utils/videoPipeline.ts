@@ -1,4 +1,11 @@
-import type { AnalyticsRecord, DriveFileMeta, GeminiEditPlan, VideoCut } from '../types';
+import type {
+  AnalyticsRecord,
+  DriveFileMeta,
+  EditStylePreset,
+  ExportQuality,
+  GeminiEditPlan,
+  VideoCut,
+} from '../types';
 
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.webm']);
 const EDITED_MARKER = '_EDITADO';
@@ -7,6 +14,158 @@ export const MOBILE_RAM_WARNING_BYTES = 200 * 1024 * 1024; // 200 MB
 
 export function exceedsMobileRamThreshold(totalBytes: number): boolean {
   return totalBytes > MOBILE_RAM_WARNING_BYTES;
+}
+
+export interface StylePresetMeta {
+  id: EditStylePreset;
+  label: string;
+  description: string;
+  targetDurationHint: string;
+  promptDirectives: string;
+}
+
+export const EDIT_STYLE_PRESETS: StylePresetMeta[] = [
+  {
+    id: 'funny_jumpcut',
+    label: 'Gracioso / Jump-cut',
+    description: 'Cortes secos rápidos, prioriza comentarios graciosos, fails y remates.',
+    targetDurationHint: '30–60 s',
+    promptDirectives: `Estilo seleccionado: GRACIOSO / JUMP-CUT.
+- Ritmo muy rápido mediante cortes secos (jump cuts), eliminando TODOS los silencios, pausas muertas, tiempos de espera y partes aburridas.
+- Mantén una narrativa clara: inicio rápido con gancho -> desarrollo con el momento cómico, improviso o problema/fail cotidiano -> remate final gracioso o reacción.
+- Prioriza frases espontáneas, quejas cómicas, risas, gestos expresivos y acciones clave visuales.
+- Duración adaptativa: si el bruto dura menos de 2-3 minutos, apunta a unos 30 segundos; si es más largo (3 a 10 minutos), apunta a 45-60 segundos.`,
+  },
+  {
+    id: 'agile_vlog',
+    label: 'Vlog ágil',
+    description: 'Narrativa fluida y natural, conserva contexto y transiciones limpias.',
+    targetDurationHint: '35–60 s',
+    promptDirectives: `Estilo seleccionado: VLOG ÁGIL.
+- Mantén una narrativa fluida, cercana y natural, conservando suficiente contexto para que la historia se entienda sin saltos bruscos excesivos ni forzar el humor.
+- Elimina silencios largos, repeticiones, tiempos muertos y momentos sin valor, pero deja respirar brevemente las transiciones entre escenas o ideas clave.
+- Prioriza explicaciones claras, planos de contexto visual interesantes, progreso real de la actividad y un cierre natural.
+- Duración objetivo: entre 35 y 60 segundos según la riqueza del bruto.`,
+  },
+  {
+    id: 'express_summary',
+    label: 'Resumen exprés',
+    description: 'Ultra directo al grano (20–30 s), solo puntos clave y acciones principales.',
+    targetDurationHint: '20–30 s',
+    promptDirectives: `Estilo seleccionado: RESUMEN EXPRÉS.
+- Ultra directo al grano: recorta agresivamente cualquier rodeo, saludo largo, pausa o comentario secundario.
+- Apunta estrictamente a una duración final compacta de 20 a 30 segundos (duracion_objetivo_seg entre 20 y 30).
+- Conserva únicamente el gancho inicial, las acciones principales paso a paso o ideas esenciales y el resultado final.`,
+  },
+];
+
+export function normalizeStylePreset(value?: unknown): EditStylePreset {
+  if (value === 'agile_vlog' || value === 'express_summary' || value === 'funny_jumpcut') {
+    return value;
+  }
+  return 'funny_jumpcut';
+}
+
+export function buildGeminiSystemPrompt(
+  mode: 'single' | 'multi',
+  stylePreset: EditStylePreset = 'funny_jumpcut',
+  customInstruction?: string
+): string {
+  const preset =
+    EDIT_STYLE_PRESETS.find((p) => p.id === normalizeStylePreset(stylePreset)) ??
+    EDIT_STYLE_PRESETS[0];
+
+  const cleanInstruction = typeof customInstruction === 'string' ? customInstruction.trim() : '';
+
+  const intro =
+    mode === 'multi'
+      ? `Eres un editor de vídeo experto en contenido vertical (Reels/TikTok/Shorts). Recibirás MÚLTIPLES vídeos brutos etiquetados como "Clip 0", "Clip 1", "Clip 2", etc.
+Tu objetivo es mezclar y ordenar los mejores momentos de todos los clips proporcionados para construir UNA SOLA historia coherente y dinámica.`
+      : `Eres un editor de vídeo experto en contenido vertical (Reels/TikTok/Shorts). Tu objetivo es transformar un vídeo bruto en una pieza vertical ágil y atractiva.`;
+
+  const technicalRules =
+    mode === 'multi'
+      ? `Reglas técnicas obligatorias:
+1. Puedes alternar libremente entre los distintos clips en el orden narrativo más efectivo.
+2. En cada elemento de "cortes" indica obligatoriamente "clip_index" (entero 0, 1, 2... correspondiente al Clip de origen), además de "start_sec", "end_sec" y "motivo".
+3. Los timestamps start_sec y end_sec deben ser precisos al decimal para que no se corten palabras a medias y estar dentro de la duración del clip correspondiente.
+4. Genera una etiqueta corta de 1 palabra en mayúsculas sin tildes que identifique el contenido (ej: COCINA, VLOG, RECETA, FAIL, COCHE, VIAJE).
+5. Respeta estrictamente el esquema JSON solicitado.`
+      : `Reglas técnicas obligatorias:
+1. Usa siempre "clip_index": 0 en cada corte.
+2. Los timestamps start_sec y end_sec deben ser precisos al decimal para que no se corten palabras a medias.
+3. Genera una etiqueta corta de 1 palabra en mayúsculas sin tildes que identifique el contenido (ej: COCINA, VLOG, RECETA, FAIL, COCHE, VIAJE).
+4. Respeta estrictamente el esquema JSON solicitado.`;
+
+  const customBlock = cleanInstruction
+    ? `\n\nINSTRUCCIÓN PRIORITARIA DEL USUARIO (cúmplela con máxima prioridad manteniendo el esquema JSON):\n"${cleanInstruction}"`
+    : '';
+
+  return `${intro}\n\n${preset.promptDirectives}\n\n${technicalRules}${customBlock}`;
+}
+
+export interface ExportQualityProfile {
+  id: ExportQuality;
+  label: string;
+  shortLabel: string;
+  description: string;
+  width: number;
+  height: number;
+  fps: number;
+  preset: 'ultrafast' | 'veryfast';
+  crf: string;
+  audioBitrate: '128k' | '192k';
+}
+
+export const EXPORT_QUALITY_PROFILES: Record<ExportQuality, ExportQualityProfile> = {
+  mobile_fast: {
+    id: 'mobile_fast',
+    label: 'Rápido móvil — 720p',
+    shortLabel: '720p móvil',
+    description: '720×1280 · 30 fps · ultrafast · CRF 26 · AAC 128k (menos RAM en iPhone/móvil)',
+    width: 720,
+    height: 1280,
+    fps: 30,
+    preset: 'ultrafast',
+    crf: '26',
+    audioBitrate: '128k',
+  },
+  high_1080p: {
+    id: 'high_1080p',
+    label: 'Máxima calidad — 1080p',
+    shortLabel: '1080p HD',
+    description: '1080×1920 · 30 fps · veryfast · CRF 21 · AAC 192k (ideal para PC)',
+    width: 1080,
+    height: 1920,
+    fps: 30,
+    preset: 'veryfast',
+    crf: '21',
+    audioBitrate: '192k',
+  },
+};
+
+export function normalizeExportQuality(value?: unknown): ExportQuality {
+  return value === 'mobile_fast' ? 'mobile_fast' : 'high_1080p';
+}
+
+export function detectDefaultExportQuality(userAgent?: string, screenWidth?: number): ExportQuality {
+  const ua =
+    typeof userAgent === 'string'
+      ? userAgent
+      : typeof navigator !== 'undefined'
+      ? navigator.userAgent
+      : '';
+  const width =
+    typeof screenWidth === 'number'
+      ? screenWidth
+      : typeof window !== 'undefined'
+      ? window.innerWidth
+      : 1280;
+
+  if (/iPhone|iPad|iPod|Android|Mobile|CriOS|FxiOS/i.test(ua) || width < 768) {
+    return 'mobile_fast';
+  }
+  return 'high_1080p';
 }
 
 /**
@@ -279,13 +438,16 @@ export interface FfmpegFilterBuild {
 }
 
 /**
- * Single-clip FFmpeg filter_complex preserving original 9:16 video orientation.
+ * Single-clip FFmpeg filter_complex with quality-aware vertical scaling and encoding flags:
+ * - 'mobile_fast': 720x1280, 30fps, -preset ultrafast, -crf 26, AAC 128k
+ * - 'high_1080p': 1080x1920, 30fps, -preset veryfast, -crf 21, AAC 192k
  */
 export function buildFfmpegFilterComplex(
   cuts: VideoCut[],
   inputFileName = 'input.mp4',
   outputFileName = 'output.mp4',
-  hasAudio = true
+  hasAudio = true,
+  exportQuality: ExportQuality = 'high_1080p'
 ): FfmpegFilterBuild {
   const activeCuts = cuts
     .filter((cut) => cut.enabled && cut.end_sec > cut.start_sec)
@@ -295,15 +457,24 @@ export function buildFfmpegFilterComplex(
     throw new Error('Activa al menos un corte antes de renderizar el vídeo.');
   }
 
+  const profile = EXPORT_QUALITY_PROFILES[normalizeExportQuality(exportQuality)];
   const filterParts: string[] = [];
   const concatInputs: string[] = [];
 
   activeCuts.forEach((cut, idx) => {
     const start = cut.start_sec.toFixed(3);
     const end = cut.end_sec.toFixed(3);
-    filterParts.push(`[0:v]trim=start=${start}:end=${end},setpts=PTS-STARTPTS[v${idx}]`);
+    filterParts.push(
+      `[0:v]trim=start=${start}:end=${end},setpts=PTS-STARTPTS,` +
+        `scale=${profile.width}:${profile.height}:force_original_aspect_ratio=decrease,` +
+        `pad=${profile.width}:${profile.height}:(ow-iw)/2:(oh-ih)/2:black,` +
+        `fps=${profile.fps},format=yuv420p,setsar=1[v${idx}]`
+    );
     if (hasAudio) {
-      filterParts.push(`[0:a]atrim=start=${start}:end=${end},asetpts=PTS-STARTPTS[a${idx}]`);
+      filterParts.push(
+        `[0:a]atrim=start=${start}:end=${end},asetpts=PTS-STARTPTS,` +
+          `aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a${idx}]`
+      );
       concatInputs.push(`[v${idx}][a${idx}]`);
     } else {
       concatInputs.push(`[v${idx}]`);
@@ -329,12 +500,14 @@ export function buildFfmpegFilterComplex(
     '-c:v',
     'libx264',
     '-preset',
-    'veryfast',
+    profile.preset,
     '-crf',
-    '23',
+    profile.crf,
     '-pix_fmt',
     'yuv420p',
-    ...(hasAudio ? ['-c:a', 'aac', '-b:a', '128k'] : []),
+    '-r',
+    String(profile.fps),
+    ...(hasAudio ? ['-c:a', 'aac', '-b:a', profile.audioBitrate, '-ar', '48000'] : []),
     '-movflags',
     '+faststart',
     outputFileName,
@@ -349,13 +522,15 @@ export function buildFfmpegFilterComplex(
 
 /**
  * Multi-clip FFmpeg filter_complex referencing each input by `clip_index` and normalizing
- * all clips to 1080x1920 vertical, 30fps, yuv420p, and 48kHz stereo before concat.
+ * all clips according to `exportQuality` (720x1280 ultrafast or 1080x1920 high quality),
+ * 30fps, yuv420p, and 48kHz stereo before concat.
  */
 export function buildMultiClipFfmpegFilterComplex(
   cuts: VideoCut[],
   inputFileNames: string[],
   outputFileName = 'output.mp4',
-  includeAudio = true
+  includeAudio = true,
+  exportQuality: ExportQuality = 'high_1080p'
 ): FfmpegFilterBuild {
   if (inputFileNames.length === 0) {
     throw new Error('Se necesita al menos un archivo de entrada para renderizar.');
@@ -368,6 +543,7 @@ export function buildMultiClipFfmpegFilterComplex(
     throw new Error('Activa al menos un corte antes de renderizar el vídeo combinado.');
   }
 
+  const profile = EXPORT_QUALITY_PROFILES[normalizeExportQuality(exportQuality)];
   const inputArgs: string[] = [];
   for (const name of inputFileNames) {
     inputArgs.push('-i', name);
@@ -383,8 +559,9 @@ export function buildMultiClipFfmpegFilterComplex(
 
     filterParts.push(
       `[${clipIdx}:v]trim=start=${start}:end=${end},setpts=PTS-STARTPTS,` +
-        `scale=1080:1920:force_original_aspect_ratio=decrease,` +
-        `pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,fps=30,format=yuv420p,setsar=1[v${idx}]`
+        `scale=${profile.width}:${profile.height}:force_original_aspect_ratio=decrease,` +
+        `pad=${profile.width}:${profile.height}:(ow-iw)/2:(oh-ih)/2:black,` +
+        `fps=${profile.fps},format=yuv420p,setsar=1[v${idx}]`
     );
 
     if (includeAudio) {
@@ -416,14 +593,14 @@ export function buildMultiClipFfmpegFilterComplex(
     '-c:v',
     'libx264',
     '-preset',
-    'veryfast',
+    profile.preset,
     '-crf',
-    '23',
+    profile.crf,
     '-pix_fmt',
     'yuv420p',
     '-r',
-    '30',
-    ...(includeAudio ? ['-c:a', 'aac', '-b:a', '128k', '-ar', '48000'] : []),
+    String(profile.fps),
+    ...(includeAudio ? ['-c:a', 'aac', '-b:a', profile.audioBitrate, '-ar', '48000'] : []),
     '-movflags',
     '+faststart',
     outputFileName,

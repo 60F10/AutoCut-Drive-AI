@@ -1,10 +1,14 @@
 import { useMemo, useState } from 'react';
 import {
+  Cloud,
+  CloudDownload,
   CloudUpload,
   Download,
   ExternalLink,
   Film,
+  HardDrive,
   Layers,
+  Loader2,
   Scissors,
   Search,
   Sparkles,
@@ -21,16 +25,22 @@ import {
 
 interface GalleryViewProps {
   items: QueueItem[];
+  isDriveConnected: boolean;
+  restoringDriveId: string | null;
   onOpenStudio: (itemId: string) => void;
   onRequestDriveUpload: (itemId: string) => void;
+  onDownloadFromDrive: (itemId: string) => void;
   onLoadDemo: () => void;
   onGoToQueue: () => void;
 }
 
 export function GalleryView({
   items,
+  isDriveConnected,
+  restoringDriveId,
   onOpenStudio,
   onRequestDriveUpload,
+  onDownloadFromDrive,
   onLoadDemo,
   onGoToQueue,
 }: GalleryViewProps) {
@@ -79,15 +89,15 @@ export function GalleryView({
 
   if (completedItems.length === 0) {
     return (
-      <div className="rounded-xl border border-white/[0.08] bg-[#111419] px-6 py-16 text-center">
-        <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl border border-white/[0.08] bg-[#171B22] text-[#8B96A8]">
+      <div className="rounded-xl border border-white/10 bg-[#121216] px-6 py-16 text-center">
+        <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl border border-white/10 bg-[#18181f] text-[#8B96A8]">
           <Film className="h-5 w-5" />
         </div>
         <h2 className="mt-4 font-display text-lg font-semibold text-[#EDF1F7]">
           Aún no tienes resultados en la galería
         </h2>
         <p className="mx-auto mt-2 max-w-md text-sm text-[#8B96A8] leading-relaxed">
-          Cuando Gemini y FFmpeg.wasm terminen de editar tus clips individuales o combinados, aparecerán aquí listos para reproducir, descargar o subir a Drive.
+          Cuando Gemini y FFmpeg.wasm terminen de editar tus clips individuales o combinados, se guardarán en la caché local (IndexedDB) y aparecerán aquí listos para reproducir, descargar o subir a Drive.
         </p>
         <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
           <button
@@ -100,7 +110,7 @@ export function GalleryView({
           <button
             type="button"
             onClick={onLoadDemo}
-            className="inline-flex h-10 items-center gap-2 rounded-lg border border-white/[0.1] bg-[#171B22] px-4 text-sm font-medium text-[#EDF1F7] hover:bg-[#1F2530] transition-colors whitespace-nowrap"
+            className="inline-flex h-10 items-center gap-2 rounded-lg border border-white/10 bg-[#18181f] px-4 text-sm font-medium text-[#EDF1F7] hover:bg-[#22222b] transition-colors whitespace-nowrap"
           >
             <Sparkles className="h-4 w-4 text-[#F43F5E]" />
             Cargar sesión de ejemplo
@@ -117,7 +127,7 @@ export function GalleryView({
         <div
           role="tablist"
           aria-label="Filtrar galería por etiqueta"
-          className="flex flex-wrap items-center gap-1 rounded-lg border border-white/[0.08] bg-[#111419] p-1"
+          className="flex flex-wrap items-center gap-1 rounded-lg border border-white/10 bg-[#121216] p-1"
         >
           <button
             type="button"
@@ -161,14 +171,14 @@ export function GalleryView({
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Buscar resultado..."
             aria-label="Buscar vídeo en la galería"
-            className="h-9 w-full sm:w-60 rounded-lg border border-white/[0.09] bg-[#111419] pl-8 pr-3 text-xs text-[#EDF1F7] placeholder:text-[#687487] focus:border-[#E11D48] focus:outline-none"
+            className="h-9 w-full sm:w-60 rounded-lg border border-white/10 bg-[#121216] pl-8 pr-3 text-xs text-[#EDF1F7] placeholder:text-[#687487] focus:border-[#E11D48] focus:outline-none"
           />
         </div>
       </div>
 
       {/* Results Grid */}
       {filteredItems.length === 0 ? (
-        <div className="rounded-xl border border-white/[0.08] bg-[#111419] px-6 py-10 text-center text-sm text-[#8B96A8]">
+        <div className="rounded-xl border border-white/10 bg-[#121216] px-6 py-10 text-center text-sm text-[#8B96A8]">
           No hay resultados que coincidan con tu búsqueda.
         </div>
       ) : (
@@ -183,15 +193,25 @@ export function GalleryView({
               (item.isMultiClip
                 ? buildCombinedEditedFilename(item.projectName || item.originalName, plan.etiqueta)
                 : buildEditedFilename(item.originalName, plan.etiqueta));
+            const isDriveOnly =
+              !item.editedUrl && Boolean(item.uploadedDriveId || item.uploadedWebViewLink);
+            const isRestoring = restoringDriveId === item.id;
+            const displaySize = item.editedBlob?.size || item.editedSizeBytes || item.sizeBytes;
+            const qualityLabel =
+              item.exportQuality === 'mobile_fast'
+                ? '720×1280 · 30fps'
+                : item.isMultiClip
+                ? '1080×1920 · 30fps'
+                : '9:16 MP4 · H.264';
 
             return (
               <article
                 key={item.id}
                 data-testid={`gallery-card-${item.id}`}
-                className="flex flex-col overflow-hidden rounded-xl border border-white/[0.08] bg-[#111419]"
+                className="flex flex-col overflow-hidden rounded-xl border border-white/10 bg-[#121216]"
               >
                 {/* 9:16 Preview Area (Compact vertical showcase) */}
-                <div className="relative aspect-[9/11] w-full bg-[#07090C] border-b border-white/[0.08] overflow-hidden">
+                <div className="relative aspect-[9/11] w-full bg-[#07090C] border-b border-white/10 overflow-hidden">
                   {item.editedUrl ? (
                     <video
                       src={item.editedUrl}
@@ -199,17 +219,81 @@ export function GalleryView({
                       playsInline
                       className="h-full w-full object-contain bg-black"
                     />
-                  ) : (
-                    <div className="flex h-full w-full flex-col justify-between bg-gradient-to-b from-[#171C26] via-[#0E1117] to-[#080A0E] p-5">
+                  ) : isDriveOnly ? (
+                    <div className="flex h-full w-full flex-col justify-between bg-gradient-to-b from-[#141720] via-[#0d0e13] to-[#08080b] p-5">
                       <div className="flex items-center justify-between text-[11px] font-mono text-[#8B96A8]">
-                        <span>{item.isMultiClip ? '1080×1920 · 30fps' : '9:16 MP4 · H.264'}</span>
+                        <span className="inline-flex items-center gap-1.5 text-[#38BDF8]">
+                          <Cloud className="h-3.5 w-3.5" aria-hidden="true" />
+                          Solo en Google Drive
+                        </span>
                         <span className="tabular-nums text-[#F43F5E]">
                           {formatSeconds(finalSec)}
                         </span>
                       </div>
 
                       <div className="my-auto space-y-3 text-center px-2">
-                        <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-full border border-white/[0.12] bg-white/[0.04]">
+                        <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-full border border-[#38BDF8]/30 bg-[#38BDF8]/10 text-[#38BDF8]">
+                          <CloudDownload className="h-5 w-5" />
+                        </div>
+                        <p className="font-display text-sm font-semibold text-white leading-snug">
+                          {plan.titulo_interno}
+                        </p>
+                        <p className="text-xs text-[#8B96A8] leading-relaxed">
+                          El MP4 se liberó de la caché local del navegador pero sigue disponible en Google Drive.
+                        </p>
+                        <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+                          {item.uploadedDriveId && (
+                            <button
+                              type="button"
+                              onClick={() => onDownloadFromDrive(item.id)}
+                              disabled={isRestoring || !isDriveConnected}
+                              title={
+                                !isDriveConnected
+                                  ? 'Inicia sesión con Google Drive para descargar de nuevo el vídeo'
+                                  : undefined
+                              }
+                              className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#E11D48] px-3 text-xs font-medium text-white hover:bg-[#BE123C] disabled:opacity-45 transition-colors whitespace-nowrap"
+                            >
+                              {isRestoring ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              ) : (
+                                <CloudDownload className="h-3.5 w-3.5" />
+                              )}
+                              {isRestoring ? 'Descargando...' : 'Descargar desde Drive'}
+                            </button>
+                          )}
+                          {item.uploadedWebViewLink && (
+                            <a
+                              href={item.uploadedWebViewLink}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-white/10 bg-[#18181f] px-3 text-xs font-medium text-[#EDF1F7] hover:bg-[#22222b] transition-colors whitespace-nowrap"
+                            >
+                              <ExternalLink className="h-3.5 w-3.5 text-[#10B981]" />
+                              Abrir en Drive
+                            </a>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-between text-[11px] font-mono text-[#8B96A8] pt-3 border-t border-white/[0.06]">
+                        <span>{plan.cortes.filter((c) => c.enabled).length} cortes activos</span>
+                        <span className="text-[#10B981] tabular-nums">
+                          -{formatDurationHuman(savedSec)}
+                        </span>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex h-full w-full flex-col justify-between bg-gradient-to-b from-[#171820] via-[#101015] to-[#09090b] p-5">
+                      <div className="flex items-center justify-between text-[11px] font-mono text-[#8B96A8]">
+                        <span>{qualityLabel}</span>
+                        <span className="tabular-nums text-[#F43F5E]">
+                          {formatSeconds(finalSec)}
+                        </span>
+                      </div>
+
+                      <div className="my-auto space-y-3 text-center px-2">
+                        <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-full border border-white/15 bg-white/[0.04]">
                           {item.isMultiClip ? (
                             <Layers className="h-5 w-5 text-[#F43F5E]" />
                           ) : (
@@ -262,11 +346,19 @@ export function GalleryView({
                     {outputName}
                   </p>
 
-                  <div className="text-[11px] text-[#687487] font-mono tabular-nums">
-                    Ahorro: {formatDurationHuman(savedSec)} · {formatBytes(item.editedBlob?.size || item.sizeBytes)}
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-[#687487] font-mono tabular-nums">
+                    <span>
+                      Ahorro: {formatDurationHuman(savedSec)} · {formatBytes(displaySize)}
+                    </span>
+                    {item.cachedInIndexedDb && (
+                      <span className="inline-flex items-center gap-1 text-[#10B981]">
+                        <HardDrive className="h-3 w-3" aria-hidden="true" />
+                        Caché local
+                      </span>
+                    )}
                   </div>
 
-                  <div className="mt-auto pt-3 border-t border-white/[0.08] flex flex-wrap items-center gap-2">
+                  <div className="mt-auto pt-3 border-t border-white/10 flex flex-wrap items-center gap-2">
                     <button
                       type="button"
                       onClick={() => onOpenStudio(item.id)}
@@ -276,16 +368,46 @@ export function GalleryView({
                       Abrir estudio
                     </button>
 
-                    <button
-                      type="button"
-                      onClick={() => handleDownload(item)}
-                      disabled={!item.editedUrl}
-                      aria-label={`Descargar ${outputName}`}
-                      title={item.editedUrl ? 'Descargar MP4' : 'Solo disponible para vídeos renderizados'}
-                      className="inline-flex h-9 items-center justify-center rounded-lg border border-white/[0.1] bg-[#171B22] px-2.5 text-xs font-medium text-[#EDF1F7] hover:bg-[#1F2530] disabled:opacity-40 transition-colors"
-                    >
-                      <Download className="h-3.5 w-3.5" />
-                    </button>
+                    {item.editedUrl ? (
+                      <button
+                        type="button"
+                        onClick={() => handleDownload(item)}
+                        aria-label={`Descargar ${outputName}`}
+                        title="Descargar MP4"
+                        className="inline-flex h-9 items-center justify-center rounded-lg border border-white/10 bg-[#18181f] px-2.5 text-xs font-medium text-[#EDF1F7] hover:bg-[#22222b] transition-colors"
+                      >
+                        <Download className="h-3.5 w-3.5" />
+                      </button>
+                    ) : item.uploadedDriveId ? (
+                      <button
+                        type="button"
+                        onClick={() => onDownloadFromDrive(item.id)}
+                        disabled={isRestoring || !isDriveConnected}
+                        aria-label={`Recuperar ${outputName} desde Google Drive`}
+                        title={
+                          isDriveConnected
+                            ? 'Descargar desde Google Drive a caché local'
+                            : 'Conecta Google Drive para recuperar este vídeo'
+                        }
+                        className="inline-flex h-9 items-center justify-center rounded-lg border border-white/10 bg-[#18181f] px-2.5 text-xs font-medium text-[#38BDF8] hover:bg-[#22222b] disabled:opacity-40 transition-colors"
+                      >
+                        {isRestoring ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <CloudDownload className="h-3.5 w-3.5" />
+                        )}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled
+                        aria-label={`Descargar ${outputName}`}
+                        title="Solo disponible para vídeos renderizados"
+                        className="inline-flex h-9 items-center justify-center rounded-lg border border-white/10 bg-[#18181f] px-2.5 text-xs font-medium text-[#EDF1F7] opacity-40"
+                      >
+                        <Download className="h-3.5 w-3.5" />
+                      </button>
+                    )}
 
                     {item.uploadedWebViewLink ? (
                       <a
@@ -293,7 +415,8 @@ export function GalleryView({
                         target="_blank"
                         rel="noopener noreferrer"
                         aria-label={`Ver ${outputName} en Google Drive`}
-                        className="inline-flex h-9 items-center justify-center rounded-lg border border-white/[0.1] bg-[#171B22] px-2.5 text-xs font-medium text-[#10B981] hover:bg-[#1F2530] transition-colors"
+                        title="Abrir en Google Drive"
+                        className="inline-flex h-9 items-center justify-center rounded-lg border border-white/10 bg-[#18181f] px-2.5 text-xs font-medium text-[#10B981] hover:bg-[#22222b] transition-colors"
                       >
                         <ExternalLink className="h-3.5 w-3.5" />
                       </a>
@@ -303,7 +426,7 @@ export function GalleryView({
                         onClick={() => onRequestDriveUpload(item.id)}
                         aria-label={`Subir ${outputName} a Google Drive`}
                         title="Subir a Google Drive"
-                        className="inline-flex h-9 items-center justify-center rounded-lg border border-white/[0.1] bg-[#171B22] px-2.5 text-xs font-medium text-[#38BDF8] hover:bg-[#1F2530] transition-colors"
+                        className="inline-flex h-9 items-center justify-center rounded-lg border border-white/10 bg-[#18181f] px-2.5 text-xs font-medium text-[#38BDF8] hover:bg-[#22222b] transition-colors"
                       >
                         <CloudUpload className="h-3.5 w-3.5" />
                       </button>

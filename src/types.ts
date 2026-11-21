@@ -4,6 +4,10 @@ export type WatchIntervalSec = 30 | 60 | 300;
 
 export type ActiveView = 'queue' | 'gallery' | 'studio' | 'settings';
 
+export type EditStylePreset = 'funny_jumpcut' | 'agile_vlog' | 'express_summary';
+
+export type ExportQuality = 'mobile_fast' | 'high_1080p';
+
 export type QueueStage =
   | 'pending'
   | 'downloading'
@@ -19,6 +23,7 @@ export interface AppSettings {
   watchIntervalSec: WatchIntervalSec;
   autoWatchEnabled: boolean;
   autoUploadEnabled: boolean;
+  exportQuality: ExportQuality;
 }
 
 export interface DriveFileMeta {
@@ -76,11 +81,16 @@ export interface QueueItem {
   rawUrl?: string;
   editedBlob?: Blob;
   editedUrl?: string;
+  editedSizeBytes?: number;
+  cachedInIndexedDb?: boolean;
   outputFileName?: string;
   uploadedDriveId?: string;
   uploadedWebViewLink?: string;
   geminiFileCleaned?: boolean;
   analysis?: GeminiEditPlan;
+  stylePreset?: EditStylePreset;
+  customInstruction?: string;
+  exportQuality?: ExportQuality;
   isMultiClip?: boolean;
   projectName?: string;
   sourceClips?: SourceClipRef[];

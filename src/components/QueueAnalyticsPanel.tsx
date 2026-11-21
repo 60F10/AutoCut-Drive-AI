@@ -26,8 +26,8 @@ export function QueueAnalyticsPanel({ records }: QueueAnalyticsPanelProps) {
       className="grid grid-cols-1 xl:grid-cols-12 gap-5"
     >
       {/* Left: Recharts Bar Chart — Videos processed per day */}
-      <div className="xl:col-span-7 rounded-xl border border-white/[0.08] bg-[#111419] p-5 flex flex-col">
-        <div className="flex flex-wrap items-center justify-between gap-2 pb-4 border-b border-white/[0.08]">
+      <div className="xl:col-span-7 rounded-xl border border-white/10 bg-[#121216] p-5 flex flex-col">
+        <div className="flex flex-wrap items-center justify-between gap-2 pb-4 border-b border-white/10">
           <div className="flex items-center gap-2">
             <BarChart3 className="h-4 w-4 text-[#F43F5E]" aria-hidden="true" />
             <h2 className="font-display text-sm font-semibold text-[#EDF1F7]">
@@ -45,7 +45,7 @@ export function QueueAnalyticsPanel({ records }: QueueAnalyticsPanelProps) {
 
         <div className="mt-4 h-[190px] w-full min-w-0">
           {summary.totalProcessed === 0 ? (
-            <div className="flex h-full items-center justify-center rounded-lg border border-dashed border-white/[0.08] bg-[#0B0E12] px-4 text-center text-xs text-[#687487]">
+            <div className="flex h-full items-center justify-center rounded-lg border border-dashed border-white/10 bg-[#09090b] px-4 text-center text-xs text-[#687487]">
               Procesa un vídeo o carga la sesión de ejemplo para ver tu actividad diaria de cortes.
             </div>
           ) : (
@@ -92,9 +92,9 @@ export function QueueAnalyticsPanel({ records }: QueueAnalyticsPanelProps) {
       </div>
 
       {/* Right: Saved Footage Time + Gemini Tag Breakdown */}
-      <div className="xl:col-span-5 rounded-xl border border-white/[0.08] bg-[#111419] p-5 flex flex-col justify-between gap-5">
+      <div className="xl:col-span-5 rounded-xl border border-white/10 bg-[#121216] p-5 flex flex-col justify-between gap-5">
         {/* Saved Time Block */}
-        <div className="pb-4 border-b border-white/[0.08]">
+        <div className="pb-4 border-b border-white/10">
           <div className="flex items-center gap-2 text-xs text-[#8B96A8]">
             <Clock className="h-3.5 w-3.5 text-[#10B981]" aria-hidden="true" />
             <span>Metraje ahorrado gracias a los cortes</span>

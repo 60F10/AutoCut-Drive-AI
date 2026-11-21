@@ -1,7 +1,8 @@
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile, toBlobURL } from '@ffmpeg/util';
-import type { VideoCut } from '../types';
+import type { ExportQuality, VideoCut } from '../types';
 import {
+  EXPORT_QUALITY_PROFILES,
   buildFfmpegFilterComplex,
   buildMultiClipFfmpegFilterComplex,
   getExtension,
@@ -88,9 +89,11 @@ export async function renderCutsWithFfmpeg(
   sourceBlob: Blob,
   originalFileName: string,
   cuts: VideoCut[],
-  onProgress?: (progress: RenderProgress) => void
+  onProgress?: (progress: RenderProgress) => void,
+  exportQuality: ExportQuality = 'high_1080p'
 ): Promise<Blob> {
   const ffmpeg = await getLoadedFfmpeg((msg) => onProgress?.({ percent: 5, message: msg }));
+  const profile = EXPORT_QUALITY_PROFILES[exportQuality];
 
   const ext = getExtension(originalFileName) || '.mp4';
   const inputName = `input${ext}`;
@@ -100,7 +103,7 @@ export async function renderCutsWithFfmpeg(
     const pct = Math.max(10, Math.min(98, Math.round(progress * 100)));
     onProgress?.({
       percent: pct,
-      message: `Renderizando cortes en navegador (${pct}%)...`,
+      message: `Renderizando cortes en ${profile.width}×${profile.height} (${pct}%)...`,
     });
   };
 
@@ -112,10 +115,16 @@ export async function renderCutsWithFfmpeg(
 
     let exitCode = 0;
     try {
-      const { args, activeCount } = buildFfmpegFilterComplex(cuts, inputName, outputName, true);
+      const { args, activeCount } = buildFfmpegFilterComplex(
+        cuts,
+        inputName,
+        outputName,
+        true,
+        exportQuality
+      );
       onProgress?.({
         percent: 12,
-        message: `Uniendo ${activeCount} cortes (H.264 + AAC)...`,
+        message: `Uniendo ${activeCount} cortes (${profile.shortLabel} · ${profile.preset})...`,
       });
       exitCode = await ffmpeg.exec(args);
     } catch {
@@ -123,10 +132,16 @@ export async function renderCutsWithFfmpeg(
     }
 
     if (exitCode !== 0) {
-      const { args, activeCount } = buildFfmpegFilterComplex(cuts, inputName, outputName, false);
+      const { args, activeCount } = buildFfmpegFilterComplex(
+        cuts,
+        inputName,
+        outputName,
+        false,
+        exportQuality
+      );
       onProgress?.({
         percent: 18,
-        message: `Sin pista de audio detectada: uniendo ${activeCount} cortes de vídeo...`,
+        message: `Sin pista de audio detectada: uniendo ${activeCount} cortes (${profile.shortLabel})...`,
       });
       const fallbackCode = await ffmpeg.exec(args);
       if (fallbackCode !== 0) {
@@ -161,9 +176,11 @@ export interface MultiClipFfmpegSource {
 export async function renderMultiClipCutsWithFfmpeg(
   sources: MultiClipFfmpegSource[],
   cuts: VideoCut[],
-  onProgress?: (progress: RenderProgress) => void
+  onProgress?: (progress: RenderProgress) => void,
+  exportQuality: ExportQuality = 'high_1080p'
 ): Promise<Blob> {
   const ffmpeg = await getLoadedFfmpeg((msg) => onProgress?.({ percent: 4, message: msg }));
+  const profile = EXPORT_QUALITY_PROFILES[exportQuality];
 
   const inputNames: string[] = [];
   const outputName = 'combined_output.mp4';
@@ -172,7 +189,7 @@ export async function renderMultiClipCutsWithFfmpeg(
     const pct = Math.max(15, Math.min(98, Math.round(progress * 100)));
     onProgress?.({
       percent: pct,
-      message: `Normalizando 1080x1920 y uniendo clips (${pct}%)...`,
+      message: `Normalizando ${profile.width}×${profile.height} y uniendo clips (${pct}%)...`,
     });
   };
 
@@ -196,11 +213,12 @@ export async function renderMultiClipCutsWithFfmpeg(
         cuts,
         inputNames,
         outputName,
-        true
+        true,
+        exportQuality
       );
       onProgress?.({
         percent: 16,
-        message: `Renderizando ${activeCount} cortes de ${sources.length} clips (1080×1920 · 30fps)...`,
+        message: `Renderizando ${activeCount} cortes de ${sources.length} clips (${profile.width}×${profile.height} · ${profile.preset})...`,
       });
       exitCode = await ffmpeg.exec(args);
     } catch {
@@ -212,16 +230,17 @@ export async function renderMultiClipCutsWithFfmpeg(
         cuts,
         inputNames,
         outputName,
-        false
+        false,
+        exportQuality
       );
       onProgress?.({
         percent: 22,
-        message: `Algún clip sin pista de audio: uniendo ${activeCount} cortes de vídeo (1080×1920)...`,
+        message: `Algún clip sin pista de audio: uniendo ${activeCount} cortes (${profile.width}×${profile.height})...`,
       });
       const fallbackCode = await ffmpeg.exec(args);
       if (fallbackCode !== 0) {
         throw new Error(
-          'FFmpeg.wasm no pudo combinar estos clips. Si pesan más de 200 MB en móvil, prueba con menos clips o en 1080p.'
+          'FFmpeg.wasm no pudo combinar estos clips. En móvil, activa "Rápido móvil — 720p" o reduce el peso total.'
         );
       }
     }

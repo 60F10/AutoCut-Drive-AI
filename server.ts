@@ -5,31 +5,13 @@ import os from 'node:os';
 import path from 'node:path';
 import multer from 'multer';
 import { GoogleGenAI, Type, createPartFromUri } from '@google/genai';
+import {
+  buildGeminiSystemPrompt,
+  normalizeStylePreset,
+} from './src/utils/videoPipeline';
 
 const PORT = Number(process.env.PORT) || 3000;
 const ALLOWED_MODELS = new Set(['gemini-2.5-flash', 'gemini-2.5-pro']);
-
-const SINGLE_CLIP_SYSTEM_PROMPT = `Eres un editor de vídeo experto en contenido vertical (Reels/TikTok/Shorts) de estilo natural, dinámico y gracioso. Tu objetivo es transformar un vídeo bruto en una pieza ágil mediante cortes secos (jump cuts), eliminando TODOS los silencios, pausas muertas, tiempos de espera y partes aburridas.
-Reglas de edición:
-
-Mantén una narrativa clara: inicio rápido con gancho -> desarrollo con el momento cómico, improviso o problema/fail cotidiano -> remate final gracioso o reacción.
-
-Prioriza frases espontáneas, quejas cómicas, risas, gestos expresivos y acciones clave visuales.
-
-Duración adaptativa: si el bruto dura menos de 2-3 minutos, apunta a un vídeo final de unos 30 segundos. Si el bruto es más largo (3 a 10 minutos), apunta a unos 45-60 segundos.
-
-Los cortes deben ser precisos al decimal para que no se corten palabras a medias.
-
-Genera una etiqueta corta de 1 palabra en mayúsculas sin tildes que identifique el contenido (ej: COCINA, VLOG, RECETA, FAIL, COCHE, VIAJE).`;
-
-const MULTI_CLIP_SYSTEM_PROMPT = `Eres un editor de vídeo experto en contenido vertical (Reels/TikTok/Shorts) de estilo natural, dinámico y gracioso. Recibirás MÚLTIPLES vídeos brutos etiquetados como "Clip 0", "Clip 1", "Clip 2", etc.
-Tu objetivo es mezclar y ordenar los mejores momentos de todos los clips proporcionados para construir UNA SOLA historia coherente, graciosa y con ritmo jump-cut (30 a 60 segundos), eliminando TODOS los silencios, pausas muertas, tiempos de espera y partes aburridas.
-
-Reglas de edición Multi-Clip:
-1. Puedes alternar libremente entre los distintos clips en el orden narrativo que resulte más gracioso e impactante: gancho inicial fuerte -> desarrollo dinámico combinando tomas -> remate final cómico o reacción.
-2. En cada elemento de "cortes" indica obligatoriamente "clip_index" (entero 0, 1, 2... correspondiente al Clip de origen), además de "start_sec", "end_sec" y "motivo".
-3. Los timestamps start_sec y end_sec deben ser precisos al decimal para no cortar palabras a medias y estar siempre dentro de la duración del clip indicado por clip_index.
-4. Genera una etiqueta corta de 1 palabra en mayúsculas sin tildes que identifique el tema general (ej: COCINA, VLOG, RECETA, FAIL, COCHE, VIAJE).`;
 
 const uploadDir = path.join(os.tmpdir(), 'autocut-drive-ai-uploads');
 fs.mkdirSync(uploadDir, { recursive: true });
@@ -164,6 +146,11 @@ async function startServer() {
 
     const requestedModel = typeof req.body?.model === 'string' ? req.body.model : 'gemini-2.5-flash';
     const model = ALLOWED_MODELS.has(requestedModel) ? requestedModel : 'gemini-2.5-flash';
+    const stylePreset = normalizeStylePreset(req.body?.stylePreset);
+    const customInstruction =
+      typeof req.body?.customInstruction === 'string'
+        ? req.body.customInstruction.trim().slice(0, 400)
+        : '';
     const durationSec = Number(req.body?.durationSec) || 0;
     const originalName = typeof req.body?.fileName === 'string' ? req.body.fileName : tempFile.originalname;
     const mimeType =
@@ -225,9 +212,15 @@ async function startServer() {
           ? `La duración total aproximada del vídeo bruto es de ${durationSec.toFixed(1)} segundos.`
           : 'Analiza la duración real del vídeo adjunto.';
 
+      const instructionNote = customInstruction
+        ? `\nInstrucción rápida adicional del usuario: "${customInstruction}".`
+        : '';
+
       const userPrompt = `Analiza este vídeo bruto (Clip 0: "${originalName}"). ${durationHint}
 Usa siempre "clip_index": 0 en cada corte.
-Selecciona los mejores momentos para crear un vídeo corto vertical súper ágil mediante jump cuts, eliminando todos los silencios, pausas muertas y tiempos de espera.`;
+Selecciona los mejores momentos siguiendo el estilo indicado en las instrucciones del sistema y respetando estrictamente el esquema JSON.${instructionNote}`;
+
+      const systemInstruction = buildGeminiSystemPrompt('single', stylePreset, customInstruction);
 
       const response = await ai.models.generateContent({
         model,
@@ -236,7 +229,7 @@ Selecciona los mejores momentos para crear un vídeo corto vertical súper ágil
           userPrompt,
         ],
         config: {
-          systemInstruction: SINGLE_CLIP_SYSTEM_PROMPT,
+          systemInstruction,
           responseMimeType: 'application/json',
           responseSchema: CUT_RESPONSE_SCHEMA,
         },
@@ -307,6 +300,11 @@ Selecciona los mejores momentos para crear un vídeo corto vertical súper ágil
 
     const requestedModel = typeof req.body?.model === 'string' ? req.body.model : 'gemini-2.5-flash';
     const model = ALLOWED_MODELS.has(requestedModel) ? requestedModel : 'gemini-2.5-flash';
+    const stylePreset = normalizeStylePreset(req.body?.stylePreset);
+    const customInstruction =
+      typeof req.body?.customInstruction === 'string'
+        ? req.body.customInstruction.trim().slice(0, 400)
+        : '';
     const projectName = typeof req.body?.projectName === 'string' ? req.body.projectName.trim() : '';
 
     let clipMetadata: Array<{ name?: string; durationSec?: number }> = [];
@@ -414,17 +412,23 @@ Selecciona los mejores momentos para crear un vídeo corto vertical súper ágil
       }
 
       const projectContext = projectName ? `Nombre del proyecto: "${projectName}".\n` : '';
+      const instructionNote = customInstruction
+        ? `\nInstrucción rápida adicional del usuario: "${customInstruction}".`
+        : '';
+
       contentsParts.push(
         `${projectContext}Aquí tienes ${activeParts.length} vídeos brutos:\n${clipIndexSummary.join('\n')}\n\n` +
-          `Combina y ordena los mejores fragmentos de todos los clips para crear un único vídeo vertical (30-60 segundos) divertido, ágil y coherente con jump cuts. ` +
-          `Recuerda devolver "clip_index" (0 a ${activeParts.length - 1}), "start_sec", "end_sec" y "motivo" en cada corte.`
+          `Combina y ordena los mejores fragmentos de todos los clips siguiendo el estilo indicado en las instrucciones del sistema. ` +
+          `Recuerda devolver "clip_index" (0 a ${activeParts.length - 1}), "start_sec", "end_sec" y "motivo" en cada corte.${instructionNote}`
       );
+
+      const systemInstruction = buildGeminiSystemPrompt('multi', stylePreset, customInstruction);
 
       const response = await ai.models.generateContent({
         model,
         contents: contentsParts,
         config: {
-          systemInstruction: MULTI_CLIP_SYSTEM_PROMPT,
+          systemInstruction,
           responseMimeType: 'application/json',
           responseSchema: CUT_RESPONSE_SCHEMA,
         },

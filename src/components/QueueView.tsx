@@ -17,13 +17,20 @@ import {
   Upload,
   X,
 } from 'lucide-react';
-import type { AnalyticsRecord, QueueItem, QueueStage } from '../types';
+import type {
+  AnalyticsRecord,
+  EditStylePreset,
+  ExportQuality,
+  QueueItem,
+  QueueStage,
+} from '../types';
 import {
   exceedsMobileRamThreshold,
   formatBytes,
   formatSeconds,
 } from '../utils/videoPipeline';
 import { QueueAnalyticsPanel } from './QueueAnalyticsPanel';
+import { EditStyleControls } from './EditStyleControls';
 
 type StatusFilter = 'all' | 'pending' | 'active' | 'completed';
 
@@ -36,6 +43,12 @@ interface QueueViewProps {
   onOpenMultiClipComposer: () => void;
   onRemoveItem: (itemId: string) => void;
   onClearPending: () => void;
+  stylePreset: EditStylePreset;
+  onChangeStylePreset: (preset: EditStylePreset) => void;
+  customInstruction: string;
+  onChangeCustomInstruction: (value: string) => void;
+  exportQuality: ExportQuality;
+  onChangeExportQuality: (quality: ExportQuality) => void;
   alreadyEditedCount: number;
   lastScanTime: number | null;
   isScanning: boolean;
@@ -88,6 +101,12 @@ export function QueueView({
   onOpenMultiClipComposer,
   onRemoveItem,
   onClearPending,
+  stylePreset,
+  onChangeStylePreset,
+  customInstruction,
+  onChangeCustomInstruction,
+  exportQuality,
+  onChangeExportQuality,
   alreadyEditedCount,
   lastScanTime,
   isScanning,
@@ -181,27 +200,27 @@ export function QueueView({
       {/* Unboxed summary metrics row with symmetrical hairlines across 2x2 mobile and 4-col desktop */}
       <section
         aria-label="Resumen de la cola"
-        className="grid grid-cols-2 sm:grid-cols-4 gap-px overflow-hidden border border-white/[0.08] rounded-xl bg-white/[0.08]"
+        className="grid grid-cols-2 sm:grid-cols-4 gap-px overflow-hidden border border-white/10 rounded-xl bg-white/10"
       >
-        <div className="bg-[#111419] px-5 py-4">
+        <div className="bg-[#121216] px-4 sm:px-5 py-4">
           <p className="text-xs text-[#8B96A8]">Pendientes</p>
           <p className="mt-1 font-mono text-2xl font-semibold tabular-nums text-[#EDF1F7]">
             {counts.pending}
           </p>
         </div>
-        <div className="bg-[#111419] px-5 py-4">
+        <div className="bg-[#121216] px-4 sm:px-5 py-4">
           <p className="text-xs text-[#8B96A8]">En proceso</p>
           <p className="mt-1 font-mono text-2xl font-semibold tabular-nums text-[#F59E0B]">
             {counts.active}
           </p>
         </div>
-        <div className="bg-[#111419] px-5 py-4">
+        <div className="bg-[#121216] px-4 sm:px-5 py-4">
           <p className="text-xs text-[#8B96A8]">Completados</p>
           <p className="mt-1 font-mono text-2xl font-semibold tabular-nums text-[#10B981]">
             {counts.completed}
           </p>
         </div>
-        <div className="bg-[#111419] px-5 py-4">
+        <div className="bg-[#121216] px-4 sm:px-5 py-4">
           <p className="text-xs text-[#8B96A8]">Último escaneo</p>
           <p className="mt-1 font-mono text-base sm:text-lg font-medium tabular-nums text-[#C8D0DC] truncate">
             {lastScanFormatted}
@@ -213,6 +232,18 @@ export function QueueView({
           )}
         </div>
       </section>
+
+      {/* Style Presets, Quick Gemini Instruction & Quick Quality Toggle */}
+      <EditStyleControls
+        stylePreset={stylePreset}
+        onChangeStylePreset={onChangeStylePreset}
+        customInstruction={customInstruction}
+        onChangeCustomInstruction={onChangeCustomInstruction}
+        exportQuality={exportQuality}
+        onChangeExportQuality={onChangeExportQuality}
+        collapsible
+        defaultExpanded
+      />
 
       {/* Analytics Dashboard (Recharts daily videos, total saved footage, Gemini tags breakdown) */}
       <QueueAnalyticsPanel records={analyticsRecords} />
@@ -250,7 +281,7 @@ export function QueueView({
         <div
           role="tablist"
           aria-label="Filtrar cola por estado"
-          className="grid grid-cols-2 sm:inline-flex items-center gap-1 rounded-lg bg-[#111419] p-1 border border-white/[0.08] w-full sm:w-auto shrink-0"
+          className="grid grid-cols-2 sm:inline-flex items-center gap-1 rounded-lg bg-[#121216] p-1 border border-white/10 w-full sm:w-auto shrink-0"
         >
           {(
             [
@@ -348,8 +379,8 @@ export function QueueView({
 
       {/* Queue List or Empty State */}
       {items.length === 0 ? (
-        <div className="rounded-xl border border-white/[0.08] bg-[#111419] px-6 py-14 text-center">
-          <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl border border-white/[0.08] bg-[#171B22] text-[#8B96A8]">
+        <div className="rounded-xl border border-white/10 bg-[#121216] px-6 py-14 text-center">
+          <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl border border-white/10 bg-[#18181f] text-[#8B96A8]">
             <FolderOpen className="h-5 w-5" />
           </div>
           <h2 className="mt-4 font-display text-lg font-semibold text-[#EDF1F7]">
@@ -367,7 +398,7 @@ export function QueueView({
                 type="button"
                 onClick={onScanFolder}
                 disabled={isScanning}
-                className="inline-flex h-10 items-center gap-2 rounded-lg bg-[#E11D48] px-4 text-sm font-medium text-white hover:bg-[#BE123C] disabled:opacity-50 transition-colors whitespace-nowrap"
+                className="inline-flex h-11 items-center gap-2 rounded-lg bg-[#E11D48] px-4 text-sm font-medium text-white hover:bg-[#BE123C] disabled:opacity-50 transition-colors whitespace-nowrap"
               >
                 <RefreshCw className={`h-4 w-4 ${isScanning ? 'animate-spin' : ''}`} />
                 {isScanning ? 'Escaneando carpeta...' : 'Escanear carpeta ahora'}
@@ -376,7 +407,7 @@ export function QueueView({
               <button
                 type="button"
                 onClick={onGoToSettings}
-                className="inline-flex h-10 items-center gap-2 rounded-lg bg-[#E11D48] px-4 text-sm font-medium text-white hover:bg-[#BE123C] transition-colors whitespace-nowrap"
+                className="inline-flex h-11 items-center gap-2 rounded-lg bg-[#E11D48] px-4 text-sm font-medium text-white hover:bg-[#BE123C] transition-colors whitespace-nowrap"
               >
                 Configurar carpeta de Drive
               </button>
@@ -385,7 +416,7 @@ export function QueueView({
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              className="inline-flex h-10 items-center gap-2 rounded-lg border border-white/[0.12] bg-[#171B22] px-4 text-sm font-medium text-[#EDF1F7] hover:bg-[#1F2530] transition-colors whitespace-nowrap"
+              className="inline-flex h-11 items-center gap-2 rounded-lg border border-white/10 bg-[#18181f] px-4 text-sm font-medium text-[#EDF1F7] hover:bg-[#20202a] transition-colors whitespace-nowrap"
             >
               <Upload className="h-4 w-4" />
               Subir vídeos locales
@@ -394,7 +425,7 @@ export function QueueView({
             <button
               type="button"
               onClick={onLoadDemo}
-              className="inline-flex h-10 items-center gap-2 rounded-lg border border-white/[0.08] px-4 text-sm font-medium text-[#B8C2D1] hover:bg-white/[0.05] hover:text-white transition-colors whitespace-nowrap"
+              className="inline-flex h-11 items-center gap-2 rounded-lg border border-white/10 px-4 text-sm font-medium text-[#B8C2D1] hover:bg-white/[0.05] hover:text-white transition-colors whitespace-nowrap"
             >
               <Sparkles className="h-4 w-4 text-[#F43F5E]" />
               Cargar sesión de ejemplo
@@ -402,11 +433,11 @@ export function QueueView({
           </div>
         </div>
       ) : filteredItems.length === 0 ? (
-        <div className="rounded-xl border border-white/[0.08] bg-[#111419] px-6 py-10 text-center text-sm text-[#8B96A8]">
+        <div className="rounded-xl border border-white/10 bg-[#121216] px-6 py-10 text-center text-sm text-[#8B96A8]">
           No hay vídeos que coincidan con el filtro actual.
         </div>
       ) : (
-        <div className="overflow-hidden rounded-xl border border-white/[0.08] bg-[#111419] divide-y divide-white/[0.06]">
+        <div className="overflow-hidden rounded-xl border border-white/10 bg-[#121216] divide-y divide-white/[0.07]">
           {filteredItems.map((item) => {
             const stageIdx = STAGE_ORDER.indexOf(item.stage);
             const active = isActiveStage(item.stage);
@@ -637,11 +668,11 @@ export function QueueView({
         </div>
       )}
 
-      {/* Floating Multi-Clip Action Bar when >= 2 clips are selected */}
+      {/* Floating Multi-Clip Action Bar when >= 2 clips are selected (lifts cleanly above MobileBottomNav) */}
       {selectedIds.length >= 2 && (
         <div
           data-testid="multiclip-floating-bar"
-          className="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 flex items-center gap-3 rounded-xl border border-white/[0.14] bg-[#151921]/95 px-4 py-2.5 shadow-2xl backdrop-blur-md max-w-[calc(100vw-2rem)]"
+          className="fixed bottom-[calc(4.75rem+env(safe-area-inset-bottom,0px))] md:bottom-5 left-1/2 -translate-x-1/2 z-40 flex items-center gap-3 rounded-xl border border-white/15 bg-[#121216]/95 px-4 py-2.5 shadow-2xl backdrop-blur-xl max-w-[calc(100vw-2rem)]"
         >
           <span className="hidden sm:inline font-mono text-xs tabular-nums text-[#8B96A8] whitespace-nowrap">
             {formatBytes(selectedTotalBytes)}

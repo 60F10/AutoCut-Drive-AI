@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { User } from 'firebase/auth';
-import { AlertCircle, Menu, RefreshCw, X } from 'lucide-react';
+import { AlertCircle, RefreshCw, X } from 'lucide-react';
 import type {
   ActiveView,
   AnalyticsRecord,
   AppSettings,
+  EditStylePreset,
+  ExportQuality,
   PendingDriveUpload,
   QueueItem,
   SourceClipRef,
@@ -13,9 +15,12 @@ import {
   buildCombinedEditedFilename,
   buildEditedFilename,
   calculateSelectedDuration,
+  detectDefaultExportQuality,
   detectPendingVideos,
   extractDriveFolderId,
   isSupportedVideoFile,
+  normalizeExportQuality,
+  normalizeStylePreset,
   toLocalDateKey,
 } from './utils/videoPipeline';
 import { createDemoAnalyticsRecords, createDemoQueueItems } from './utils/demoData';
@@ -41,7 +46,17 @@ import {
   renderCutsWithFfmpeg,
   renderMultiClipCutsWithFfmpeg,
 } from './services/ffmpegService';
+import {
+  MAX_CACHED_VIDEOS,
+  clearAllEditedVideoBlobs,
+  deleteEditedVideoBlob,
+  getEditedVideoBlob,
+  getVideoCacheStats,
+  saveEditedVideoBlob,
+  type VideoCacheStats,
+} from './services/videoStorage';
 import { Sidebar } from './components/Sidebar';
+import { MobileBottomNav } from './components/MobileBottomNav';
 import { QueueView } from './components/QueueView';
 import { GalleryView } from './components/GalleryView';
 import { StudioView } from './components/StudioView';
@@ -52,19 +67,25 @@ import { OfflineIndicator } from './components/PWAInstallButton';
 
 const SETTINGS_STORAGE_KEY = 'autocut_drive_ai_settings_v1';
 const ANALYTICS_STORAGE_KEY = 'autocut_drive_ai_analytics_v1';
+const STYLE_PRESET_STORAGE_KEY = 'autocut_drive_ai_style_preset_v1';
+const GALLERY_ITEMS_STORAGE_KEY = 'autocut_drive_ai_gallery_items_v1';
 
-const DEFAULT_SETTINGS: AppSettings = {
-  folderId: '',
-  model: 'gemini-2.5-flash',
-  watchIntervalSec: 60,
-  autoWatchEnabled: false,
-  autoUploadEnabled: true,
-};
+function createDefaultSettings(): AppSettings {
+  return {
+    folderId: '',
+    model: 'gemini-2.5-flash',
+    watchIntervalSec: 60,
+    autoWatchEnabled: false,
+    autoUploadEnabled: true,
+    exportQuality: detectDefaultExportQuality(),
+  };
+}
 
 function loadInitialSettings(): AppSettings {
+  const defaults = createDefaultSettings();
   try {
     const raw = window.localStorage.getItem(SETTINGS_STORAGE_KEY);
-    if (!raw) return DEFAULT_SETTINGS;
+    if (!raw) return defaults;
     const parsed = JSON.parse(raw) as Partial<AppSettings>;
     const validModel =
       parsed.model === 'gemini-2.5-pro' ? 'gemini-2.5-pro' : 'gemini-2.5-flash';
@@ -74,15 +95,29 @@ function loadInitialSettings(): AppSettings {
       parsed.watchIntervalSec === 300
         ? parsed.watchIntervalSec
         : 60;
+    const validQuality =
+      parsed.exportQuality === 'mobile_fast' || parsed.exportQuality === 'high_1080p'
+        ? parsed.exportQuality
+        : defaults.exportQuality;
     return {
       folderId: extractDriveFolderId(String(parsed.folderId ?? '')),
       model: validModel,
       watchIntervalSec: validInterval,
       autoWatchEnabled: Boolean(parsed.autoWatchEnabled),
       autoUploadEnabled: parsed.autoUploadEnabled !== false,
+      exportQuality: normalizeExportQuality(validQuality),
     };
   } catch {
-    return DEFAULT_SETTINGS;
+    return defaults;
+  }
+}
+
+function loadInitialStylePreset(): EditStylePreset {
+  try {
+    const raw = window.localStorage.getItem(STYLE_PRESET_STORAGE_KEY);
+    return normalizeStylePreset(raw);
+  } catch {
+    return 'funny_jumpcut';
   }
 }
 
@@ -97,11 +132,53 @@ function loadInitialAnalytics(): AnalyticsRecord[] {
   }
 }
 
+function serializeCompletedItems(items: QueueItem[]): QueueItem[] {
+  return items
+    .filter((item) => item.stage === 'completed' && Boolean(item.analysis) && item.source !== 'demo')
+    .slice(0, 40)
+    .map((item) => ({
+      ...item,
+      rawBlob: undefined,
+      rawUrl: undefined,
+      editedBlob: undefined,
+      editedUrl: undefined,
+      sourceClips: item.sourceClips?.map((clip) => ({
+        ...clip,
+        rawBlob: undefined,
+        rawUrl: undefined,
+      })),
+    }));
+}
+
+function loadPersistedGalleryItems(): QueueItem[] {
+  try {
+    const raw = window.localStorage.getItem(GALLERY_ITEMS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return (parsed as QueueItem[]).filter(
+      (item) => item && typeof item.id === 'string' && Boolean(item.analysis)
+    );
+  } catch {
+    return [];
+  }
+}
+
 export default function App() {
   const [settings, setSettings] = useState<AppSettings>(loadInitialSettings);
+  const [stylePreset, setStylePreset] = useState<EditStylePreset>(loadInitialStylePreset);
+  const [customInstruction, setCustomInstruction] = useState('');
   const [analyticsRecords, setAnalyticsRecords] = useState<AnalyticsRecord[]>(loadInitialAnalytics);
   const [activeView, setActiveView] = useState<ActiveView>('queue');
-  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
+  // IndexedDB video cache stats & Drive recovery state
+  const [cacheStats, setCacheStats] = useState<VideoCacheStats>({
+    count: 0,
+    totalBytes: 0,
+    maxItems: MAX_CACHED_VIDEOS,
+  });
+  const [isClearingCache, setIsClearingCache] = useState(false);
+  const [restoringDriveId, setRestoringDriveId] = useState<string | null>(null);
 
   // Auth state (access token is kept strictly in memory via googleAuth.ts)
   const [user, setUser] = useState<User | null>(null);
@@ -109,8 +186,8 @@ export default function App() {
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [geminiConfigured, setGeminiConfigured] = useState(true);
 
-  // Queue, Multi-Clip Selection & Studio state
-  const [items, setItems] = useState<QueueItem[]>([]);
+  // Queue, Multi-Clip Selection & Studio state (initialized from persisted completed gallery items)
+  const [items, setItems] = useState<QueueItem[]>(loadPersistedGalleryItems);
   const [selectedForCombine, setSelectedForCombine] = useState<string[]>([]);
   const [multiClipModalOpen, setMultiClipModalOpen] = useState(false);
   const [alreadyEditedCount, setAlreadyEditedCount] = useState(0);
@@ -134,6 +211,69 @@ export default function App() {
 
   const itemsRef = useRef(items);
   itemsRef.current = items;
+
+  const refreshCacheStats = useCallback(async () => {
+    const stats = await getVideoCacheStats();
+    setCacheStats(stats);
+  }, []);
+
+  // Rehydrate cached MP4 Blobs from IndexedDB on startup so Gallery survives reloads
+  useEffect(() => {
+    let cancelled = false;
+    const initialPersisted = itemsRef.current.filter(
+      (item) => item.stage === 'completed' && !item.editedUrl && item.source !== 'demo'
+    );
+
+    const hydrate = async () => {
+      if (initialPersisted.length > 0) {
+        const hydratedPairs = await Promise.all(
+          initialPersisted.map(async (item) => {
+            const stored = await getEditedVideoBlob(item.id);
+            return { id: item.id, stored };
+          })
+        );
+
+        if (!cancelled) {
+          const map = new Map(hydratedPairs.map((pair) => [pair.id, pair.stored]));
+          setItems((prev) =>
+            prev.map((item) => {
+              if (!map.has(item.id)) return item;
+              const stored = map.get(item.id);
+              if (!stored?.blob) {
+                return { ...item, cachedInIndexedDb: false };
+              }
+              const blobUrl = URL.createObjectURL(stored.blob);
+              return {
+                ...item,
+                editedBlob: stored.blob,
+                editedUrl: blobUrl,
+                editedSizeBytes: stored.sizeBytes || stored.blob.size,
+                cachedInIndexedDb: true,
+              };
+            })
+          );
+        }
+      }
+      if (!cancelled) {
+        await refreshCacheStats();
+      }
+    };
+
+    hydrate();
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshCacheStats]);
+
+  // Persist completed real items' metadata to localStorage whenever items change
+  useEffect(() => {
+    try {
+      const serializable = serializeCompletedItems(items);
+      window.localStorage.setItem(GALLERY_ITEMS_STORAGE_KEY, JSON.stringify(serializable));
+    } catch {
+      // Ignore storage quota errors
+    }
+  }, [items]);
 
   useEffect(() => {
     const unsubscribe = initGoogleAuth(
@@ -160,6 +300,124 @@ export default function App() {
       // Ignore storage quota errors
     }
   }, []);
+
+  const handleChangeStylePreset = useCallback((next: EditStylePreset) => {
+    const normalized = normalizeStylePreset(next);
+    setStylePreset(normalized);
+    try {
+      window.localStorage.setItem(STYLE_PRESET_STORAGE_KEY, normalized);
+    } catch {
+      // Ignore storage quota errors
+    }
+  }, []);
+
+  const handleChangeExportQuality = useCallback(
+    (quality: ExportQuality) => {
+      persistSettings({
+        ...settings,
+        exportQuality: normalizeExportQuality(quality),
+      });
+    },
+    [settings, persistSettings]
+  );
+
+  const cacheEditedVideo = useCallback(
+    async (itemId: string, blob: Blob, fileName: string) => {
+      const { evictedIds } = await saveEditedVideoBlob(itemId, blob, fileName);
+      if (evictedIds.length > 0) {
+        const evictedSet = new Set(evictedIds);
+        setItems((prev) =>
+          prev.map((item) => {
+            if (!evictedSet.has(item.id)) return item;
+            if (item.editedUrl) URL.revokeObjectURL(item.editedUrl);
+            return {
+              ...item,
+              editedBlob: undefined,
+              editedUrl: undefined,
+              cachedInIndexedDb: false,
+            };
+          })
+        );
+      }
+      await refreshCacheStats();
+    },
+    [refreshCacheStats]
+  );
+
+  const handleClearVideoCache = useCallback(async () => {
+    setIsClearingCache(true);
+    try {
+      await clearAllEditedVideoBlobs();
+      setItems((prev) =>
+        prev.map((item) => {
+          if (!item.cachedInIndexedDb && !item.editedBlob) return item;
+          if (item.editedUrl) URL.revokeObjectURL(item.editedUrl);
+          return {
+            ...item,
+            editedBlob: undefined,
+            editedUrl: undefined,
+            cachedInIndexedDb: false,
+          };
+        })
+      );
+      await refreshCacheStats();
+    } finally {
+      setIsClearingCache(false);
+    }
+  }, [refreshCacheStats]);
+
+  const handleDownloadFromDrive = useCallback(
+    async (itemId: string) => {
+      const target = itemsRef.current.find((i) => i.id === itemId);
+      if (!target?.uploadedDriveId) return;
+
+      const token = accessToken || getCachedDriveToken();
+      if (!token) {
+        setBannerError('Inicia sesión con Google Drive para descargar este vídeo.');
+        return;
+      }
+
+      setBannerError(null);
+      setRestoringDriveId(itemId);
+      try {
+        const blob = await downloadDriveVideo(
+          target.uploadedDriveId,
+          token,
+          target.editedSizeBytes || target.sizeBytes
+        );
+        const editedUrl = URL.createObjectURL(blob);
+        const fileName = target.outputFileName || `${target.originalName}_EDITADO.mp4`;
+        setItems((prev) =>
+          prev.map((item) => {
+            if (item.id !== itemId) return item;
+            if (item.editedUrl) URL.revokeObjectURL(item.editedUrl);
+            return {
+              ...item,
+              editedBlob: blob,
+              editedUrl,
+              editedSizeBytes: blob.size,
+              cachedInIndexedDb: true,
+              lastUpdated: Date.now(),
+            };
+          })
+        );
+        await cacheEditedVideo(itemId, blob, fileName);
+      } catch (err) {
+        if (err instanceof DriveAuthExpiredError) {
+          setUser(null);
+          setAccessToken(null);
+        }
+        setBannerError(
+          err instanceof Error
+            ? err.message
+            : 'No se pudo recuperar el vídeo desde Google Drive.'
+        );
+      } finally {
+        setRestoringDriveId(null);
+      }
+    },
+    [accessToken, cacheEditedVideo]
+  );
 
   const appendAnalyticsRecord = useCallback((record: AnalyticsRecord) => {
     setAnalyticsRecords((prev) => {
@@ -356,15 +614,19 @@ export default function App() {
     });
   }, []);
 
-  const handleRemoveQueueItem = useCallback((itemId: string) => {
-    setItems((prev) => {
-      const found = prev.find((i) => i.id === itemId);
-      if (found?.rawUrl) URL.revokeObjectURL(found.rawUrl);
-      if (found?.editedUrl) URL.revokeObjectURL(found.editedUrl);
-      return prev.filter((i) => i.id !== itemId);
-    });
-    setSelectedForCombine((prev) => prev.filter((id) => id !== itemId));
-  }, []);
+  const handleRemoveQueueItem = useCallback(
+    (itemId: string) => {
+      setItems((prev) => {
+        const found = prev.find((i) => i.id === itemId);
+        if (found?.rawUrl) URL.revokeObjectURL(found.rawUrl);
+        if (found?.editedUrl) URL.revokeObjectURL(found.editedUrl);
+        return prev.filter((i) => i.id !== itemId);
+      });
+      setSelectedForCombine((prev) => prev.filter((id) => id !== itemId));
+      deleteEditedVideoBlob(itemId).then(() => refreshCacheStats());
+    },
+    [refreshCacheStats]
+  );
 
   const handleClearPending = useCallback(() => {
     const removedIds = new Set<string>();
@@ -468,17 +730,28 @@ export default function App() {
               stageDetail: message,
               progress,
             });
+          },
+          {
+            stylePreset,
+            customInstruction,
           }
         );
 
         const outputFileName = buildEditedFilename(target.originalName, plan.etiqueta);
+        const activeQuality = settings.exportQuality;
 
         updateQueueItem(itemId, {
           analysis: plan,
           outputFileName,
           geminiFileCleaned,
+          stylePreset,
+          customInstruction: customInstruction.trim() || undefined,
+          exportQuality: activeQuality,
           stage: 'rendering',
-          stageDetail: 'Iniciando FFmpeg.wasm single-thread...',
+          stageDetail:
+            activeQuality === 'mobile_fast'
+              ? 'Iniciando FFmpeg.wasm (720p rápido móvil)...'
+              : 'Iniciando FFmpeg.wasm (1080p HD)...',
           progress: 5,
         });
 
@@ -493,7 +766,8 @@ export default function App() {
               stageDetail: message,
               progress: percent,
             });
-          }
+          },
+          activeQuality
         );
 
         const editedUrl = URL.createObjectURL(editedBlob);
@@ -505,12 +779,16 @@ export default function App() {
         updateQueueItem(itemId, {
           editedBlob,
           editedUrl,
+          editedSizeBytes: editedBlob.size,
+          cachedInIndexedDb: true,
           outputFileName,
           stage: 'completed',
-          stageDetail: 'Renderizado completado y disponible en Galería y Estudio',
+          stageDetail: 'Renderizado y guardado en caché local (Galería y Estudio)',
           progress: 100,
           completedAt,
         });
+
+        await cacheEditedVideo(itemId, editedBlob, outputFileName);
 
         appendAnalyticsRecord({
           id: `ana-${itemId}-${completedAt}`,
@@ -560,14 +838,23 @@ export default function App() {
       settings.model,
       settings.folderId,
       settings.autoUploadEnabled,
+      settings.exportQuality,
+      stylePreset,
+      customInstruction,
       updateQueueItem,
+      cacheEditedVideo,
       appendAnalyticsRecord,
     ]
   );
 
   // Full Multi-Clip end-to-end pipeline
   const handleStartMultiClipCombine = useCallback(
-    async (orderedIds: string[], projectName: string) => {
+    async (
+      orderedIds: string[],
+      projectName: string,
+      chosenPreset: EditStylePreset,
+      chosenInstruction: string
+    ) => {
       const orderedItems = orderedIds
         .map((id) => itemsRef.current.find((i) => i.id === id))
         .filter((i): i is QueueItem => Boolean(i));
@@ -607,6 +894,7 @@ export default function App() {
       }));
 
       const totalSizeBytes = initialSourceClips.reduce((sum, c) => sum + c.sizeBytes, 0);
+      const activeQuality = settings.exportQuality;
 
       const combinedItem: QueueItem = {
         id: combinedId,
@@ -620,6 +908,9 @@ export default function App() {
         stageDetail: `Preparando ${orderedItems.length} clips para combinar...`,
         progress: 5,
         sourceClips: initialSourceClips,
+        stylePreset: chosenPreset,
+        customInstruction: chosenInstruction.trim() || undefined,
+        exportQuality: activeQuality,
         lastUpdated: Date.now(),
       };
 
@@ -705,6 +996,10 @@ export default function App() {
               stageDetail: message,
               progress,
             });
+          },
+          {
+            stylePreset: chosenPreset,
+            customInstruction: chosenInstruction,
           }
         );
 
@@ -715,11 +1010,14 @@ export default function App() {
           outputFileName,
           geminiFileCleaned,
           stage: 'rendering',
-          stageDetail: 'Normalizando clips a 1080×1920 (30fps) en FFmpeg.wasm...',
+          stageDetail:
+            activeQuality === 'mobile_fast'
+              ? 'Normalizando clips a 720×1280 (30fps · ultrafast) en FFmpeg.wasm...'
+              : 'Normalizando clips a 1080×1920 (30fps) en FFmpeg.wasm...',
           progress: 5,
         });
 
-        // 3. Render normalized 1080x1920 30fps combined MP4 in browser
+        // 3. Render normalized combined MP4 in browser
         const editedBlob = await renderMultiClipCutsWithFfmpeg(
           resolvedClips.map((c) => ({
             blob: c.rawBlob!,
@@ -732,7 +1030,8 @@ export default function App() {
               stageDetail: message,
               progress: percent,
             });
-          }
+          },
+          activeQuality
         );
 
         const editedUrl = URL.createObjectURL(editedBlob);
@@ -741,12 +1040,16 @@ export default function App() {
         updateQueueItem(combinedId, {
           editedBlob,
           editedUrl,
+          editedSizeBytes: editedBlob.size,
+          cachedInIndexedDb: true,
           outputFileName,
           stage: 'completed',
           stageDetail: `Combinado con ${plan.cortes.length} cortes de ${resolvedClips.length} brutos`,
           progress: 100,
           completedAt,
         });
+
+        await cacheEditedVideo(combinedId, editedBlob, outputFileName);
 
         appendAnalyticsRecord({
           id: `ana-${combinedId}`,
@@ -795,7 +1098,9 @@ export default function App() {
       settings.model,
       settings.folderId,
       settings.autoUploadEnabled,
+      settings.exportQuality,
       updateQueueItem,
+      cacheEditedVideo,
       appendAnalyticsRecord,
     ]
   );
@@ -873,9 +1178,14 @@ export default function App() {
       setStudioRenderProgress({ percent: 5, message: 'Preparando re-renderizado...' });
 
       try {
+        const activeQuality = settings.exportQuality;
         updateQueueItem(itemId, {
+          exportQuality: activeQuality,
           stage: 'rendering',
-          stageDetail: 'Re-renderizando cortes seleccionados...',
+          stageDetail:
+            activeQuality === 'mobile_fast'
+              ? 'Re-renderizando cortes en 720p móvil...'
+              : 'Re-renderizando cortes en 1080p HD...',
           progress: 5,
         });
 
@@ -893,7 +1203,8 @@ export default function App() {
                   stageDetail: progress.message,
                   progress: progress.percent,
                 });
-              }
+              },
+              activeQuality
             )
           : await renderCutsWithFfmpeg(
               target.rawBlob!,
@@ -906,7 +1217,8 @@ export default function App() {
                   stageDetail: progress.message,
                   progress: progress.percent,
                 });
-              }
+              },
+              activeQuality
             );
 
         const editedUrl = URL.createObjectURL(editedBlob);
@@ -914,13 +1226,19 @@ export default function App() {
           URL.revokeObjectURL(target.editedUrl);
         }
 
+        const fileName = target.outputFileName || `${target.originalName}_EDITADO.mp4`;
+
         updateQueueItem(itemId, {
           editedBlob,
           editedUrl,
+          editedSizeBytes: editedBlob.size,
+          cachedInIndexedDb: true,
           stage: 'completed',
-          stageDetail: 'Nuevo render listo para previsualizar o subir a Drive',
+          stageDetail: 'Nuevo render guardado en caché local y listo para subir a Drive',
           progress: 100,
         });
+
+        await cacheEditedVideo(itemId, editedBlob, fileName);
       } catch (err) {
         const message =
           err instanceof Error ? err.message : 'Error al re-renderizar los cortes.';
@@ -934,7 +1252,7 @@ export default function App() {
         setStudioRenderProgress(null);
       }
     },
-    [updateQueueItem]
+    [settings.exportQuality, updateQueueItem, cacheEditedVideo]
   );
 
   const handleRequestDriveUpload = useCallback(
@@ -1064,7 +1382,7 @@ export default function App() {
       : 'Ajustes';
 
   return (
-    <div className="min-h-screen bg-[#090B0E] text-[#EDF1F7] flex">
+    <div className="min-h-dvh-app bg-[#09090b] text-[#EDF1F7] flex">
       <Sidebar
         activeView={activeView}
         onSelectView={setActiveView}
@@ -1076,23 +1394,12 @@ export default function App() {
         isLoggingIn={isLoggingIn}
         onGoogleLogin={handleGoogleLogin}
         onGoogleLogout={handleGoogleLogout}
-        mobileOpen={mobileMenuOpen}
-        onCloseMobile={() => setMobileMenuOpen(false)}
       />
 
       <div className="flex-1 min-w-0 flex flex-col">
-        {/* Top Bar Contract: Breadcrumb on left + 1 Primary Action on right */}
-        <header className="sticky top-0 z-30 flex h-16 items-center justify-between gap-4 border-b border-white/[0.08] bg-[#090B0E]/95 px-4 sm:px-8 backdrop-blur-sm">
-          <div className="flex items-center gap-3 min-w-0">
-            <button
-              type="button"
-              onClick={() => setMobileMenuOpen(true)}
-              aria-label="Abrir menú de navegación"
-              className="lg:hidden flex h-9 w-9 items-center justify-center rounded-lg border border-white/[0.1] text-[#C8D0DC] hover:bg-white/[0.06] transition-colors shrink-0"
-            >
-              <Menu className="h-4 w-4" />
-            </button>
-
+        {/* Top Bar with iOS Safe Area Top Padding (never hides behind Dynamic Island / status bar) */}
+        <header className="sticky top-0 z-30 border-b border-white/10 bg-[#09090b]/90 backdrop-blur-xl pt-safe px-safe">
+          <div className="flex h-14 sm:h-16 items-center justify-between gap-3 px-4 sm:px-8">
             <div className="flex items-center gap-2 text-sm min-w-0">
               <span className="hidden sm:inline text-[#687487] whitespace-nowrap">
                 AutoCut Drive AI
@@ -1104,23 +1411,23 @@ export default function App() {
                 {viewTitle}
               </h1>
             </div>
-          </div>
 
-          <div className="flex items-center gap-3 shrink-0">
-            <button
-              type="button"
-              onClick={handleScanFolder}
-              disabled={isScanning}
-              className="inline-flex h-9 items-center gap-2 rounded-lg bg-[#E11D48] px-4 text-xs font-medium text-white hover:bg-[#BE123C] disabled:opacity-50 transition-colors whitespace-nowrap shrink-0"
-            >
-              <RefreshCw className={`h-3.5 w-3.5 ${isScanning ? 'animate-spin' : ''}`} />
-              {isScanning ? 'Escaneando...' : 'Escanear carpeta'}
-            </button>
+            <div className="flex items-center gap-2.5 shrink-0">
+              <button
+                type="button"
+                onClick={handleScanFolder}
+                disabled={isScanning}
+                className="inline-flex h-9 items-center gap-2 rounded-lg bg-[#E11D48] px-3.5 sm:px-4 text-xs font-medium text-white hover:bg-[#BE123C] disabled:opacity-50 transition-colors whitespace-nowrap shrink-0"
+              >
+                <RefreshCw className={`h-3.5 w-3.5 ${isScanning ? 'animate-spin' : ''}`} />
+                {isScanning ? 'Escaneando...' : 'Escanear carpeta'}
+              </button>
+            </div>
           </div>
         </header>
 
         {/* Main Content */}
-        <main className="flex-1 px-4 py-6 sm:px-8 sm:py-7 max-w-[1280px] w-full mx-auto space-y-5">
+        <main className="flex-1 px-4 py-5 sm:px-8 sm:py-7 pb-mobile-nav md:pb-8 max-w-[1280px] w-full mx-auto space-y-5">
           {bannerError && (
             <div
               role="alert"
@@ -1151,6 +1458,12 @@ export default function App() {
               onOpenMultiClipComposer={() => setMultiClipModalOpen(true)}
               onRemoveItem={handleRemoveQueueItem}
               onClearPending={handleClearPending}
+              stylePreset={stylePreset}
+              onChangeStylePreset={handleChangeStylePreset}
+              customInstruction={customInstruction}
+              onChangeCustomInstruction={setCustomInstruction}
+              exportQuality={settings.exportQuality}
+              onChangeExportQuality={handleChangeExportQuality}
               alreadyEditedCount={alreadyEditedCount}
               lastScanTime={lastScanTime}
               isScanning={isScanning}
@@ -1173,11 +1486,14 @@ export default function App() {
           {activeView === 'gallery' && (
             <GalleryView
               items={items}
+              isDriveConnected={Boolean(user && accessToken)}
+              restoringDriveId={restoringDriveId}
               onOpenStudio={(id) => {
                 setSelectedStudioId(id);
                 setActiveView('studio');
               }}
               onRequestDriveUpload={handleRequestDriveUpload}
+              onDownloadFromDrive={handleDownloadFromDrive}
               onLoadDemo={handleLoadDemo}
               onGoToQueue={() => setActiveView('queue')}
             />
@@ -1192,6 +1508,8 @@ export default function App() {
               onSelectAllCuts={handleSelectAllCuts}
               onRerenderItem={handleRerenderItem}
               onRequestDriveUpload={handleRequestDriveUpload}
+              exportQuality={settings.exportQuality}
+              onChangeExportQuality={handleChangeExportQuality}
               isRendering={isStudioRendering}
               renderProgress={studioRenderProgress}
               canUploadToDrive={Boolean(user && accessToken && settings.folderId)}
@@ -1203,20 +1521,36 @@ export default function App() {
             <SettingsView
               settings={settings}
               onSaveSettings={persistSettings}
-              onResetSettings={() => persistSettings(DEFAULT_SETTINGS)}
+              onResetSettings={() => persistSettings(createDefaultSettings())}
               user={user}
               isLoggingIn={isLoggingIn}
               onGoogleLogin={handleGoogleLogin}
               onGoogleLogout={handleGoogleLogout}
               geminiConfigured={geminiConfigured}
+              cacheStats={cacheStats}
+              isClearingCache={isClearingCache}
+              onClearVideoCache={handleClearVideoCache}
             />
           )}
         </main>
       </div>
 
+      {/* Fixed iOS/Mobile Bottom Tab Bar (< md) */}
+      <MobileBottomNav
+        activeView={activeView}
+        onSelectView={setActiveView}
+        queueCounts={queueCounts}
+      />
+
       <MultiClipComposerModal
         open={multiClipModalOpen}
         selectedItems={selectedCombineItems}
+        stylePreset={stylePreset}
+        onChangeStylePreset={handleChangeStylePreset}
+        customInstruction={customInstruction}
+        onChangeCustomInstruction={setCustomInstruction}
+        exportQuality={settings.exportQuality}
+        onChangeExportQuality={handleChangeExportQuality}
         onClose={() => setMultiClipModalOpen(false)}
         onStartCombine={handleStartMultiClipCombine}
         isProcessing={isProcessingAny}

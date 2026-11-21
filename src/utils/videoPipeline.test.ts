@@ -1,19 +1,23 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  EDIT_STYLE_PRESETS,
   MOBILE_RAM_WARNING_BYTES,
   buildCombinedEditedFilename,
   buildEditedFilename,
   buildFfmpegFilterComplex,
+  buildGeminiSystemPrompt,
   buildMultiClipFfmpegFilterComplex,
   calculateSelectedDuration,
   computeQueueAnalytics,
+  detectDefaultExportQuality,
   detectPendingVideos,
   exceedsMobileRamThreshold,
   extractDriveFolderId,
   formatBytes,
   formatDurationHuman,
   formatSeconds,
+  normalizeStylePreset,
   parseGeminiEditPlan,
   sanitizeEtiqueta,
   toLocalDateKey,
@@ -88,49 +92,116 @@ test('detectPendingVideos skips already edited files and prevents infinite loops
   );
 });
 
-test('buildFfmpegFilterComplex builds trim/atrim/setpts/concat for enabled cuts only', () => {
+test('buildFfmpegFilterComplex supports 720p mobile_fast ultrafast and 1080p high_1080p profiles', () => {
   const cuts: VideoCut[] = [
     { id: 'c1', clip_index: 0, start_sec: 0.5, end_sec: 4.2, motivo: 'Gancho', enabled: true },
     { id: 'c2', clip_index: 0, start_sec: 10.0, end_sec: 15.0, motivo: 'Silencio descartado', enabled: false },
     { id: 'c3', clip_index: 0, start_sec: 18.25, end_sec: 23.75, motivo: 'Remate', enabled: true },
   ];
 
-  const built = buildFfmpegFilterComplex(cuts, 'raw.mov', 'out.mp4', true);
-  assert.equal(built.activeCount, 2);
-  assert.equal(
-    built.filterComplex,
-    '[0:v]trim=start=0.500:end=4.200,setpts=PTS-STARTPTS[v0];' +
-      '[0:a]atrim=start=0.500:end=4.200,asetpts=PTS-STARTPTS[a0];' +
-      '[0:v]trim=start=18.250:end=23.750,setpts=PTS-STARTPTS[v1];' +
-      '[0:a]atrim=start=18.250:end=23.750,asetpts=PTS-STARTPTS[a1];' +
-      '[v0][a0][v1][a1]concat=n=2:v=1:a=1[outv][outa]'
-  );
-  assert.ok(built.args.includes('libx264'));
-  assert.ok(built.args.includes('aac'));
+  const mobileBuilt = buildFfmpegFilterComplex(cuts, 'raw.mov', 'out.mp4', true, 'mobile_fast');
+  assert.equal(mobileBuilt.activeCount, 2);
+  assert.ok(mobileBuilt.filterComplex.includes('scale=720:1280:force_original_aspect_ratio=decrease'));
+  assert.ok(mobileBuilt.filterComplex.includes('pad=720:1280:(ow-iw)/2:(oh-ih)/2:black,fps=30,format=yuv420p,setsar=1[v0]'));
+  assert.ok(mobileBuilt.filterComplex.endsWith('[v0][a0][v1][a1]concat=n=2:v=1:a=1[outv][outa]'));
+  assert.equal(mobileBuilt.args[mobileBuilt.args.indexOf('-preset') + 1], 'ultrafast');
+  assert.equal(mobileBuilt.args[mobileBuilt.args.indexOf('-crf') + 1], '26');
+  assert.equal(mobileBuilt.args[mobileBuilt.args.indexOf('-b:a') + 1], '128k');
+
+  const hdBuilt = buildFfmpegFilterComplex(cuts, 'raw.mov', 'out.mp4', true, 'high_1080p');
+  assert.equal(hdBuilt.activeCount, 2);
+  assert.ok(hdBuilt.filterComplex.includes('scale=1080:1920:force_original_aspect_ratio=decrease'));
+  assert.ok(hdBuilt.filterComplex.includes('pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,fps=30,format=yuv420p,setsar=1[v0]'));
+  assert.equal(hdBuilt.args[hdBuilt.args.indexOf('-preset') + 1], 'veryfast');
+  assert.equal(hdBuilt.args[hdBuilt.args.indexOf('-crf') + 1], '21');
+  assert.equal(hdBuilt.args[hdBuilt.args.indexOf('-b:a') + 1], '192k');
 });
 
-test('buildMultiClipFfmpegFilterComplex references clip_index inputs and normalizes to 1080x1920 30fps yuv420p', () => {
+test('buildMultiClipFfmpegFilterComplex references clip_index inputs for both 1080p and 720p mobile_fast', () => {
   const cuts: VideoCut[] = [
     { id: 'm1', clip_index: 1, start_sec: 2.0, end_sec: 6.5, motivo: 'Gancho del clip 2', enabled: true },
     { id: 'm2', clip_index: 0, start_sec: 1.0, end_sec: 5.0, motivo: 'Contexto del clip 1', enabled: true },
     { id: 'm3', clip_index: 2, start_sec: 0.5, end_sec: 3.0, motivo: 'Descartado', enabled: false },
   ];
 
-  const built = buildMultiClipFfmpegFilterComplex(
+  const hdBuilt = buildMultiClipFfmpegFilterComplex(
     cuts,
     ['input_0.mov', 'input_1.mp4', 'input_2.webm'],
     'combined.mp4',
-    true
+    true,
+    'high_1080p'
   );
 
-  assert.equal(built.activeCount, 2);
+  assert.equal(hdBuilt.activeCount, 2);
   // Preserves Gemini's cross-clip narrative order (clip 1 first, then clip 0)
-  assert.ok(built.filterComplex.startsWith('[1:v]trim=start=2.000:end=6.500,setpts=PTS-STARTPTS,scale=1080:1920'));
-  assert.ok(built.filterComplex.includes('fps=30,format=yuv420p,setsar=1[v0]'));
-  assert.ok(built.filterComplex.includes('[1:a]atrim=start=2.000:end=6.500,asetpts=PTS-STARTPTS'));
-  assert.ok(built.filterComplex.includes('[0:v]trim=start=1.000:end=5.000'));
-  assert.ok(built.filterComplex.endsWith('[v0][a0][v1][a1]concat=n=2:v=1:a=1[outv][outa]'));
-  assert.deepEqual(built.args.slice(0, 6), ['-i', 'input_0.mov', '-i', 'input_1.mp4', '-i', 'input_2.webm']);
+  assert.ok(hdBuilt.filterComplex.startsWith('[1:v]trim=start=2.000:end=6.500,setpts=PTS-STARTPTS,scale=1080:1920'));
+  assert.ok(hdBuilt.filterComplex.includes('fps=30,format=yuv420p,setsar=1[v0]'));
+  assert.ok(hdBuilt.filterComplex.includes('[1:a]atrim=start=2.000:end=6.500,asetpts=PTS-STARTPTS'));
+  assert.ok(hdBuilt.filterComplex.includes('[0:v]trim=start=1.000:end=5.000'));
+  assert.ok(hdBuilt.filterComplex.endsWith('[v0][a0][v1][a1]concat=n=2:v=1:a=1[outv][outa]'));
+  assert.deepEqual(hdBuilt.args.slice(0, 6), ['-i', 'input_0.mov', '-i', 'input_1.mp4', '-i', 'input_2.webm']);
+  assert.equal(hdBuilt.args[hdBuilt.args.indexOf('-preset') + 1], 'veryfast');
+  assert.equal(hdBuilt.args[hdBuilt.args.indexOf('-crf') + 1], '21');
+  assert.equal(hdBuilt.args[hdBuilt.args.indexOf('-b:a') + 1], '192k');
+
+  const mobileBuilt = buildMultiClipFfmpegFilterComplex(
+    cuts,
+    ['input_0.mov', 'input_1.mp4', 'input_2.webm'],
+    'combined_mobile.mp4',
+    true,
+    'mobile_fast'
+  );
+  assert.ok(mobileBuilt.filterComplex.startsWith('[1:v]trim=start=2.000:end=6.500,setpts=PTS-STARTPTS,scale=720:1280'));
+  assert.ok(mobileBuilt.filterComplex.includes('pad=720:1280:(ow-iw)/2:(oh-ih)/2:black,fps=30,format=yuv420p,setsar=1[v0]'));
+  assert.equal(mobileBuilt.args[mobileBuilt.args.indexOf('-preset') + 1], 'ultrafast');
+  assert.equal(mobileBuilt.args[mobileBuilt.args.indexOf('-crf') + 1], '26');
+  assert.equal(mobileBuilt.args[mobileBuilt.args.indexOf('-b:a') + 1], '128k');
+});
+
+test('buildGeminiSystemPrompt applies all 3 style presets and injects custom user instructions', () => {
+  assert.equal(EDIT_STYLE_PRESETS.length, 3);
+  assert.equal(normalizeStylePreset('unknown'), 'funny_jumpcut');
+  assert.equal(normalizeStylePreset('agile_vlog'), 'agile_vlog');
+  assert.equal(normalizeStylePreset('express_summary'), 'express_summary');
+
+  const funnyPrompt = buildGeminiSystemPrompt('single', 'funny_jumpcut');
+  assert.ok(funnyPrompt.includes('GRACIOSO / JUMP-CUT'));
+  assert.ok(funnyPrompt.includes('esquema JSON'));
+  assert.ok(!funnyPrompt.includes('INSTRUCCIÓN PRIORITARIA'));
+
+  const vlogPrompt = buildGeminiSystemPrompt(
+    'single',
+    'agile_vlog',
+    'Deja sí o sí la parte en la que se cae la taza, máximo 25 seg'
+  );
+  assert.ok(vlogPrompt.includes('VLOG ÁGIL'));
+  assert.ok(vlogPrompt.includes('INSTRUCCIÓN PRIORITARIA DEL USUARIO'));
+  assert.ok(vlogPrompt.includes('se cae la taza, máximo 25 seg'));
+
+  const multiExpressPrompt = buildGeminiSystemPrompt(
+    'multi',
+    'express_summary',
+    'Empieza con el clip de la cafetera'
+  );
+  assert.ok(multiExpressPrompt.includes('RESUMEN EXPRÉS'));
+  assert.ok(multiExpressPrompt.includes('20 a 30 segundos'));
+  assert.ok(multiExpressPrompt.includes('clip_index'));
+  assert.ok(multiExpressPrompt.includes('Empieza con el clip de la cafetera'));
+});
+
+test('detectDefaultExportQuality picks mobile_fast on iPhone/Android and high_1080p on desktop', () => {
+  assert.equal(
+    detectDefaultExportQuality('Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X)', 390),
+    'mobile_fast'
+  );
+  assert.equal(
+    detectDefaultExportQuality('Mozilla/5.0 (Linux; Android 14; Pixel 8)', 412),
+    'mobile_fast'
+  );
+  assert.equal(
+    detectDefaultExportQuality('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)', 1440),
+    'high_1080p'
+  );
 });
 
 test('parseGeminiEditPlan sanitizes tag, handles single-clip overlap clamping and multi-clip clip_index', () => {

@@ -11,7 +11,7 @@ import {
   Scissors,
   Square,
 } from 'lucide-react';
-import type { QueueItem } from '../types';
+import type { ExportQuality, QueueItem } from '../types';
 import {
   buildCombinedEditedFilename,
   buildEditedFilename,
@@ -28,6 +28,8 @@ interface StudioViewProps {
   onSelectAllCuts: (itemId: string, enabled: boolean) => void;
   onRerenderItem: (itemId: string) => void;
   onRequestDriveUpload: (itemId: string) => void;
+  exportQuality: ExportQuality;
+  onChangeExportQuality: (quality: ExportQuality) => void;
   isRendering: boolean;
   renderProgress: { percent: number; message: string } | null;
   canUploadToDrive: boolean;
@@ -42,6 +44,8 @@ export function StudioView({
   onSelectAllCuts,
   onRerenderItem,
   onRequestDriveUpload,
+  exportQuality,
+  onChangeExportQuality,
   isRendering,
   renderProgress,
   canUploadToDrive,
@@ -129,8 +133,8 @@ export function StudioView({
 
   if (!currentItem || !currentItem.analysis) {
     return (
-      <div className="rounded-xl border border-white/[0.08] bg-[#111419] px-6 py-16 text-center">
-        <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl border border-white/[0.08] bg-[#171B22] text-[#8B96A8]">
+      <div className="rounded-xl border border-white/10 bg-[#121216] px-6 py-16 text-center">
+        <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl border border-white/10 bg-[#18181f] text-[#8B96A8]">
           <Film className="h-5 w-5" />
         </div>
         <h2 className="mt-4 font-display text-lg font-semibold text-[#EDF1F7]">
@@ -217,7 +221,7 @@ export function StudioView({
                 className={`rounded-lg px-3 py-1.5 text-xs font-medium border transition-colors whitespace-nowrap shrink-0 ${
                   active
                     ? 'border-[#E11D48]/60 bg-[#E11D48]/10 text-white'
-                    : 'border-white/[0.08] bg-[#111419] text-[#8B96A8] hover:text-white'
+                    : 'border-white/10 bg-[#121216] text-[#8B96A8] hover:text-white'
                 }`}
               >
                 {item.originalName}
@@ -230,8 +234,8 @@ export function StudioView({
       {/* Balanced 2-column Studio Split */}
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-stretch">
         {/* Left Column: 9:16 Vertical Preview Stage */}
-        <section className="xl:col-span-5 flex flex-col rounded-xl border border-white/[0.08] bg-[#111419] p-5">
-          <div className="flex items-center justify-between gap-2 pb-4 border-b border-white/[0.08]">
+        <section className="xl:col-span-5 flex flex-col rounded-xl border border-white/10 bg-[#121216] p-5">
+          <div className="flex items-center justify-between gap-2 pb-4 border-b border-white/10">
             <div>
               <h2 className="font-display text-sm font-semibold text-[#EDF1F7]">
                 Vista previa vertical (9:16)
@@ -356,6 +360,41 @@ export function StudioView({
 
           {/* Action Buttons */}
           <div className="mt-auto space-y-2.5">
+            {/* Quick Render Quality Toggle */}
+            <div className="flex items-center justify-between gap-2 rounded-lg border border-white/10 bg-[#09090b] px-2.5 py-1.5">
+              <span className="text-[11px] font-medium text-[#8B96A8]">Salida FFmpeg</span>
+              <div
+                role="group"
+                aria-label="Calidad de renderizado en Estudio"
+                className="inline-flex items-center gap-1"
+              >
+                <button
+                  type="button"
+                  onClick={() => onChangeExportQuality('mobile_fast')}
+                  aria-pressed={exportQuality === 'mobile_fast'}
+                  className={`rounded-md px-2.5 py-1 font-mono text-[11px] font-medium transition-colors whitespace-nowrap ${
+                    exportQuality === 'mobile_fast'
+                      ? 'bg-[#E11D48]/20 text-white border border-[#E11D48]/50'
+                      : 'text-[#8B96A8] hover:text-white border border-transparent'
+                  }`}
+                >
+                  720p móvil
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onChangeExportQuality('high_1080p')}
+                  aria-pressed={exportQuality === 'high_1080p'}
+                  className={`rounded-md px-2.5 py-1 font-mono text-[11px] font-medium transition-colors whitespace-nowrap ${
+                    exportQuality === 'high_1080p'
+                      ? 'bg-[#E11D48]/20 text-white border border-[#E11D48]/50'
+                      : 'text-[#8B96A8] hover:text-white border border-transparent'
+                  }`}
+                >
+                  1080p HD
+                </button>
+              </div>
+            </div>
+
             <button
               type="button"
               onClick={() => onRerenderItem(currentItem.id)}
@@ -376,7 +415,7 @@ export function StudioView({
                 type="button"
                 onClick={handleDownloadEdited}
                 disabled={!currentItem.editedUrl}
-                className="flex h-9 items-center justify-center gap-2 rounded-lg border border-white/[0.1] bg-[#171B22] px-3 text-xs font-medium text-[#EDF1F7] hover:bg-[#1F2530] disabled:opacity-40 transition-colors whitespace-nowrap"
+                className="flex h-9 items-center justify-center gap-2 rounded-lg border border-white/10 bg-[#18181f] px-3 text-xs font-medium text-[#EDF1F7] hover:bg-[#22222b] disabled:opacity-40 transition-colors whitespace-nowrap"
               >
                 <Download className="h-3.5 w-3.5" />
                 Descargar MP4
@@ -386,7 +425,7 @@ export function StudioView({
                 type="button"
                 onClick={() => onRequestDriveUpload(currentItem.id)}
                 disabled={isRendering || enabledCuts.length === 0}
-                className="flex h-9 items-center justify-center gap-2 rounded-lg border border-white/[0.1] bg-[#171B22] px-3 text-xs font-medium text-[#EDF1F7] hover:bg-[#1F2530] disabled:opacity-40 transition-colors whitespace-nowrap"
+                className="flex h-9 items-center justify-center gap-2 rounded-lg border border-white/10 bg-[#18181f] px-3 text-xs font-medium text-[#EDF1F7] hover:bg-[#22222b] disabled:opacity-40 transition-colors whitespace-nowrap"
               >
                 <CloudUpload className="h-3.5 w-3.5 text-[#38BDF8]" />
                 Subir a Drive
@@ -402,9 +441,9 @@ export function StudioView({
         </section>
 
         {/* Right Column: AI Edit Plan, Visual Timeline, and Interactive Cut List */}
-        <section className="xl:col-span-7 flex flex-col rounded-xl border border-white/[0.08] bg-[#111419] p-5">
+        <section className="xl:col-span-7 flex flex-col rounded-xl border border-white/10 bg-[#121216] p-5">
           {/* Header Metadata (Zero-Pill clean typographic separators) */}
-          <div className="border-b border-white/[0.08] pb-4">
+          <div className="border-b border-white/10 pb-4">
             <div className="flex flex-wrap items-center gap-2 text-xs text-[#8B96A8]">
               <span className="font-mono font-semibold text-[#F43F5E]">{plan.etiqueta}</span>
               <span aria-hidden="true">·</span>

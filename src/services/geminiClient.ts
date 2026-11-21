@@ -1,4 +1,4 @@
-import type { GeminiEditPlan, GeminiModelId } from '../types';
+import type { EditStylePreset, GeminiEditPlan, GeminiModelId } from '../types';
 import { parseGeminiEditPlan } from '../utils/videoPipeline';
 
 export interface AnalyzeVideoResult {
@@ -96,12 +96,18 @@ async function consumeAnalyzeStream(
   return finalResult;
 }
 
+export interface AnalyzeStyleOptions {
+  stylePreset?: EditStylePreset;
+  customInstruction?: string;
+}
+
 export async function analyzeVideoWithGemini(
   videoBlob: Blob,
   fileName: string,
   model: GeminiModelId,
   durationSec?: number,
-  onStatusUpdate?: (message: string, progress: number) => void
+  onStatusUpdate?: (message: string, progress: number) => void,
+  styleOptions?: AnalyzeStyleOptions
 ): Promise<AnalyzeVideoResult> {
   const formData = new FormData();
   formData.append('video', videoBlob, fileName);
@@ -109,6 +115,12 @@ export async function analyzeVideoWithGemini(
   formData.append('model', model);
   if (durationSec && Number.isFinite(durationSec)) {
     formData.append('durationSec', String(durationSec));
+  }
+  if (styleOptions?.stylePreset) {
+    formData.append('stylePreset', styleOptions.stylePreset);
+  }
+  if (styleOptions?.customInstruction?.trim()) {
+    formData.append('customInstruction', styleOptions.customInstruction.trim());
   }
 
   onStatusUpdate?.('Enviando vídeo al servidor para Gemini Files API...', 12);
@@ -131,7 +143,8 @@ export async function analyzeMultiClipWithGemini(
   clips: MultiClipInput[],
   model: GeminiModelId,
   projectName?: string,
-  onStatusUpdate?: (message: string, progress: number) => void
+  onStatusUpdate?: (message: string, progress: number) => void,
+  styleOptions?: AnalyzeStyleOptions
 ): Promise<AnalyzeVideoResult> {
   const formData = new FormData();
   const clipsMeta = clips.map((clip) => ({
@@ -146,6 +159,12 @@ export async function analyzeMultiClipWithGemini(
   formData.append('clipsMeta', JSON.stringify(clipsMeta));
   if (projectName?.trim()) {
     formData.append('projectName', projectName.trim());
+  }
+  if (styleOptions?.stylePreset) {
+    formData.append('stylePreset', styleOptions.stylePreset);
+  }
+  if (styleOptions?.customInstruction?.trim()) {
+    formData.append('customInstruction', styleOptions.customInstruction.trim());
   }
 
   onStatusUpdate?.(`Enviando ${clips.length} clips al servidor para Gemini Files API...`, 8);
