@@ -2,7 +2,7 @@ export type GeminiModelId = 'gemini-2.5-flash' | 'gemini-2.5-pro';
 
 export type WatchIntervalSec = 30 | 60 | 300;
 
-export type ActiveView = 'queue' | 'studio' | 'settings';
+export type ActiveView = 'queue' | 'gallery' | 'studio' | 'settings';
 
 export type QueueStage =
   | 'pending'
@@ -33,6 +33,7 @@ export interface DriveFileMeta {
 
 export interface VideoCut {
   id: string;
+  clip_index: number;
   start_sec: number;
   end_sec: number;
   motivo: string;
@@ -44,6 +45,18 @@ export interface GeminiEditPlan {
   titulo_interno: string;
   duracion_objetivo_seg: number;
   cortes: VideoCut[];
+}
+
+export interface SourceClipRef {
+  id: string;
+  source: 'drive' | 'local' | 'demo';
+  driveFileId?: string;
+  originalName: string;
+  mimeType: string;
+  sizeBytes: number;
+  durationSec?: number;
+  rawBlob?: Blob;
+  rawUrl?: string;
 }
 
 export interface QueueItem {
@@ -68,6 +81,10 @@ export interface QueueItem {
   uploadedWebViewLink?: string;
   geminiFileCleaned?: boolean;
   analysis?: GeminiEditPlan;
+  isMultiClip?: boolean;
+  projectName?: string;
+  sourceClips?: SourceClipRef[];
+  completedAt?: number;
   lastUpdated: number;
 }
 
@@ -76,4 +93,15 @@ export interface PendingDriveUpload {
   fileName: string;
   folderId: string;
   sizeBytes: number;
+}
+
+export interface AnalyticsRecord {
+  id: string;
+  dateKey: string; // YYYY-MM-DD
+  processedAt: number;
+  etiqueta: string;
+  rawDurationSec: number;
+  editedDurationSec: number;
+  isMultiClip?: boolean;
+  clipCount?: number;
 }

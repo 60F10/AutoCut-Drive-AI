@@ -1,7 +1,13 @@
-import type { DriveFileMeta, GeminiEditPlan, VideoCut } from '../types';
+import type { AnalyticsRecord, DriveFileMeta, GeminiEditPlan, VideoCut } from '../types';
 
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.webm']);
 const EDITED_MARKER = '_EDITADO';
+
+export const MOBILE_RAM_WARNING_BYTES = 200 * 1024 * 1024; // 200 MB
+
+export function exceedsMobileRamThreshold(totalBytes: number): boolean {
+  return totalBytes > MOBILE_RAM_WARNING_BYTES;
+}
 
 /**
  * Extracts a Google Drive folder ID from either a raw ID or a full Drive folder URL.
@@ -20,7 +26,6 @@ export function extractDriveFolderId(input: string): string {
     return queryIdMatch[1];
   }
 
-  // Strip stray trailing slashes or query params if someone pasted an ID with whitespace
   return trimmed.replace(/^\/+|\/+$/g, '');
 }
 
@@ -42,6 +47,7 @@ export function isSupportedVideoFile(name: string, mimeType?: string): boolean {
   if (mimeType) {
     const normalized = mimeType.toLowerCase();
     return (
+      normalized.startsWith('video/') ||
       normalized === 'video/mp4' ||
       normalized === 'video/quicktime' ||
       normalized === 'video/webm'
@@ -64,10 +70,34 @@ export function sanitizeEtiqueta(raw: string): string {
   return firstToken || 'VIDEO';
 }
 
+export function sanitizeProjectSlug(raw: string): string {
+  const cleaned = raw
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  return cleaned || 'Proyecto';
+}
+
 export function buildEditedFilename(originalName: string, etiqueta: string): string {
   const baseName = getBaseName(originalName).trim();
   const safeTag = sanitizeEtiqueta(etiqueta);
   return `${baseName}${EDITED_MARKER}_${safeTag}.mp4`;
+}
+
+/**
+ * Multi-clip combined output filename:
+ * `{nombreProyectoOPrimerClip}_COMBINADO_EDITADO_{etiqueta}.mp4`
+ */
+export function buildCombinedEditedFilename(
+  projectNameOrFirstClip: string,
+  etiqueta: string
+): string {
+  const rawBase = getBaseName(projectNameOrFirstClip).trim();
+  const safeBase = sanitizeProjectSlug(rawBase);
+  const safeTag = sanitizeEtiqueta(etiqueta);
+  return `${safeBase}_COMBINADO${EDITED_MARKER}_${safeTag}.mp4`;
 }
 
 export interface FolderScanResult {
@@ -111,35 +141,66 @@ export function detectPendingVideos(files: DriveFileMeta[]): FolderScanResult {
 }
 
 /**
- * Validates, sorts, and removes invalid/overlapping ranges from Gemini cuts.
+ * Validates and cleans cuts returned by Gemini.
+ * For single-clip edits, sorts chronologically and resolves tiny overlaps.
+ * For multi-clip edits, preserves Gemini's narrative cut order across clip_index.
  */
 export function normalizeCuts(
-  cuts: Array<{ start_sec: number; end_sec: number; motivo: string; enabled?: boolean; id?: string }>,
-  maxDurationSec?: number
+  cuts: Array<{
+    clip_index?: number;
+    start_sec: number;
+    end_sec: number;
+    motivo: string;
+    enabled?: boolean;
+    id?: string;
+  }>,
+  options?: {
+    maxDurationSec?: number;
+    clipCount?: number;
+    clipDurationsSec?: number[];
+    preserveOrder?: boolean;
+  }
 ): VideoCut[] {
+  const clipCount = Math.max(1, options?.clipCount ?? 1);
+  const preserveOrder = Boolean(options?.preserveOrder || clipCount > 1);
+
   const cleaned = cuts
     .map((cut, index) => {
+      const rawClipIdx = Number.isFinite(Number(cut.clip_index))
+        ? Math.floor(Number(cut.clip_index))
+        : 0;
+      const clipIndex = Math.max(0, Math.min(clipCount - 1, rawClipIdx));
+      const clipMaxDuration =
+        options?.clipDurationsSec?.[clipIndex] || options?.maxDurationSec || 0;
+
       const start = Math.max(0, Number(cut.start_sec) || 0);
       let end = Math.max(0, Number(cut.end_sec) || 0);
-      if (maxDurationSec && maxDurationSec > 0) {
-        end = Math.min(end, maxDurationSec);
+      if (clipMaxDuration > 0) {
+        end = Math.min(end, clipMaxDuration);
       }
+
       return {
         id: cut.id ?? `cut-${index + 1}`,
+        clip_index: clipIndex,
         start_sec: Number(start.toFixed(2)),
         end_sec: Number(end.toFixed(2)),
         motivo: String(cut.motivo || 'Momento destacado').trim(),
         enabled: cut.enabled !== false,
       };
     })
-    .filter((cut) => cut.end_sec - cut.start_sec >= 0.15)
-    .sort((a, b) => a.start_sec - b.start_sec);
+    .filter((cut) => cut.end_sec - cut.start_sec >= 0.15);
 
-  // Clamp tiny overlaps cleanly so jump cuts never duplicate frames
+  if (preserveOrder) {
+    return cleaned;
+  }
+
+  cleaned.sort((a, b) => a.start_sec - b.start_sec);
+
+  // Clamp tiny overlaps cleanly for single-clip chronological cuts
   const nonOverlapping: VideoCut[] = [];
   for (const cut of cleaned) {
     const prev = nonOverlapping[nonOverlapping.length - 1];
-    if (prev && cut.start_sec < prev.end_sec) {
+    if (prev && prev.clip_index === cut.clip_index && cut.start_sec < prev.end_sec) {
       const adjustedStart = Number(prev.end_sec.toFixed(2));
       if (cut.end_sec - adjustedStart >= 0.15) {
         nonOverlapping.push({ ...cut, start_sec: adjustedStart });
@@ -152,17 +213,37 @@ export function normalizeCuts(
   return nonOverlapping;
 }
 
-export function parseGeminiEditPlan(raw: unknown, maxDurationSec?: number): GeminiEditPlan {
+export function parseGeminiEditPlan(
+  raw: unknown,
+  maxDurationSecOrOptions?:
+    | number
+    | {
+        maxDurationSec?: number;
+        clipCount?: number;
+        clipDurationsSec?: number[];
+        preserveOrder?: boolean;
+      }
+): GeminiEditPlan {
   const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
   if (!parsed || typeof parsed !== 'object') {
     throw new Error('La respuesta de Gemini no tiene un formato JSON válido.');
   }
 
+  const options =
+    typeof maxDurationSecOrOptions === 'number'
+      ? { maxDurationSec: maxDurationSecOrOptions }
+      : maxDurationSecOrOptions;
+
   const obj = parsed as Record<string, unknown>;
   const rawCuts = Array.isArray(obj.cortes) ? obj.cortes : [];
   const cuts = normalizeCuts(
-    rawCuts as Array<{ start_sec: number; end_sec: number; motivo: string }>,
-    maxDurationSec
+    rawCuts as Array<{
+      clip_index?: number;
+      start_sec: number;
+      end_sec: number;
+      motivo: string;
+    }>,
+    options
   );
 
   if (cuts.length === 0) {
@@ -198,8 +279,7 @@ export interface FfmpegFilterBuild {
 }
 
 /**
- * Generates FFmpeg filter_complex with trim/atrim, setpts/asetpts, and concat=n=X:v=1:a=1
- * preserving vertical 9:16 orientation and encoding to H.264 + AAC MP4.
+ * Single-clip FFmpeg filter_complex preserving original 9:16 video orientation.
  */
 export function buildFfmpegFilterComplex(
   cuts: VideoCut[],
@@ -267,6 +347,196 @@ export function buildFfmpegFilterComplex(
   };
 }
 
+/**
+ * Multi-clip FFmpeg filter_complex referencing each input by `clip_index` and normalizing
+ * all clips to 1080x1920 vertical, 30fps, yuv420p, and 48kHz stereo before concat.
+ */
+export function buildMultiClipFfmpegFilterComplex(
+  cuts: VideoCut[],
+  inputFileNames: string[],
+  outputFileName = 'output.mp4',
+  includeAudio = true
+): FfmpegFilterBuild {
+  if (inputFileNames.length === 0) {
+    throw new Error('Se necesita al menos un archivo de entrada para renderizar.');
+  }
+
+  // Preserve Gemini's narrative cut order across clips
+  const activeCuts = cuts.filter((cut) => cut.enabled && cut.end_sec > cut.start_sec);
+
+  if (activeCuts.length === 0) {
+    throw new Error('Activa al menos un corte antes de renderizar el vídeo combinado.');
+  }
+
+  const inputArgs: string[] = [];
+  for (const name of inputFileNames) {
+    inputArgs.push('-i', name);
+  }
+
+  const filterParts: string[] = [];
+  const concatInputs: string[] = [];
+
+  activeCuts.forEach((cut, idx) => {
+    const clipIdx = Math.max(0, Math.min(inputFileNames.length - 1, cut.clip_index ?? 0));
+    const start = cut.start_sec.toFixed(3);
+    const end = cut.end_sec.toFixed(3);
+
+    filterParts.push(
+      `[${clipIdx}:v]trim=start=${start}:end=${end},setpts=PTS-STARTPTS,` +
+        `scale=1080:1920:force_original_aspect_ratio=decrease,` +
+        `pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,fps=30,format=yuv420p,setsar=1[v${idx}]`
+    );
+
+    if (includeAudio) {
+      filterParts.push(
+        `[${clipIdx}:a]atrim=start=${start}:end=${end},asetpts=PTS-STARTPTS,` +
+          `aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a${idx}]`
+      );
+      concatInputs.push(`[v${idx}][a${idx}]`);
+    } else {
+      concatInputs.push(`[v${idx}]`);
+    }
+  });
+
+  if (includeAudio) {
+    filterParts.push(`${concatInputs.join('')}concat=n=${activeCuts.length}:v=1:a=1[outv][outa]`);
+  } else {
+    filterParts.push(`${concatInputs.join('')}concat=n=${activeCuts.length}:v=1:a=0[outv]`);
+  }
+
+  const filterComplex = filterParts.join(';');
+
+  const args = [
+    ...inputArgs,
+    '-filter_complex',
+    filterComplex,
+    '-map',
+    '[outv]',
+    ...(includeAudio ? ['-map', '[outa]'] : ['-an']),
+    '-c:v',
+    'libx264',
+    '-preset',
+    'veryfast',
+    '-crf',
+    '23',
+    '-pix_fmt',
+    'yuv420p',
+    '-r',
+    '30',
+    ...(includeAudio ? ['-c:a', 'aac', '-b:a', '128k', '-ar', '48000'] : []),
+    '-movflags',
+    '+faststart',
+    outputFileName,
+  ];
+
+  return {
+    filterComplex,
+    args,
+    activeCount: activeCuts.length,
+  };
+}
+
+export interface DailyAnalyticsPoint {
+  dateKey: string;
+  label: string;
+  count: number;
+  savedSec: number;
+}
+
+export interface TagBreakdownItem {
+  etiqueta: string;
+  count: number;
+  sharePct: number;
+}
+
+export interface QueueAnalyticsSummary {
+  totalProcessed: number;
+  totalSavedSec: number;
+  totalRawSec: number;
+  totalFinalSec: number;
+  avgReductionPct: number;
+  dailySeries: DailyAnalyticsPoint[];
+  tagBreakdown: TagBreakdownItem[];
+}
+
+export function toLocalDateKey(timestampMs: number): string {
+  const d = new Date(timestampMs);
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+export function computeQueueAnalytics(
+  records: AnalyticsRecord[],
+  days = 7,
+  referenceDateMs = Date.now()
+): QueueAnalyticsSummary {
+  const dayBuckets = new Map<string, { label: string; count: number; savedSec: number }>();
+
+  for (let offset = days - 1; offset >= 0; offset -= 1) {
+    const dt = new Date(referenceDateMs - offset * 86_400_000);
+    const key = toLocalDateKey(dt.getTime());
+    const label = dt.toLocaleDateString('es-ES', { day: '2-digit', month: 'short' });
+    dayBuckets.set(key, { label, count: 0, savedSec: 0 });
+  }
+
+  let totalRawSec = 0;
+  let totalFinalSec = 0;
+  let totalSavedSec = 0;
+  const tagCounts = new Map<string, number>();
+
+  for (const rec of records) {
+    const raw = Math.max(0, Number(rec.rawDurationSec) || 0);
+    const edited = Math.max(0, Number(rec.editedDurationSec) || 0);
+    const saved = Math.max(0, raw - edited);
+
+    totalRawSec += raw;
+    totalFinalSec += edited;
+    totalSavedSec += saved;
+
+    const tag = sanitizeEtiqueta(rec.etiqueta);
+    tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1);
+
+    const bucket = dayBuckets.get(rec.dateKey);
+    if (bucket) {
+      bucket.count += 1;
+      bucket.savedSec = Number((bucket.savedSec + saved).toFixed(1));
+    }
+  }
+
+  const totalProcessed = records.length;
+  const avgReductionPct =
+    totalRawSec > 0 ? Math.round(((totalRawSec - totalFinalSec) / totalRawSec) * 100) : 0;
+
+  const dailySeries: DailyAnalyticsPoint[] = Array.from(dayBuckets.entries()).map(
+    ([dateKey, info]) => ({
+      dateKey,
+      label: info.label,
+      count: info.count,
+      savedSec: info.savedSec,
+    })
+  );
+
+  const tagBreakdown: TagBreakdownItem[] = Array.from(tagCounts.entries())
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([etiqueta, count]) => ({
+      etiqueta,
+      count,
+      sharePct: totalProcessed > 0 ? Math.round((count / totalProcessed) * 100) : 0,
+    }));
+
+  return {
+    totalProcessed,
+    totalSavedSec: Number(totalSavedSec.toFixed(1)),
+    totalRawSec: Number(totalRawSec.toFixed(1)),
+    totalFinalSec: Number(totalFinalSec.toFixed(1)),
+    avgReductionPct,
+    dailySeries,
+    tagBreakdown,
+  };
+}
+
 export function formatSeconds(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) return '0:00.0';
   const totalTenths = Math.round(seconds * 10);
@@ -274,6 +544,17 @@ export function formatSeconds(seconds: number): string {
   const wholeSecs = Math.floor((totalTenths % 600) / 10);
   const tenths = totalTenths % 10;
   return `${mins}:${String(wholeSecs).padStart(2, '0')}.${tenths}`;
+}
+
+export function formatDurationHuman(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return '0 s';
+  const total = Math.round(seconds);
+  const hours = Math.floor(total / 3600);
+  const mins = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  if (hours > 0) return `${hours} h ${mins} min`;
+  if (mins > 0) return `${mins} min ${secs} s`;
+  return `${secs} s`;
 }
 
 export function formatBytes(bytes?: number | string): string {

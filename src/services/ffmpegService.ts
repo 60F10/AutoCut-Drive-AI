@@ -1,7 +1,11 @@
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile, toBlobURL } from '@ffmpeg/util';
 import type { VideoCut } from '../types';
-import { buildFfmpegFilterComplex, getExtension } from '../utils/videoPipeline';
+import {
+  buildFfmpegFilterComplex,
+  buildMultiClipFfmpegFilterComplex,
+  getExtension,
+} from '../utils/videoPipeline';
 
 // Single-threaded @ffmpeg/core CDNs (does NOT require SharedArrayBuffer or COOP/COEP headers)
 const FFMPEG_CORE_CDNS = [
@@ -78,7 +82,7 @@ export interface RenderProgress {
 }
 
 /**
- * Renders the selected cuts into a clean H.264 + AAC MP4 preserving 9:16 vertical orientation.
+ * Renders single-clip selected cuts into a clean H.264 + AAC MP4 preserving 9:16 vertical orientation.
  */
 export async function renderCutsWithFfmpeg(
   sourceBlob: Blob,
@@ -106,7 +110,6 @@ export async function renderCutsWithFfmpeg(
     onProgress?.({ percent: 8, message: 'Preparando vídeo en memoria de FFmpeg...' });
     await ffmpeg.writeFile(inputName, await fetchFile(sourceBlob));
 
-    // Attempt full video+audio concat first; if source video has no audio stream, retry video-only
     let exitCode = 0;
     try {
       const { args, activeCount } = buildFfmpegFilterComplex(cuts, inputName, outputName, true);
@@ -135,12 +138,105 @@ export async function renderCutsWithFfmpeg(
 
     onProgress?.({ percent: 99, message: 'Empaquetando archivo MP4 final...' });
     const data = await ffmpeg.readFile(outputName);
-    const bytes = data instanceof Uint8Array ? new Uint8Array(data) : new TextEncoder().encode(String(data));
+    const bytes =
+      data instanceof Uint8Array ? new Uint8Array(data) : new TextEncoder().encode(String(data));
     onProgress?.({ percent: 100, message: 'Renderizado completado.' });
     return new Blob([bytes.buffer], { type: 'video/mp4' });
   } finally {
     ffmpeg.off('progress', progressHandler);
     await ffmpeg.deleteFile(inputName).catch(() => {});
     await ffmpeg.deleteFile(outputName).catch(() => {});
+  }
+}
+
+export interface MultiClipFfmpegSource {
+  blob: Blob;
+  originalFileName: string;
+}
+
+/**
+ * Renders multi-clip cuts referencing each input by clip_index, normalizing every clip
+ * to 1080x1920 vertical, 30fps, yuv420p before concat.
+ */
+export async function renderMultiClipCutsWithFfmpeg(
+  sources: MultiClipFfmpegSource[],
+  cuts: VideoCut[],
+  onProgress?: (progress: RenderProgress) => void
+): Promise<Blob> {
+  const ffmpeg = await getLoadedFfmpeg((msg) => onProgress?.({ percent: 4, message: msg }));
+
+  const inputNames: string[] = [];
+  const outputName = 'combined_output.mp4';
+
+  const progressHandler = ({ progress }: { progress: number }) => {
+    const pct = Math.max(15, Math.min(98, Math.round(progress * 100)));
+    onProgress?.({
+      percent: pct,
+      message: `Normalizando 1080x1920 y uniendo clips (${pct}%)...`,
+    });
+  };
+
+  ffmpeg.on('progress', progressHandler);
+
+  try {
+    for (let i = 0; i < sources.length; i += 1) {
+      const ext = getExtension(sources[i].originalFileName) || '.mp4';
+      const fileName = `input_${i}${ext}`;
+      inputNames.push(fileName);
+      onProgress?.({
+        percent: Math.round(6 + ((i + 1) / sources.length) * 8),
+        message: `Cargando Clip ${i + 1}/${sources.length} en FFmpeg...`,
+      });
+      await ffmpeg.writeFile(fileName, await fetchFile(sources[i].blob));
+    }
+
+    let exitCode = 0;
+    try {
+      const { args, activeCount } = buildMultiClipFfmpegFilterComplex(
+        cuts,
+        inputNames,
+        outputName,
+        true
+      );
+      onProgress?.({
+        percent: 16,
+        message: `Renderizando ${activeCount} cortes de ${sources.length} clips (1080×1920 · 30fps)...`,
+      });
+      exitCode = await ffmpeg.exec(args);
+    } catch {
+      exitCode = 1;
+    }
+
+    if (exitCode !== 0) {
+      const { args, activeCount } = buildMultiClipFfmpegFilterComplex(
+        cuts,
+        inputNames,
+        outputName,
+        false
+      );
+      onProgress?.({
+        percent: 22,
+        message: `Algún clip sin pista de audio: uniendo ${activeCount} cortes de vídeo (1080×1920)...`,
+      });
+      const fallbackCode = await ffmpeg.exec(args);
+      if (fallbackCode !== 0) {
+        throw new Error(
+          'FFmpeg.wasm no pudo combinar estos clips. Si pesan más de 200 MB en móvil, prueba con menos clips o en 1080p.'
+        );
+      }
+    }
+
+    onProgress?.({ percent: 99, message: 'Empaquetando MP4 combinado...' });
+    const data = await ffmpeg.readFile(outputName);
+    const bytes =
+      data instanceof Uint8Array ? new Uint8Array(data) : new TextEncoder().encode(String(data));
+    onProgress?.({ percent: 100, message: 'Combinación renderizada correctamente.' });
+    return new Blob([bytes.buffer], { type: 'video/mp4' });
+  } finally {
+    ffmpeg.off('progress', progressHandler);
+    await Promise.allSettled([
+      ...inputNames.map((name) => ffmpeg.deleteFile(name)),
+      ffmpeg.deleteFile(outputName),
+    ]);
   }
 }

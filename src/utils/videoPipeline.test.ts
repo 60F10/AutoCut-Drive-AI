@@ -1,17 +1,24 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  MOBILE_RAM_WARNING_BYTES,
+  buildCombinedEditedFilename,
   buildEditedFilename,
   buildFfmpegFilterComplex,
+  buildMultiClipFfmpegFilterComplex,
   calculateSelectedDuration,
+  computeQueueAnalytics,
   detectPendingVideos,
+  exceedsMobileRamThreshold,
   extractDriveFolderId,
   formatBytes,
+  formatDurationHuman,
   formatSeconds,
   parseGeminiEditPlan,
   sanitizeEtiqueta,
+  toLocalDateKey,
 } from './videoPipeline';
-import type { DriveFileMeta, VideoCut } from '../types';
+import type { AnalyticsRecord, DriveFileMeta, VideoCut } from '../types';
 
 test('extractDriveFolderId parses raw IDs and full Google Drive URLs', () => {
   assert.equal(
@@ -36,7 +43,7 @@ test('sanitizeEtiqueta returns one accent-free uppercase keyword', () => {
   assert.equal(sanitizeEtiqueta('   '), 'VIDEO');
 });
 
-test('buildEditedFilename follows {nombreOriginalSinExtension}_EDITADO_{etiqueta}.mp4', () => {
+test('buildEditedFilename and buildCombinedEditedFilename follow exact naming conventions', () => {
   assert.equal(
     buildEditedFilename('IMG_4821.MOV', 'batido'),
     'IMG_4821_EDITADO_BATIDO.mp4'
@@ -44,6 +51,14 @@ test('buildEditedFilename follows {nombreOriginalSinExtension}_EDITADO_{etiqueta
   assert.equal(
     buildEditedFilename('mi.video.cocina.mp4', 'recéta'),
     'mi.video.cocina_EDITADO_RECETA.mp4'
+  );
+  assert.equal(
+    buildCombinedEditedFilename('Escapada Asturias', 'viáje'),
+    'Escapada_Asturias_COMBINADO_EDITADO_VIAJE.mp4'
+  );
+  assert.equal(
+    buildCombinedEditedFilename('IMG_1001.MOV', 'vlog'),
+    'IMG_1001_COMBINADO_EDITADO_VLOG.mp4'
   );
 });
 
@@ -75,9 +90,9 @@ test('detectPendingVideos skips already edited files and prevents infinite loops
 
 test('buildFfmpegFilterComplex builds trim/atrim/setpts/concat for enabled cuts only', () => {
   const cuts: VideoCut[] = [
-    { id: 'c1', start_sec: 0.5, end_sec: 4.2, motivo: 'Gancho', enabled: true },
-    { id: 'c2', start_sec: 10.0, end_sec: 15.0, motivo: 'Silencio descartado', enabled: false },
-    { id: 'c3', start_sec: 18.25, end_sec: 23.75, motivo: 'Remate', enabled: true },
+    { id: 'c1', clip_index: 0, start_sec: 0.5, end_sec: 4.2, motivo: 'Gancho', enabled: true },
+    { id: 'c2', clip_index: 0, start_sec: 10.0, end_sec: 15.0, motivo: 'Silencio descartado', enabled: false },
+    { id: 'c3', clip_index: 0, start_sec: 18.25, end_sec: 23.75, motivo: 'Remate', enabled: true },
   ];
 
   const built = buildFfmpegFilterComplex(cuts, 'raw.mov', 'out.mp4', true);
@@ -94,8 +109,32 @@ test('buildFfmpegFilterComplex builds trim/atrim/setpts/concat for enabled cuts 
   assert.ok(built.args.includes('aac'));
 });
 
-test('parseGeminiEditPlan sanitizes tag, sorts cuts, and removes overlaps', () => {
-  const rawJson = JSON.stringify({
+test('buildMultiClipFfmpegFilterComplex references clip_index inputs and normalizes to 1080x1920 30fps yuv420p', () => {
+  const cuts: VideoCut[] = [
+    { id: 'm1', clip_index: 1, start_sec: 2.0, end_sec: 6.5, motivo: 'Gancho del clip 2', enabled: true },
+    { id: 'm2', clip_index: 0, start_sec: 1.0, end_sec: 5.0, motivo: 'Contexto del clip 1', enabled: true },
+    { id: 'm3', clip_index: 2, start_sec: 0.5, end_sec: 3.0, motivo: 'Descartado', enabled: false },
+  ];
+
+  const built = buildMultiClipFfmpegFilterComplex(
+    cuts,
+    ['input_0.mov', 'input_1.mp4', 'input_2.webm'],
+    'combined.mp4',
+    true
+  );
+
+  assert.equal(built.activeCount, 2);
+  // Preserves Gemini's cross-clip narrative order (clip 1 first, then clip 0)
+  assert.ok(built.filterComplex.startsWith('[1:v]trim=start=2.000:end=6.500,setpts=PTS-STARTPTS,scale=1080:1920'));
+  assert.ok(built.filterComplex.includes('fps=30,format=yuv420p,setsar=1[v0]'));
+  assert.ok(built.filterComplex.includes('[1:a]atrim=start=2.000:end=6.500,asetpts=PTS-STARTPTS'));
+  assert.ok(built.filterComplex.includes('[0:v]trim=start=1.000:end=5.000'));
+  assert.ok(built.filterComplex.endsWith('[v0][a0][v1][a1]concat=n=2:v=1:a=1[outv][outa]'));
+  assert.deepEqual(built.args.slice(0, 6), ['-i', 'input_0.mov', '-i', 'input_1.mp4', '-i', 'input_2.webm']);
+});
+
+test('parseGeminiEditPlan sanitizes tag, handles single-clip overlap clamping and multi-clip clip_index', () => {
+  const singleJson = JSON.stringify({
     etiqueta: 'cocína casera',
     titulo_interno: 'El batido explota en la encimera',
     duracion_objetivo_seg: 32,
@@ -106,21 +145,66 @@ test('parseGeminiEditPlan sanitizes tag, sorts cuts, and removes overlaps', () =
     ],
   });
 
-  const plan = parseGeminiEditPlan(rawJson);
-  assert.equal(plan.etiqueta, 'COCINA');
-  assert.equal(plan.cortes.length, 3);
-  assert.equal(plan.cortes[0].start_sec, 1.2);
-  assert.equal(plan.cortes[1].start_sec, 5.5); // overlap clamped cleanly
-  assert.equal(calculateSelectedDuration(plan.cortes), 12.3);
+  const singlePlan = parseGeminiEditPlan(singleJson);
+  assert.equal(singlePlan.etiqueta, 'COCINA');
+  assert.equal(singlePlan.cortes.length, 3);
+  assert.equal(singlePlan.cortes[0].start_sec, 1.2);
+  assert.equal(singlePlan.cortes[1].start_sec, 5.5);
+  assert.equal(calculateSelectedDuration(singlePlan.cortes), 12.3);
+
+  const multiJson = JSON.stringify({
+    etiqueta: 'viaje',
+    titulo_interno: 'Resumen caótico de 2 tomas',
+    duracion_objetivo_seg: 35,
+    cortes: [
+      { clip_index: 1, start_sec: 4.0, end_sec: 8.0, motivo: 'Gancho fuerte' },
+      { clip_index: 0, start_sec: 1.0, end_sec: 6.0, motivo: 'Explicación' },
+      { clip_index: 99, start_sec: 9.0, end_sec: 12.0, motivo: 'Clamped index' },
+    ],
+  });
+
+  const multiPlan = parseGeminiEditPlan(multiJson, { clipCount: 2, preserveOrder: true });
+  assert.equal(multiPlan.cortes[0].clip_index, 1);
+  assert.equal(multiPlan.cortes[1].clip_index, 0);
+  assert.equal(multiPlan.cortes[2].clip_index, 1); // clamped safely to clipCount - 1
 });
 
-test('formatSeconds and formatBytes produce clean deterministic labels', () => {
+test('computeQueueAnalytics groups videos by day, computes saved footage time, and ranks tags', () => {
+  const now = new Date('2026-11-21T12:00:00Z').getTime();
+  const todayKey = toLocalDateKey(now);
+  const yesterdayKey = toLocalDateKey(now - 86_400_000);
+
+  const records: AnalyticsRecord[] = [
+    { id: '1', dateKey: todayKey, processedAt: now, etiqueta: 'COCINA', rawDurationSec: 120, editedDurationSec: 30 },
+    { id: '2', dateKey: todayKey, processedAt: now, etiqueta: 'COCINA', rawDurationSec: 90, editedDurationSec: 30 },
+    { id: '3', dateKey: yesterdayKey, processedAt: now - 86_400_000, etiqueta: 'VIAJE', rawDurationSec: 200, editedDurationSec: 50 },
+  ];
+
+  const summary = computeQueueAnalytics(records, 7, now);
+  assert.equal(summary.totalProcessed, 3);
+  assert.equal(summary.totalSavedSec, 300); // 90 + 60 + 150
+  assert.equal(summary.avgReductionPct, 73);
+  assert.equal(summary.dailySeries.length, 7);
+  assert.equal(summary.dailySeries[summary.dailySeries.length - 1].count, 2);
+  assert.equal(summary.dailySeries[summary.dailySeries.length - 2].count, 1);
+  assert.equal(summary.tagBreakdown[0].etiqueta, 'COCINA');
+  assert.equal(summary.tagBreakdown[0].count, 2);
+  assert.equal(summary.tagBreakdown[1].etiqueta, 'VIAJE');
+});
+
+test('exceedsMobileRamThreshold triggers strictly above 200 MB', () => {
+  assert.equal(exceedsMobileRamThreshold(MOBILE_RAM_WARNING_BYTES), false);
+  assert.equal(exceedsMobileRamThreshold(MOBILE_RAM_WARNING_BYTES + 1), true);
+});
+
+test('formatSeconds, formatDurationHuman, and formatBytes produce clean deterministic labels', () => {
   assert.equal(formatSeconds(65.4), '1:05.4');
   assert.equal(formatSeconds(4.2), '0:04.2');
   assert.equal(formatSeconds(1.2), '0:01.2');
   assert.equal(formatSeconds(5.8), '0:05.8');
   assert.equal(formatSeconds(38.9), '0:38.9');
   assert.equal(formatSeconds(59.96), '1:00.0');
+  assert.equal(formatDurationHuman(305), '5 min 5 s');
   assert.equal(formatBytes(1536), '1.5 KB');
   assert.equal(formatBytes(26214400), '25.0 MB');
 });

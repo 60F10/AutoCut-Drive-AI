@@ -1,5 +1,9 @@
-import type { QueueItem } from '../types';
-import { buildEditedFilename } from './videoPipeline';
+import type { AnalyticsRecord, QueueItem } from '../types';
+import {
+  buildCombinedEditedFilename,
+  buildEditedFilename,
+  toLocalDateKey,
+} from './videoPipeline';
 
 export function createDemoQueueItems(): QueueItem[] {
   const now = Date.now();
@@ -11,6 +15,7 @@ export function createDemoQueueItems(): QueueItem[] {
     cortes: [
       {
         id: 'demo-cut-1',
+        clip_index: 0,
         start_sec: 1.2,
         end_sec: 5.8,
         motivo: 'Gancho inicial rápido enseñando el plátano y prometiendo el mejor batido en 10 segundos',
@@ -18,6 +23,7 @@ export function createDemoQueueItems(): QueueItem[] {
       },
       {
         id: 'demo-cut-2',
+        clip_index: 0,
         start_sec: 14.4,
         end_sec: 19.6,
         motivo: 'Comentario espontáneo mientras cae media bolsa de avena fuera del vaso',
@@ -25,6 +31,7 @@ export function createDemoQueueItems(): QueueItem[] {
       },
       {
         id: 'demo-cut-3',
+        clip_index: 0,
         start_sec: 32.1,
         end_sec: 38.9,
         motivo: 'Momento fail: enciende la batidora sin encajar bien la tapa y pega un salto',
@@ -32,6 +39,7 @@ export function createDemoQueueItems(): QueueItem[] {
       },
       {
         id: 'demo-cut-4',
+        clip_index: 0,
         start_sec: 54.0,
         end_sec: 61.5,
         motivo: 'Risa incrédula limpiando la salpicadura de la cámara y queja cómica',
@@ -39,9 +47,50 @@ export function createDemoQueueItems(): QueueItem[] {
       },
       {
         id: 'demo-cut-5',
+        clip_index: 0,
         start_sec: 78.3,
         end_sec: 84.1,
         motivo: 'Remate final probando el batido con cara seria: "Bueno, al menos está brutal"',
+        enabled: true,
+      },
+    ],
+  };
+
+  const multiClipPlan = {
+    etiqueta: 'VIAJE',
+    titulo_interno: 'Escapada improvisada: lluvia sorpresa y café de gasolinera',
+    duracion_objetivo_seg: 34,
+    cortes: [
+      {
+        id: 'demo-mc-1',
+        clip_index: 0,
+        start_sec: 2.4,
+        end_sec: 8.6,
+        motivo: 'Gancho desde el coche presumiendo de que no va a llover ni una gota',
+        enabled: true,
+      },
+      {
+        id: 'demo-mc-2',
+        clip_index: 1,
+        start_sec: 1.0,
+        end_sec: 9.2,
+        motivo: 'Corte seco a tormenta torrencial dos minutos después corriendo con paraguas roto',
+        enabled: true,
+      },
+      {
+        id: 'demo-mc-3',
+        clip_index: 0,
+        start_sec: 41.5,
+        end_sec: 49.0,
+        motivo: 'Queja cómica intentando secarse con servilletas del coche',
+        enabled: true,
+      },
+      {
+        id: 'demo-mc-4',
+        clip_index: 1,
+        start_sec: 35.8,
+        end_sec: 45.4,
+        motivo: 'Remate brindando con café de máquina mientras sale el sol justo al volver',
         enabled: true,
       },
     ],
@@ -62,20 +111,135 @@ export function createDemoQueueItems(): QueueItem[] {
       outputFileName: buildEditedFilename('IMG_4821_batido_platano.MOV', smoothiePlan.etiqueta),
       geminiFileCleaned: true,
       analysis: smoothiePlan,
+      completedAt: now - 1000 * 60 * 12,
       lastUpdated: now - 1000 * 60 * 12,
     },
     {
-      id: 'demo-car-02',
+      id: 'demo-multiclip-02',
+      source: 'demo',
+      isMultiClip: true,
+      projectName: 'Escapada_Norte',
+      originalName: 'Escapada_Norte (2 clips)',
+      mimeType: 'video/mp4',
+      sizeBytes: 112_400_000,
+      durationSec: 188.0,
+      modifiedTime: new Date(now - 1000 * 60 * 48).toISOString(),
+      stage: 'completed',
+      stageDetail: 'Combinado con 4 cortes cruzados de 2 brutos',
+      progress: 100,
+      outputFileName: buildCombinedEditedFilename('Escapada_Norte', multiClipPlan.etiqueta),
+      geminiFileCleaned: true,
+      analysis: multiClipPlan,
+      sourceClips: [
+        {
+          id: 'sc-0',
+          source: 'demo',
+          originalName: 'toma1_coche_salida.MOV',
+          mimeType: 'video/quicktime',
+          sizeBytes: 58_200_000,
+          durationSec: 98.0,
+        },
+        {
+          id: 'sc-1',
+          source: 'demo',
+          originalName: 'toma2_lluvia_cafe.mp4',
+          mimeType: 'video/mp4',
+          sizeBytes: 54_200_000,
+          durationSec: 90.0,
+        },
+      ],
+      completedAt: now - 1000 * 60 * 40,
+      lastUpdated: now - 1000 * 60 * 40,
+    },
+    {
+      id: 'demo-car-03',
       source: 'demo',
       originalName: 'vlog_arranque_coche_frio.mp4',
       mimeType: 'video/mp4',
       sizeBytes: 72_400_000,
       durationSec: 162.0,
-      modifiedTime: new Date(now - 1000 * 60 * 4).toISOString(),
+      modifiedTime: new Date(now - 1000 * 60 * 8).toISOString(),
       stage: 'pending',
       stageDetail: 'Detectado sin versión _EDITADO en la carpeta',
       progress: 0,
-      lastUpdated: now - 1000 * 60 * 4,
+      lastUpdated: now - 1000 * 60 * 8,
+    },
+    {
+      id: 'demo-kitchen-04',
+      source: 'demo',
+      originalName: 'receta_tortilla_rapida.MOV',
+      mimeType: 'video/quicktime',
+      sizeBytes: 148_900_000,
+      durationSec: 215.0,
+      modifiedTime: new Date(now - 1000 * 60 * 3).toISOString(),
+      stage: 'pending',
+      stageDetail: 'Detectado sin versión _EDITADO en la carpeta',
+      progress: 0,
+      lastUpdated: now - 1000 * 60 * 3,
+    },
+  ];
+}
+
+export function createDemoAnalyticsRecords(referenceMs = Date.now()): AnalyticsRecord[] {
+  const day = 86_400_000;
+  return [
+    {
+      id: 'ana-demo-1',
+      dateKey: toLocalDateKey(referenceMs - 5 * day),
+      processedAt: referenceMs - 5 * day,
+      etiqueta: 'COCINA',
+      rawDurationSec: 145,
+      editedDurationSec: 32,
+    },
+    {
+      id: 'ana-demo-2',
+      dateKey: toLocalDateKey(referenceMs - 4 * day),
+      processedAt: referenceMs - 4 * day,
+      etiqueta: 'VLOG',
+      rawDurationSec: 230,
+      editedDurationSec: 46,
+    },
+    {
+      id: 'ana-demo-3',
+      dateKey: toLocalDateKey(referenceMs - 4 * day),
+      processedAt: referenceMs - 4 * day,
+      etiqueta: 'FAIL',
+      rawDurationSec: 110,
+      editedDurationSec: 27,
+    },
+    {
+      id: 'ana-demo-4',
+      dateKey: toLocalDateKey(referenceMs - 2 * day),
+      processedAt: referenceMs - 2 * day,
+      etiqueta: 'COCHE',
+      rawDurationSec: 195,
+      editedDurationSec: 42,
+    },
+    {
+      id: 'ana-demo-5',
+      dateKey: toLocalDateKey(referenceMs - 1 * day),
+      processedAt: referenceMs - 1 * day,
+      etiqueta: 'RECETA',
+      rawDurationSec: 165,
+      editedDurationSec: 35,
+    },
+    {
+      id: 'ana-demo-6',
+      dateKey: toLocalDateKey(referenceMs),
+      processedAt: referenceMs - 1000 * 60 * 12,
+      etiqueta: 'COCINA',
+      rawDurationSec: 94.5,
+      editedDurationSec: 29.9,
+    },
+    {
+      id: 'ana-demo-7',
+      dateKey: toLocalDateKey(referenceMs),
+      processedAt: referenceMs - 1000 * 60 * 40,
+      etiqueta: 'VIAJE',
+      rawDurationSec: 188,
+      editedDurationSec: 31.5,
+      isMultiClip: true,
+      clipCount: 2,
     },
   ];
 }

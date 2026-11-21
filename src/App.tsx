@@ -3,17 +3,22 @@ import type { User } from 'firebase/auth';
 import { AlertCircle, Menu, RefreshCw, X } from 'lucide-react';
 import type {
   ActiveView,
+  AnalyticsRecord,
   AppSettings,
   PendingDriveUpload,
   QueueItem,
+  SourceClipRef,
 } from './types';
 import {
+  buildCombinedEditedFilename,
   buildEditedFilename,
+  calculateSelectedDuration,
   detectPendingVideos,
   extractDriveFolderId,
   isSupportedVideoFile,
+  toLocalDateKey,
 } from './utils/videoPipeline';
-import { createDemoQueueItems } from './utils/demoData';
+import { createDemoAnalyticsRecords, createDemoQueueItems } from './utils/demoData';
 import {
   getCachedDriveToken,
   initGoogleAuth,
@@ -26,15 +31,27 @@ import {
   listDriveFolderFiles,
   uploadEditedVideoMultipart,
 } from './services/driveApi';
-import { analyzeVideoWithGemini, checkServerHealth } from './services/geminiClient';
-import { readVideoDuration, renderCutsWithFfmpeg } from './services/ffmpegService';
+import {
+  analyzeMultiClipWithGemini,
+  analyzeVideoWithGemini,
+  checkServerHealth,
+} from './services/geminiClient';
+import {
+  readVideoDuration,
+  renderCutsWithFfmpeg,
+  renderMultiClipCutsWithFfmpeg,
+} from './services/ffmpegService';
 import { Sidebar } from './components/Sidebar';
 import { QueueView } from './components/QueueView';
+import { GalleryView } from './components/GalleryView';
 import { StudioView } from './components/StudioView';
 import { SettingsView } from './components/SettingsView';
 import { DriveConfirmModal } from './components/DriveConfirmModal';
+import { MultiClipComposerModal } from './components/MultiClipComposerModal';
+import { OfflineIndicator } from './components/PWAInstallButton';
 
 const SETTINGS_STORAGE_KEY = 'autocut_drive_ai_settings_v1';
+const ANALYTICS_STORAGE_KEY = 'autocut_drive_ai_analytics_v1';
 
 const DEFAULT_SETTINGS: AppSettings = {
   folderId: '',
@@ -69,8 +86,20 @@ function loadInitialSettings(): AppSettings {
   }
 }
 
+function loadInitialAnalytics(): AnalyticsRecord[] {
+  try {
+    const raw = window.localStorage.getItem(ANALYTICS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as AnalyticsRecord[]) : [];
+  } catch {
+    return [];
+  }
+}
+
 export default function App() {
   const [settings, setSettings] = useState<AppSettings>(loadInitialSettings);
+  const [analyticsRecords, setAnalyticsRecords] = useState<AnalyticsRecord[]>(loadInitialAnalytics);
   const [activeView, setActiveView] = useState<ActiveView>('queue');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
@@ -80,8 +109,10 @@ export default function App() {
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [geminiConfigured, setGeminiConfigured] = useState(true);
 
-  // Queue & Studio state
+  // Queue, Multi-Clip Selection & Studio state
   const [items, setItems] = useState<QueueItem[]>([]);
+  const [selectedForCombine, setSelectedForCombine] = useState<string[]>([]);
+  const [multiClipModalOpen, setMultiClipModalOpen] = useState(false);
   const [alreadyEditedCount, setAlreadyEditedCount] = useState(0);
   const [selectedStudioId, setSelectedStudioId] = useState<string | null>(null);
   const [lastScanTime, setLastScanTime] = useState<number | null>(null);
@@ -128,6 +159,18 @@ export default function App() {
     } catch {
       // Ignore storage quota errors
     }
+  }, []);
+
+  const appendAnalyticsRecord = useCallback((record: AnalyticsRecord) => {
+    setAnalyticsRecords((prev) => {
+      const next = [...prev.filter((r) => r.id !== record.id), record].slice(-120);
+      try {
+        window.localStorage.setItem(ANALYTICS_STORAGE_KEY, JSON.stringify(next));
+      } catch {
+        // Ignore storage quota errors
+      }
+      return next;
+    });
   }, []);
 
   const updateQueueItem = useCallback((itemId: string, patch: Partial<QueueItem>) => {
@@ -273,7 +316,7 @@ export default function App() {
         sizeBytes: file.size,
         modifiedTime: new Date(file.lastModified).toISOString(),
         stage: 'pending',
-        stageDetail: 'Vídeo local listo para analizar con Gemini',
+        stageDetail: 'Vídeo local listo para analizar o combinar en Multi-Clip',
         progress: 0,
         rawBlob: file,
         rawUrl,
@@ -282,7 +325,7 @@ export default function App() {
     });
 
     if (added.length === 0) {
-      setBannerError('Selecciona archivos de vídeo en formato .mp4, .mov o .webm.');
+      setBannerError('Selecciona archivos de vídeo válidos desde tu dispositivo (.mp4, .mov, .webm).');
       return;
     }
 
@@ -298,6 +341,52 @@ export default function App() {
       return [...fresh, ...prev];
     });
     setSelectedStudioId(demoItems[0].id);
+
+    const demoStats = createDemoAnalyticsRecords();
+    setAnalyticsRecords((prev) => {
+      const existingIds = new Set(prev.map((r) => r.id));
+      const freshStats = demoStats.filter((s) => !existingIds.has(s.id));
+      const merged = [...prev, ...freshStats];
+      try {
+        window.localStorage.setItem(ANALYTICS_STORAGE_KEY, JSON.stringify(merged));
+      } catch {
+        // Ignore storage quota errors
+      }
+      return merged;
+    });
+  }, []);
+
+  const handleRemoveQueueItem = useCallback((itemId: string) => {
+    setItems((prev) => {
+      const found = prev.find((i) => i.id === itemId);
+      if (found?.rawUrl) URL.revokeObjectURL(found.rawUrl);
+      if (found?.editedUrl) URL.revokeObjectURL(found.editedUrl);
+      return prev.filter((i) => i.id !== itemId);
+    });
+    setSelectedForCombine((prev) => prev.filter((id) => id !== itemId));
+  }, []);
+
+  const handleClearPending = useCallback(() => {
+    const removedIds = new Set<string>();
+    setItems((prev) =>
+      prev.filter((item) => {
+        if (item.stage === 'pending' || item.stage === 'error') {
+          removedIds.add(item.id);
+          if (item.rawUrl) URL.revokeObjectURL(item.rawUrl);
+          return false;
+        }
+        return true;
+      })
+    );
+    if (removedIds.size > 0) {
+      setSelectedForCombine((prev) => prev.filter((id) => !removedIds.has(id)));
+    }
+  }, []);
+
+  const handleToggleSelectForCombine = useCallback((itemId: string) => {
+    setSelectedForCombine((prev) =>
+      prev.includes(itemId) ? prev.filter((id) => id !== itemId) : [...prev, itemId]
+    );
   }, []);
 
   const processSingleItem = useCallback(
@@ -307,7 +396,7 @@ export default function App() {
 
       if (target.source === 'demo' && !target.rawBlob) {
         setBannerError(
-          'Los vídeos de ejemplo no contienen archivo binario para enviar a Gemini. Añade un vídeo local o escanea tu carpeta de Google Drive.'
+          'Los vídeos de ejemplo no contienen archivo binario para enviar a Gemini. Sube un vídeo desde tu galería o escanea tu carpeta de Google Drive.'
         );
         return;
       }
@@ -412,13 +501,26 @@ export default function App() {
           URL.revokeObjectURL(target.editedUrl);
         }
 
+        const completedAt = Date.now();
         updateQueueItem(itemId, {
           editedBlob,
           editedUrl,
           outputFileName,
           stage: 'completed',
-          stageDetail: 'Renderizado completado y listo en Estudio de cortes',
+          stageDetail: 'Renderizado completado y disponible en Galería y Estudio',
           progress: 100,
+          completedAt,
+        });
+
+        appendAnalyticsRecord({
+          id: `ana-${itemId}-${completedAt}`,
+          dateKey: toLocalDateKey(completedAt),
+          processedAt: completedAt,
+          etiqueta: plan.etiqueta,
+          rawDurationSec: durationSec || calculateSelectedDuration(plan.cortes),
+          editedDurationSec: calculateSelectedDuration(plan.cortes),
+          isMultiClip: false,
+          clipCount: 1,
         });
 
         setSelectedStudioId(itemId);
@@ -453,17 +555,264 @@ export default function App() {
         setIsProcessingAny(false);
       }
     },
-    [accessToken, settings.model, settings.folderId, settings.autoUploadEnabled, updateQueueItem]
+    [
+      accessToken,
+      settings.model,
+      settings.folderId,
+      settings.autoUploadEnabled,
+      updateQueueItem,
+      appendAnalyticsRecord,
+    ]
+  );
+
+  // Full Multi-Clip end-to-end pipeline
+  const handleStartMultiClipCombine = useCallback(
+    async (orderedIds: string[], projectName: string) => {
+      const orderedItems = orderedIds
+        .map((id) => itemsRef.current.find((i) => i.id === id))
+        .filter((i): i is QueueItem => Boolean(i));
+
+      if (orderedItems.length < 2) return;
+
+      const hasDemoWithoutBlob = orderedItems.some((item) => item.source === 'demo' && !item.rawBlob);
+      if (hasDemoWithoutBlob) {
+        setMultiClipModalOpen(false);
+        setBannerError(
+          'Los clips de ejemplo no contienen binario para enviar a Gemini. Selecciona 2 o más vídeos de Google Drive o subidos desde tu móvil/PC.'
+        );
+        return;
+      }
+
+      setMultiClipModalOpen(false);
+      setSelectedForCombine([]);
+      setBannerError(null);
+      setIsProcessingAny(true);
+
+      const combinedId = `multiclip-${Date.now()}`;
+      const projectBase = projectName.trim() || orderedItems[0].originalName;
+      const displayName = projectName.trim()
+        ? `${projectName.trim()} (${orderedItems.length} clips)`
+        : `${orderedItems[0].originalName} + ${orderedItems.length - 1} más`;
+
+      const initialSourceClips: SourceClipRef[] = orderedItems.map((clip) => ({
+        id: clip.id,
+        source: clip.source,
+        driveFileId: clip.driveFileId,
+        originalName: clip.originalName,
+        mimeType: clip.mimeType,
+        sizeBytes: clip.sizeBytes,
+        durationSec: clip.durationSec,
+        rawBlob: clip.rawBlob,
+        rawUrl: clip.rawUrl,
+      }));
+
+      const totalSizeBytes = initialSourceClips.reduce((sum, c) => sum + c.sizeBytes, 0);
+
+      const combinedItem: QueueItem = {
+        id: combinedId,
+        source: initialSourceClips.some((c) => c.source === 'drive') ? 'drive' : 'local',
+        isMultiClip: true,
+        projectName: projectName.trim() || undefined,
+        originalName: displayName,
+        mimeType: 'video/mp4',
+        sizeBytes: totalSizeBytes,
+        stage: 'downloading',
+        stageDetail: `Preparando ${orderedItems.length} clips para combinar...`,
+        progress: 5,
+        sourceClips: initialSourceClips,
+        lastUpdated: Date.now(),
+      };
+
+      setItems((prev) => [combinedItem, ...prev]);
+
+      try {
+        const resolvedClips: SourceClipRef[] = [];
+
+        // 1. Download any Drive clips & read durations
+        for (let i = 0; i < initialSourceClips.length; i += 1) {
+          const clip = initialSourceClips[i];
+          let blob = clip.rawBlob;
+          let rawUrl = clip.rawUrl;
+
+          if (!blob && clip.source === 'drive' && clip.driveFileId) {
+            const token = accessToken || getCachedDriveToken();
+            if (!token) {
+              throw new DriveAuthExpiredError(
+                'Inicia sesión con Google Drive para descargar los clips seleccionados.'
+              );
+            }
+
+            updateQueueItem(combinedId, {
+              stage: 'downloading',
+              stageDetail: `Descargando Clip ${i + 1}/${initialSourceClips.length}: ${clip.originalName}...`,
+              progress: Math.round((i / initialSourceClips.length) * 100),
+            });
+
+            blob = await downloadDriveVideo(
+              clip.driveFileId,
+              token,
+              clip.sizeBytes,
+              (pct) => {
+                const overall = Math.round(((i + pct / 100) / initialSourceClips.length) * 100);
+                updateQueueItem(combinedId, {
+                  stage: 'downloading',
+                  stageDetail: `Descargando Clip ${i + 1}/${initialSourceClips.length} (${pct}%)...`,
+                  progress: overall,
+                });
+              }
+            );
+            rawUrl = URL.createObjectURL(blob);
+          }
+
+          if (!blob) {
+            throw new Error(`Falta el archivo binario para el Clip ${i + 1} (${clip.originalName}).`);
+          }
+
+          const durationSec = clip.durationSec || (await readVideoDuration(blob));
+          resolvedClips.push({
+            ...clip,
+            rawBlob: blob,
+            rawUrl,
+            durationSec,
+          });
+        }
+
+        const totalRawDurationSec = resolvedClips.reduce(
+          (sum, c) => sum + (c.durationSec || 0),
+          0
+        );
+
+        updateQueueItem(combinedId, {
+          sourceClips: resolvedClips,
+          durationSec: totalRawDurationSec,
+          stage: 'analyzing',
+          stageDetail: `Subiendo ${resolvedClips.length} clips a Gemini Files API...`,
+          progress: 8,
+        });
+
+        // 2. Analyze all clips together via server-side /api/gemini/analyze-multi
+        const { plan, geminiFileCleaned } = await analyzeMultiClipWithGemini(
+          resolvedClips.map((c) => ({
+            blob: c.rawBlob!,
+            fileName: c.originalName,
+            durationSec: c.durationSec,
+          })),
+          settings.model,
+          projectName,
+          (message, progress) => {
+            updateQueueItem(combinedId, {
+              stage: 'analyzing',
+              stageDetail: message,
+              progress,
+            });
+          }
+        );
+
+        const outputFileName = buildCombinedEditedFilename(projectBase, plan.etiqueta);
+
+        updateQueueItem(combinedId, {
+          analysis: plan,
+          outputFileName,
+          geminiFileCleaned,
+          stage: 'rendering',
+          stageDetail: 'Normalizando clips a 1080×1920 (30fps) en FFmpeg.wasm...',
+          progress: 5,
+        });
+
+        // 3. Render normalized 1080x1920 30fps combined MP4 in browser
+        const editedBlob = await renderMultiClipCutsWithFfmpeg(
+          resolvedClips.map((c) => ({
+            blob: c.rawBlob!,
+            originalFileName: c.originalName,
+          })),
+          plan.cortes,
+          ({ percent, message }) => {
+            updateQueueItem(combinedId, {
+              stage: 'rendering',
+              stageDetail: message,
+              progress: percent,
+            });
+          }
+        );
+
+        const editedUrl = URL.createObjectURL(editedBlob);
+        const completedAt = Date.now();
+
+        updateQueueItem(combinedId, {
+          editedBlob,
+          editedUrl,
+          outputFileName,
+          stage: 'completed',
+          stageDetail: `Combinado con ${plan.cortes.length} cortes de ${resolvedClips.length} brutos`,
+          progress: 100,
+          completedAt,
+        });
+
+        appendAnalyticsRecord({
+          id: `ana-${combinedId}`,
+          dateKey: toLocalDateKey(completedAt),
+          processedAt: completedAt,
+          etiqueta: plan.etiqueta,
+          rawDurationSec: totalRawDurationSec || calculateSelectedDuration(plan.cortes),
+          editedDurationSec: calculateSelectedDuration(plan.cortes),
+          isMultiClip: true,
+          clipCount: resolvedClips.length,
+        });
+
+        setSelectedStudioId(combinedId);
+
+        const canUpload = Boolean(
+          (accessToken || getCachedDriveToken()) && settings.folderId && settings.autoUploadEnabled
+        );
+        if (canUpload) {
+          setPendingDriveUpload({
+            itemId: combinedId,
+            fileName: outputFileName,
+            folderId: settings.folderId,
+            sizeBytes: editedBlob.size,
+          });
+        }
+      } catch (err) {
+        if (err instanceof DriveAuthExpiredError) {
+          setUser(null);
+          setAccessToken(null);
+        }
+        const message =
+          err instanceof Error ? err.message : 'Error inesperado al combinar los clips.';
+        updateQueueItem(combinedId, {
+          stage: 'error',
+          errorMessage: message,
+          stageDetail: message,
+          progress: 0,
+        });
+        setBannerError(message);
+      } finally {
+        setIsProcessingAny(false);
+      }
+    },
+    [
+      accessToken,
+      settings.model,
+      settings.folderId,
+      settings.autoUploadEnabled,
+      updateQueueItem,
+      appendAnalyticsRecord,
+    ]
   );
 
   const handleProcessAllPending = useCallback(async () => {
     const pendingIds = itemsRef.current
-      .filter((i) => (i.stage === 'pending' || i.stage === 'error') && (i.source !== 'demo' || i.rawBlob))
+      .filter(
+        (i) =>
+          (i.stage === 'pending' || i.stage === 'error') &&
+          !i.isMultiClip &&
+          (i.source !== 'demo' || i.rawBlob)
+      )
       .map((i) => i.id);
 
     if (pendingIds.length === 0) {
       setBannerError(
-        'No hay vídeos reales pendientes en la cola. Añade un vídeo local o escanea tu carpeta de Google Drive.'
+        'No hay vídeos reales pendientes en la cola. Sube vídeos locales o escanea tu carpeta de Google Drive.'
       );
       return;
     }
@@ -508,7 +857,16 @@ export default function App() {
   const handleRerenderItem = useCallback(
     async (itemId: string) => {
       const target = itemsRef.current.find((i) => i.id === itemId);
-      if (!target || !target.rawBlob || !target.analysis) return;
+      if (!target || !target.analysis) return;
+
+      const isMulti = Boolean(
+        target.isMultiClip &&
+          target.sourceClips &&
+          target.sourceClips.length > 0 &&
+          target.sourceClips.every((c) => Boolean(c.rawBlob))
+      );
+
+      if (!isMulti && !target.rawBlob) return;
 
       setBannerError(null);
       setIsStudioRendering(true);
@@ -521,19 +879,35 @@ export default function App() {
           progress: 5,
         });
 
-        const editedBlob = await renderCutsWithFfmpeg(
-          target.rawBlob,
-          target.originalName,
-          target.analysis.cortes,
-          (progress) => {
-            setStudioRenderProgress(progress);
-            updateQueueItem(itemId, {
-              stage: 'rendering',
-              stageDetail: progress.message,
-              progress: progress.percent,
-            });
-          }
-        );
+        const editedBlob = isMulti
+          ? await renderMultiClipCutsWithFfmpeg(
+              target.sourceClips!.map((c) => ({
+                blob: c.rawBlob!,
+                originalFileName: c.originalName,
+              })),
+              target.analysis.cortes,
+              (progress) => {
+                setStudioRenderProgress(progress);
+                updateQueueItem(itemId, {
+                  stage: 'rendering',
+                  stageDetail: progress.message,
+                  progress: progress.percent,
+                });
+              }
+            )
+          : await renderCutsWithFfmpeg(
+              target.rawBlob!,
+              target.originalName,
+              target.analysis.cortes,
+              (progress) => {
+                setStudioRenderProgress(progress);
+                updateQueueItem(itemId, {
+                  stage: 'rendering',
+                  stageDetail: progress.message,
+                  progress: progress.percent,
+                });
+              }
+            );
 
         const editedUrl = URL.createObjectURL(editedBlob);
         if (target.editedUrl) {
@@ -569,7 +943,13 @@ export default function App() {
       if (!target || !target.analysis) return;
 
       const fileName =
-        target.outputFileName || buildEditedFilename(target.originalName, target.analysis.etiqueta);
+        target.outputFileName ||
+        (target.isMultiClip
+          ? buildCombinedEditedFilename(
+              target.projectName || target.sourceClips?.[0]?.originalName || target.originalName,
+              target.analysis.etiqueta
+            )
+          : buildEditedFilename(target.originalName, target.analysis.etiqueta));
 
       setPendingDriveUpload({
         itemId,
@@ -659,15 +1039,26 @@ export default function App() {
     }
   }, [pendingDriveUpload, accessToken, updateQueueItem]);
 
+  const selectedCombineItems = useMemo(
+    () =>
+      selectedForCombine
+        .map((id) => items.find((i) => i.id === id))
+        .filter((i): i is QueueItem => Boolean(i)),
+    [selectedForCombine, items]
+  );
+
   const queueCounts = useMemo(() => {
     const pending = items.filter((i) => i.stage === 'pending' || i.stage === 'error').length;
+    const completed = items.filter((i) => i.stage === 'completed' && Boolean(i.analysis)).length;
     const studioReady = items.filter((i) => Boolean(i.analysis)).length;
-    return { total: items.length, pending, studioReady };
+    return { total: items.length, pending, completed, studioReady };
   }, [items]);
 
   const viewTitle =
     activeView === 'queue'
       ? 'Cola de vídeos'
+      : activeView === 'gallery'
+      ? 'Galería de resultados'
       : activeView === 'studio'
       ? 'Estudio de cortes'
       : 'Ajustes';
@@ -753,6 +1144,13 @@ export default function App() {
           {activeView === 'queue' && (
             <QueueView
               items={items}
+              analyticsRecords={analyticsRecords}
+              selectedIds={selectedForCombine}
+              onToggleSelectItem={handleToggleSelectForCombine}
+              onClearSelection={() => setSelectedForCombine([])}
+              onOpenMultiClipComposer={() => setMultiClipModalOpen(true)}
+              onRemoveItem={handleRemoveQueueItem}
+              onClearPending={handleClearPending}
               alreadyEditedCount={alreadyEditedCount}
               lastScanTime={lastScanTime}
               isScanning={isScanning}
@@ -769,6 +1167,19 @@ export default function App() {
               onAddLocalFiles={handleAddLocalFiles}
               onLoadDemo={handleLoadDemo}
               onGoToSettings={() => setActiveView('settings')}
+            />
+          )}
+
+          {activeView === 'gallery' && (
+            <GalleryView
+              items={items}
+              onOpenStudio={(id) => {
+                setSelectedStudioId(id);
+                setActiveView('studio');
+              }}
+              onRequestDriveUpload={handleRequestDriveUpload}
+              onLoadDemo={handleLoadDemo}
+              onGoToQueue={() => setActiveView('queue')}
             />
           )}
 
@@ -803,12 +1214,22 @@ export default function App() {
         </main>
       </div>
 
+      <MultiClipComposerModal
+        open={multiClipModalOpen}
+        selectedItems={selectedCombineItems}
+        onClose={() => setMultiClipModalOpen(false)}
+        onStartCombine={handleStartMultiClipCombine}
+        isProcessing={isProcessingAny}
+      />
+
       <DriveConfirmModal
         pendingUpload={pendingDriveUpload}
         onConfirm={handleConfirmDriveUpload}
         onCancel={() => setPendingDriveUpload(null)}
         isUploading={isUploadingToDrive}
       />
+
+      <OfflineIndicator />
     </div>
   );
 }

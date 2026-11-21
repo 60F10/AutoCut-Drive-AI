@@ -9,7 +9,7 @@ import { GoogleGenAI, Type, createPartFromUri } from '@google/genai';
 const PORT = Number(process.env.PORT) || 3000;
 const ALLOWED_MODELS = new Set(['gemini-2.5-flash', 'gemini-2.5-pro']);
 
-const SYSTEM_PROMPT = `Eres un editor de vídeo experto en contenido vertical (Reels/TikTok/Shorts) de estilo natural, dinámico y gracioso. Tu objetivo es transformar un vídeo bruto en una pieza ágil mediante cortes secos (jump cuts), eliminando TODOS los silencios, pausas muertas, tiempos de espera y partes aburridas.
+const SINGLE_CLIP_SYSTEM_PROMPT = `Eres un editor de vídeo experto en contenido vertical (Reels/TikTok/Shorts) de estilo natural, dinámico y gracioso. Tu objetivo es transformar un vídeo bruto en una pieza ágil mediante cortes secos (jump cuts), eliminando TODOS los silencios, pausas muertas, tiempos de espera y partes aburridas.
 Reglas de edición:
 
 Mantén una narrativa clara: inicio rápido con gancho -> desarrollo con el momento cómico, improviso o problema/fail cotidiano -> remate final gracioso o reacción.
@@ -21,6 +21,15 @@ Duración adaptativa: si el bruto dura menos de 2-3 minutos, apunta a un vídeo 
 Los cortes deben ser precisos al decimal para que no se corten palabras a medias.
 
 Genera una etiqueta corta de 1 palabra en mayúsculas sin tildes que identifique el contenido (ej: COCINA, VLOG, RECETA, FAIL, COCHE, VIAJE).`;
+
+const MULTI_CLIP_SYSTEM_PROMPT = `Eres un editor de vídeo experto en contenido vertical (Reels/TikTok/Shorts) de estilo natural, dinámico y gracioso. Recibirás MÚLTIPLES vídeos brutos etiquetados como "Clip 0", "Clip 1", "Clip 2", etc.
+Tu objetivo es mezclar y ordenar los mejores momentos de todos los clips proporcionados para construir UNA SOLA historia coherente, graciosa y con ritmo jump-cut (30 a 60 segundos), eliminando TODOS los silencios, pausas muertas, tiempos de espera y partes aburridas.
+
+Reglas de edición Multi-Clip:
+1. Puedes alternar libremente entre los distintos clips en el orden narrativo que resulte más gracioso e impactante: gancho inicial fuerte -> desarrollo dinámico combinando tomas -> remate final cómico o reacción.
+2. En cada elemento de "cortes" indica obligatoriamente "clip_index" (entero 0, 1, 2... correspondiente al Clip de origen), además de "start_sec", "end_sec" y "motivo".
+3. Los timestamps start_sec y end_sec deben ser precisos al decimal para no cortar palabras a medias y estar siempre dentro de la duración del clip indicado por clip_index.
+4. Genera una etiqueta corta de 1 palabra en mayúsculas sin tildes que identifique el tema general (ej: COCINA, VLOG, RECETA, FAIL, COCHE, VIAJE).`;
 
 const uploadDir = path.join(os.tmpdir(), 'autocut-drive-ai-uploads');
 fs.mkdirSync(uploadDir, { recursive: true });
@@ -34,7 +43,8 @@ const upload = multer({
     },
   }),
   limits: {
-    fileSize: 600 * 1024 * 1024, // 600 MB max temp file
+    fileSize: 600 * 1024 * 1024, // 600 MB per file
+    files: 12,
   },
 });
 
@@ -63,6 +73,77 @@ async function sleep(ms: number) {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function waitForGeminiFileActive(
+  ai: GoogleGenAI,
+  fileName: string,
+  onPoll?: (secondsElapsed: number) => void
+) {
+  let fileInfo = await ai.files.get({ name: fileName });
+  const maxAttempts = 80;
+  let attempts = 0;
+
+  while (fileInfo.state === 'PROCESSING' && attempts < maxAttempts) {
+    attempts += 1;
+    await sleep(2500);
+    fileInfo = await ai.files.get({ name: fileName });
+    onPoll?.(attempts * 2.5);
+  }
+
+  if (fileInfo.state !== 'ACTIVE' || !fileInfo.uri) {
+    throw new Error(
+      `El archivo en Gemini Files API no alcanzó el estado ACTIVE (estado actual: ${fileInfo.state ?? 'desconocido'}).`
+    );
+  }
+
+  return fileInfo;
+}
+
+const CUT_RESPONSE_SCHEMA = {
+  type: Type.OBJECT,
+  properties: {
+    etiqueta: {
+      type: Type.STRING,
+      description:
+        'Una sola palabra en mayúsculas sin tildes que identifique el contenido (ej: COCINA, VLOG, RECETA, FAIL, COCHE, VIAJE).',
+    },
+    titulo_interno: {
+      type: Type.STRING,
+      description: 'Resumen breve y gracioso del vídeo editado.',
+    },
+    duracion_objetivo_seg: {
+      type: Type.NUMBER,
+      description: 'Duración objetivo aproximada en segundos del vídeo final.',
+    },
+    cortes: {
+      type: Type.ARRAY,
+      description: 'Lista ordenada de fragmentos seleccionados para el jump cut.',
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          clip_index: {
+            type: Type.INTEGER,
+            description: 'Índice entero (0, 1, 2...) del clip de vídeo de origen.',
+          },
+          start_sec: {
+            type: Type.NUMBER,
+            description: 'Segundo de inicio del corte con precisión decimal.',
+          },
+          end_sec: {
+            type: Type.NUMBER,
+            description: 'Segundo de fin del corte con precisión decimal.',
+          },
+          motivo: {
+            type: Type.STRING,
+            description: 'Motivo breve por el que se conserva este fragmento.',
+          },
+        },
+        required: ['clip_index', 'start_sec', 'end_sec', 'motivo'],
+      },
+    },
+  },
+  required: ['etiqueta', 'titulo_interno', 'duracion_objetivo_seg', 'cortes'],
+};
+
 async function startServer() {
   const app = express();
 
@@ -73,6 +154,7 @@ async function startServer() {
     });
   });
 
+  // Single-clip Gemini analysis
   app.post('/api/gemini/analyze-video', upload.single('video'), async (req, res) => {
     const tempFile = req.file;
     if (!tempFile) {
@@ -84,9 +166,10 @@ async function startServer() {
     const model = ALLOWED_MODELS.has(requestedModel) ? requestedModel : 'gemini-2.5-flash';
     const durationSec = Number(req.body?.durationSec) || 0;
     const originalName = typeof req.body?.fileName === 'string' ? req.body.fileName : tempFile.originalname;
-    const mimeType = tempFile.mimetype && tempFile.mimetype.startsWith('video/')
-      ? tempFile.mimetype
-      : 'video/mp4';
+    const mimeType =
+      tempFile.mimetype && tempFile.mimetype.startsWith('video/')
+        ? tempFile.mimetype
+        : 'video/mp4';
 
     res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache');
@@ -123,26 +206,13 @@ async function startServer() {
         message: 'Esperando a que Gemini procese el vídeo (estado ACTIVE)...',
       });
 
-      let fileInfo = await ai.files.get({ name: uploadedGeminiFileName });
-      const maxAttempts = 80;
-      let attempts = 0;
-
-      while (fileInfo.state === 'PROCESSING' && attempts < maxAttempts) {
-        attempts += 1;
-        await sleep(2500);
-        fileInfo = await ai.files.get({ name: uploadedGeminiFileName });
+      const fileInfo = await waitForGeminiFileActive(ai, uploadedGeminiFileName, (elapsed) => {
         writeNdjson(res, {
           type: 'progress',
           phase: 'polling',
-          message: `Procesando vídeo en Gemini (${attempts * 2.5}s)...`,
+          message: `Procesando vídeo en Gemini (${elapsed}s)...`,
         });
-      }
-
-      if (fileInfo.state !== 'ACTIVE' || !fileInfo.uri) {
-        throw new Error(
-          `El archivo en Gemini Files API no alcanzó el estado ACTIVE (estado actual: ${fileInfo.state ?? 'desconocido'}).`
-        );
-      }
+      });
 
       writeNdjson(res, {
         type: 'progress',
@@ -155,60 +225,20 @@ async function startServer() {
           ? `La duración total aproximada del vídeo bruto es de ${durationSec.toFixed(1)} segundos.`
           : 'Analiza la duración real del vídeo adjunto.';
 
-      const userPrompt = `Analiza este vídeo bruto llamado "${originalName}". ${durationHint}
-Selecciona los mejores momentos para crear un vídeo corto vertical súper ágil mediante jump cuts, eliminando todos los silencios, pausas muertas y tiempos de espera.
-Asegúrate de que todos los timestamps start_sec y end_sec estén ordenados cronológicamente, no se solapen, y respeten palabras completas al decimal.`;
+      const userPrompt = `Analiza este vídeo bruto (Clip 0: "${originalName}"). ${durationHint}
+Usa siempre "clip_index": 0 en cada corte.
+Selecciona los mejores momentos para crear un vídeo corto vertical súper ágil mediante jump cuts, eliminando todos los silencios, pausas muertas y tiempos de espera.`;
 
       const response = await ai.models.generateContent({
         model,
         contents: [
-          createPartFromUri(fileInfo.uri, fileInfo.mimeType || mimeType),
+          createPartFromUri(fileInfo.uri!, fileInfo.mimeType || mimeType),
           userPrompt,
         ],
         config: {
-          systemInstruction: SYSTEM_PROMPT,
+          systemInstruction: SINGLE_CLIP_SYSTEM_PROMPT,
           responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              etiqueta: {
-                type: Type.STRING,
-                description:
-                  'Una sola palabra en mayúsculas sin tildes que identifique el contenido (ej: COCINA, VLOG, RECETA, FAIL, COCHE, VIAJE).',
-              },
-              titulo_interno: {
-                type: Type.STRING,
-                description: 'Resumen breve y gracioso del vídeo editado.',
-              },
-              duracion_objetivo_seg: {
-                type: Type.NUMBER,
-                description: 'Duración objetivo aproximada en segundos del vídeo final.',
-              },
-              cortes: {
-                type: Type.ARRAY,
-                description: 'Lista cronológica de fragmentos seleccionados para el jump cut.',
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    start_sec: {
-                      type: Type.NUMBER,
-                      description: 'Segundo de inicio del corte con precisión decimal.',
-                    },
-                    end_sec: {
-                      type: Type.NUMBER,
-                      description: 'Segundo de fin del corte con precisión decimal.',
-                    },
-                    motivo: {
-                      type: Type.STRING,
-                      description: 'Motivo breve por el que se conserva este fragmento.',
-                    },
-                  },
-                  required: ['start_sec', 'end_sec', 'motivo'],
-                },
-              },
-            },
-            required: ['etiqueta', 'titulo_interno', 'duracion_objetivo_seg', 'cortes'],
-          },
+          responseSchema: CUT_RESPONSE_SCHEMA,
         },
       });
 
@@ -251,7 +281,7 @@ Asegúrate de que todos los timestamps start_sec y end_sec estén ordenados cron
         try {
           await ai.files.delete({ name: uploadedGeminiFileName });
         } catch {
-          // Best-effort cleanup on failure
+          // Best-effort cleanup
         }
       }
 
@@ -264,6 +294,194 @@ Asegúrate de que todos los timestamps start_sec y end_sec estén ordenados cron
       if (tempFile?.path) {
         fs.promises.unlink(tempFile.path).catch(() => {});
       }
+    }
+  });
+
+  // Multi-clip Gemini analysis (combines multiple raw videos into one jump-cut story)
+  app.post('/api/gemini/analyze-multi', upload.array('videos', 12), async (req, res) => {
+    const tempFiles = (req.files as Express.Multer.File[] | undefined) ?? [];
+    if (tempFiles.length === 0) {
+      res.status(400).json({ error: 'No se recibieron archivos de vídeo para combinar.' });
+      return;
+    }
+
+    const requestedModel = typeof req.body?.model === 'string' ? req.body.model : 'gemini-2.5-flash';
+    const model = ALLOWED_MODELS.has(requestedModel) ? requestedModel : 'gemini-2.5-flash';
+    const projectName = typeof req.body?.projectName === 'string' ? req.body.projectName.trim() : '';
+
+    let clipMetadata: Array<{ name?: string; durationSec?: number }> = [];
+    try {
+      if (typeof req.body?.clipsMeta === 'string') {
+        clipMetadata = JSON.parse(req.body.clipsMeta);
+      }
+    } catch {
+      clipMetadata = [];
+    }
+
+    res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
+    const uploadedGeminiFileNames: string[] = [];
+    let ai: GoogleGenAI | null = null;
+
+    try {
+      ai = createGeminiClient();
+
+      // 1. Upload every clip via Gemini Files API (resumable upload)
+      const uploadedMeta: Array<{
+        index: number;
+        geminiName: string;
+        displayName: string;
+        mimeType: string;
+        durationSec: number;
+      }> = [];
+
+      for (let idx = 0; idx < tempFiles.length; idx += 1) {
+        const file = tempFiles[idx];
+        const displayName = clipMetadata[idx]?.name || file.originalname || `clip_${idx}.mp4`;
+        const durationSec = Number(clipMetadata[idx]?.durationSec) || 0;
+        const mimeType =
+          file.mimetype && file.mimetype.startsWith('video/') ? file.mimetype : 'video/mp4';
+
+        writeNdjson(res, {
+          type: 'progress',
+          phase: 'uploading',
+          message: `Subiendo Clip ${idx + 1}/${tempFiles.length} (${displayName}) a Gemini Files API...`,
+          percent: Math.round(10 + ((idx + 0.5) / tempFiles.length) * 30),
+        });
+
+        const uploaded = await ai.files.upload({
+          file: file.path,
+          config: {
+            mimeType,
+            displayName: displayName.slice(0, 120),
+          },
+        });
+
+        if (!uploaded.name) {
+          throw new Error(`Gemini Files API no devolvió identificador para Clip ${idx}.`);
+        }
+
+        uploadedGeminiFileNames.push(uploaded.name);
+        uploadedMeta.push({
+          index: idx,
+          geminiName: uploaded.name,
+          displayName,
+          mimeType,
+          durationSec,
+        });
+      }
+
+      // 2. Poll until EVERY uploaded file is ACTIVE
+      const activeParts: Array<{ uri: string; mimeType: string; index: number; displayName: string; durationSec: number }> = [];
+      for (let idx = 0; idx < uploadedMeta.length; idx += 1) {
+        const meta = uploadedMeta[idx];
+        writeNdjson(res, {
+          type: 'progress',
+          phase: 'polling',
+          message: `Esperando estado ACTIVE para Clip ${idx + 1}/${uploadedMeta.length} (${meta.displayName})...`,
+          percent: Math.round(42 + ((idx + 1) / uploadedMeta.length) * 24),
+        });
+
+        const activeInfo = await waitForGeminiFileActive(ai, meta.geminiName);
+        activeParts.push({
+          uri: activeInfo.uri!,
+          mimeType: activeInfo.mimeType || meta.mimeType,
+          index: meta.index,
+          displayName: meta.displayName,
+          durationSec: meta.durationSec,
+        });
+      }
+
+      // 3. Build multi-clip prompt and contents array with explicit Clip 0, Clip 1... markers
+      writeNdjson(res, {
+        type: 'progress',
+        phase: 'analyzing',
+        message: `Construyendo historia combinada de ${activeParts.length} clips con ${model}...`,
+        percent: 78,
+      });
+
+      const contentsParts: Array<ReturnType<typeof createPartFromUri> | string> = [];
+      const clipIndexSummary: string[] = [];
+
+      for (const clip of activeParts) {
+        const durLabel = clip.durationSec > 0 ? ` (~${clip.durationSec.toFixed(1)}s)` : '';
+        const header = `Clip ${clip.index}: ${clip.displayName}${durLabel}`;
+        clipIndexSummary.push(`- ${header}`);
+        contentsParts.push(header);
+        contentsParts.push(createPartFromUri(clip.uri, clip.mimeType));
+      }
+
+      const projectContext = projectName ? `Nombre del proyecto: "${projectName}".\n` : '';
+      contentsParts.push(
+        `${projectContext}Aquí tienes ${activeParts.length} vídeos brutos:\n${clipIndexSummary.join('\n')}\n\n` +
+          `Combina y ordena los mejores fragmentos de todos los clips para crear un único vídeo vertical (30-60 segundos) divertido, ágil y coherente con jump cuts. ` +
+          `Recuerda devolver "clip_index" (0 a ${activeParts.length - 1}), "start_sec", "end_sec" y "motivo" en cada corte.`
+      );
+
+      const response = await ai.models.generateContent({
+        model,
+        contents: contentsParts,
+        config: {
+          systemInstruction: MULTI_CLIP_SYSTEM_PROMPT,
+          responseMimeType: 'application/json',
+          responseSchema: CUT_RESPONSE_SCHEMA,
+        },
+      });
+
+      const rawText = response.text?.trim();
+      if (!rawText) {
+        throw new Error('Gemini devolvió una respuesta vacía en el análisis Multi-Clip.');
+      }
+
+      const parsed = JSON.parse(rawText);
+
+      // 4. Clean up ALL temporary files from Gemini Files API
+      writeNdjson(res, {
+        type: 'progress',
+        phase: 'cleaning',
+        message: `Eliminando ${uploadedGeminiFileNames.length} archivos temporales de Gemini Files API...`,
+        percent: 94,
+      });
+
+      let cleanedCount = 0;
+      for (const fileName of uploadedGeminiFileNames) {
+        try {
+          await ai.files.delete({ name: fileName });
+          cleanedCount += 1;
+        } catch (cleanupErr) {
+          console.warn(`No se pudo borrar ${fileName} de Gemini Files API:`, cleanupErr);
+        }
+      }
+      uploadedGeminiFileNames.length = 0;
+
+      writeNdjson(res, {
+        type: 'result',
+        analysis: parsed,
+        geminiFileCleaned: cleanedCount === activeParts.length,
+      });
+      res.end();
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error ? error.message : 'Error inesperado en el análisis Multi-Clip.';
+      console.error('[Gemini Multi-Clip Error]:', error);
+
+      if (ai && uploadedGeminiFileNames.length > 0) {
+        await Promise.allSettled(
+          uploadedGeminiFileNames.map((name) => ai!.files.delete({ name }))
+        );
+      }
+
+      writeNdjson(res, {
+        type: 'error',
+        error: message,
+      });
+      res.end();
+    } finally {
+      await Promise.allSettled(
+        tempFiles.map((f) => fs.promises.unlink(f.path).catch(() => {}))
+      );
     }
   });
 

@@ -6,28 +6,19 @@ export interface AnalyzeVideoResult {
   geminiFileCleaned: boolean;
 }
 
-export async function analyzeVideoWithGemini(
-  videoBlob: Blob,
-  fileName: string,
-  model: GeminiModelId,
-  durationSec?: number,
+async function consumeAnalyzeStream(
+  response: Response,
+  parseOptions:
+    | number
+    | {
+        maxDurationSec?: number;
+        clipCount?: number;
+        clipDurationsSec?: number[];
+        preserveOrder?: boolean;
+      }
+    | undefined,
   onStatusUpdate?: (message: string, progress: number) => void
 ): Promise<AnalyzeVideoResult> {
-  const formData = new FormData();
-  formData.append('video', videoBlob, fileName);
-  formData.append('fileName', fileName);
-  formData.append('model', model);
-  if (durationSec && Number.isFinite(durationSec)) {
-    formData.append('durationSec', String(durationSec));
-  }
-
-  onStatusUpdate?.('Enviando vídeo al servidor para Gemini Files API...', 12);
-
-  const response = await fetch('/api/gemini/analyze-video', {
-    method: 'POST',
-    body: formData,
-  });
-
   if (!response.ok) {
     let errorText = `Error del servidor (${response.status})`;
     try {
@@ -71,18 +62,24 @@ export async function analyzeVideoWithGemini(
         type: 'progress' | 'result' | 'error';
         phase?: string;
         message?: string;
+        percent?: number;
         analysis?: unknown;
         geminiFileCleaned?: boolean;
         error?: string;
       };
 
       if (event.type === 'progress') {
-        const pct = event.phase ? phaseProgressMap[event.phase] ?? 50 : 50;
+        const pct =
+          typeof event.percent === 'number'
+            ? event.percent
+            : event.phase
+            ? phaseProgressMap[event.phase] ?? 50
+            : 50;
         onStatusUpdate?.(event.message || 'Analizando con Gemini...', pct);
       } else if (event.type === 'error') {
         throw new Error(event.error || 'Error al analizar el vídeo con Gemini.');
       } else if (event.type === 'result') {
-        const plan = parseGeminiEditPlan(event.analysis, durationSec);
+        const plan = parseGeminiEditPlan(event.analysis, parseOptions);
         finalResult = {
           plan,
           geminiFileCleaned: Boolean(event.geminiFileCleaned),
@@ -95,8 +92,78 @@ export async function analyzeVideoWithGemini(
     throw new Error('El análisis de Gemini terminó sin devolver cortes.');
   }
 
-  onStatusUpdate?.('Análisis completado y archivo temporal limpiado.', 100);
+  onStatusUpdate?.('Análisis completado y archivos temporales limpiados.', 100);
   return finalResult;
+}
+
+export async function analyzeVideoWithGemini(
+  videoBlob: Blob,
+  fileName: string,
+  model: GeminiModelId,
+  durationSec?: number,
+  onStatusUpdate?: (message: string, progress: number) => void
+): Promise<AnalyzeVideoResult> {
+  const formData = new FormData();
+  formData.append('video', videoBlob, fileName);
+  formData.append('fileName', fileName);
+  formData.append('model', model);
+  if (durationSec && Number.isFinite(durationSec)) {
+    formData.append('durationSec', String(durationSec));
+  }
+
+  onStatusUpdate?.('Enviando vídeo al servidor para Gemini Files API...', 12);
+
+  const response = await fetch('/api/gemini/analyze-video', {
+    method: 'POST',
+    body: formData,
+  });
+
+  return consumeAnalyzeStream(response, durationSec, onStatusUpdate);
+}
+
+export interface MultiClipInput {
+  blob: Blob;
+  fileName: string;
+  durationSec?: number;
+}
+
+export async function analyzeMultiClipWithGemini(
+  clips: MultiClipInput[],
+  model: GeminiModelId,
+  projectName?: string,
+  onStatusUpdate?: (message: string, progress: number) => void
+): Promise<AnalyzeVideoResult> {
+  const formData = new FormData();
+  const clipsMeta = clips.map((clip) => ({
+    name: clip.fileName,
+    durationSec: clip.durationSec ?? 0,
+  }));
+
+  clips.forEach((clip) => {
+    formData.append('videos', clip.blob, clip.fileName);
+  });
+  formData.append('model', model);
+  formData.append('clipsMeta', JSON.stringify(clipsMeta));
+  if (projectName?.trim()) {
+    formData.append('projectName', projectName.trim());
+  }
+
+  onStatusUpdate?.(`Enviando ${clips.length} clips al servidor para Gemini Files API...`, 8);
+
+  const response = await fetch('/api/gemini/analyze-multi', {
+    method: 'POST',
+    body: formData,
+  });
+
+  return consumeAnalyzeStream(
+    response,
+    {
+      clipCount: clips.length,
+      clipDurationsSec: clips.map((c) => c.durationSec ?? 0),
+      preserveOrder: true,
+    },
+    onStatusUpdate
+  );
 }
 
 export async function checkServerHealth(): Promise<{ status: string; geminiConfigured: boolean }> {

@@ -1,7 +1,8 @@
-import { Film, ListVideo, LogOut, Radio, Settings, X } from 'lucide-react';
+import { Film, LayoutGrid, ListVideo, LogOut, Radio, Settings, X } from 'lucide-react';
 import type { User } from 'firebase/auth';
 import type { ActiveView, AppSettings } from '../types';
 import { GoogleSignInButton } from './GoogleSignInButton';
+import { PWAInstallButton } from './PWAInstallButton';
 
 interface SidebarProps {
   activeView: ActiveView;
@@ -9,7 +10,7 @@ interface SidebarProps {
   settings: AppSettings;
   onToggleAutoWatch: () => void;
   nextScanCountdownSec: number | null;
-  queueCounts: { total: number; pending: number; studioReady: number };
+  queueCounts: { total: number; pending: number; completed: number; studioReady: number };
   user: User | null;
   isLoggingIn: boolean;
   onGoogleLogin: () => void;
@@ -43,6 +44,12 @@ export function Sidebar({
       label: 'Cola de vídeos',
       count: queueCounts.total,
       icon: ListVideo,
+    },
+    {
+      id: 'gallery',
+      label: 'Galería',
+      count: queueCounts.completed,
+      icon: LayoutGrid,
     },
     {
       id: 'studio',
@@ -170,8 +177,9 @@ export function Sidebar({
       {/* Spacer */}
       <div className="flex-1" />
 
-      {/* Google Drive Auth Footer */}
-      <div className="border-t border-white/[0.08] p-4">
+      {/* Google Drive Auth & PWA Install Footer */}
+      <div className="border-t border-white/[0.08] p-4 space-y-3">
+        <PWAInstallButton compact />
         {user ? (
           <div className="space-y-3">
             <div className="flex items-center gap-3 min-w-0">

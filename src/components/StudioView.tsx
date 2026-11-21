@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import type { QueueItem } from '../types';
 import {
+  buildCombinedEditedFilename,
   buildEditedFilename,
   calculateSelectedDuration,
   formatBytes,
@@ -67,14 +68,42 @@ export function StudioView({
     [currentItem]
   );
 
-  const totalSourceSec = useMemo(() => {
-    if (!currentItem) return 60;
-    if (currentItem.durationSec && currentItem.durationSec > 0) return currentItem.durationSec;
-    const maxCutEnd = Math.max(
-      ...(currentItem.analysis?.cortes.map((c) => c.end_sec) ?? [60]),
-      1
-    );
-    return maxCutEnd * 1.1;
+  const timelineMeta = useMemo(() => {
+    if (!currentItem) {
+      return { totalSec: 60, clipOffsets: [0] };
+    }
+    const cuts = currentItem.analysis?.cortes ?? [];
+    if (!currentItem.isMultiClip) {
+      const total =
+        currentItem.durationSec && currentItem.durationSec > 0
+          ? currentItem.durationSec
+          : Math.max(...cuts.map((c) => c.end_sec), 1) * 1.1;
+      return { totalSec: Math.max(total, 1), clipOffsets: [0] };
+    }
+
+    const maxCutClipIdx = cuts.reduce((max, c) => Math.max(max, c.clip_index ?? 0), 0);
+    const clipCount = Math.max(currentItem.sourceClips?.length ?? 0, maxCutClipIdx + 1, 1);
+
+    const clipOffsets: number[] = [];
+    let runningTotal = 0;
+
+    for (let i = 0; i < clipCount; i += 1) {
+      clipOffsets.push(runningTotal);
+      const declaredDuration = currentItem.sourceClips?.[i]?.durationSec ?? 0;
+      const maxEndForClip = cuts
+        .filter((c) => (c.clip_index ?? 0) === i)
+        .reduce((max, c) => Math.max(max, c.end_sec), 0);
+      const clipDuration =
+        declaredDuration > 0
+          ? Math.max(declaredDuration, maxEndForClip)
+          : Math.max(maxEndForClip * 1.15, 30);
+      runningTotal += clipDuration;
+    }
+
+    return {
+      totalSec: Math.max(runningTotal, 1),
+      clipOffsets,
+    };
   }, [currentItem]);
 
   useEffect(() => {
@@ -123,11 +152,29 @@ export function StudioView({
 
   const plan = currentItem.analysis;
   const targetOutputName =
-    currentItem.outputFileName || buildEditedFilename(currentItem.originalName, plan.etiqueta);
+    currentItem.outputFileName ||
+    (currentItem.isMultiClip
+      ? buildCombinedEditedFilename(currentItem.projectName || currentItem.originalName, plan.etiqueta)
+      : buildEditedFilename(currentItem.originalName, plan.etiqueta));
   const allEnabled = plan.cortes.every((c) => c.enabled);
-  const hasRealSource = Boolean(currentItem.rawBlob);
+  const hasRealSource = currentItem.isMultiClip
+    ? Boolean(
+        currentItem.sourceClips &&
+          currentItem.sourceClips.length > 0 &&
+          currentItem.sourceClips.every((c) => Boolean(c.rawBlob))
+      )
+    : Boolean(currentItem.rawBlob);
   const activeDemoCut =
     enabledCuts.find((c) => c.id === activeCutId) ?? enabledCuts[demoCutIndex] ?? plan.cortes[0];
+
+  const getClipDisplayLabel = (clipIndex: number): { short: string; name?: string } => {
+    const safeIdx = Math.max(0, clipIndex || 0);
+    const source = currentItem.sourceClips?.[safeIdx];
+    return {
+      short: `Clip ${safeIdx + 1}`,
+      name: source?.originalName,
+    };
+  };
 
   const handleJumpToCut = (cutId: string) => {
     setActiveCutId(cutId);
@@ -233,6 +280,14 @@ export function StudioView({
                     <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full border border-white/[0.12] bg-white/[0.04]">
                       <Scissors className="h-5 w-5 text-[#F43F5E]" />
                     </div>
+                    {currentItem.isMultiClip && activeDemoCut && (
+                      <p className="font-mono text-[11px] font-medium text-[#F43F5E]">
+                        {getClipDisplayLabel(activeDemoCut.clip_index).short}
+                        {getClipDisplayLabel(activeDemoCut.clip_index).name
+                          ? ` · ${getClipDisplayLabel(activeDemoCut.clip_index).name}`
+                          : ''}
+                      </p>
+                    )}
                     <p className="font-display text-sm font-semibold text-white">
                       {plan.titulo_interno}
                     </p>
@@ -399,25 +454,57 @@ export function StudioView({
           {/* Visual Timeline Track */}
           <div className="py-4 border-b border-white/[0.08]">
             <div className="flex items-center justify-between text-[11px] text-[#8B96A8] mb-2">
-              <span>Línea de tiempo de cortes sobre bruto</span>
+              <span>
+                {currentItem.isMultiClip
+                  ? `Línea de tiempo combinada (${timelineMeta.clipOffsets.length} clips)`
+                  : 'Línea de tiempo de cortes sobre bruto'}
+              </span>
               <span className="font-mono tabular-nums">
-                0:00.0 — {formatSeconds(totalSourceSec)}
+                0:00.0 — {formatSeconds(timelineMeta.totalSec)}
               </span>
             </div>
-            <div className="relative h-7 w-full overflow-hidden rounded-md bg-[#090B0E] border border-white/[0.08]">
+            <div
+              data-testid="studio-timeline-track"
+              className="relative h-7 w-full overflow-hidden rounded-md bg-[#090B0E] border border-white/[0.08]"
+            >
+              {currentItem.isMultiClip &&
+                timelineMeta.clipOffsets.slice(1).map((offsetSec, idx) => {
+                  const dividerLeftPct = Math.min(
+                    100,
+                    (offsetSec / timelineMeta.totalSec) * 100
+                  );
+                  return (
+                    <div
+                      key={`clip-divider-${idx + 1}`}
+                      aria-hidden="true"
+                      style={{ left: `${dividerLeftPct}%` }}
+                      className="pointer-events-none absolute top-0 bottom-0 w-px bg-white/[0.18]"
+                    />
+                  );
+                })}
               {plan.cortes.map((cut) => {
-                const leftPct = Math.min(100, (cut.start_sec / totalSourceSec) * 100);
+                const clipIdx = currentItem.isMultiClip ? Math.max(0, cut.clip_index ?? 0) : 0;
+                const clipOffset = timelineMeta.clipOffsets[clipIdx] ?? 0;
+                const leftPct = Math.min(
+                  99,
+                  ((clipOffset + cut.start_sec) / timelineMeta.totalSec) * 100
+                );
                 const widthPct = Math.max(
                   1.2,
-                  ((cut.end_sec - cut.start_sec) / totalSourceSec) * 100
+                  Math.min(
+                    100 - leftPct,
+                    ((cut.end_sec - cut.start_sec) / timelineMeta.totalSec) * 100
+                  )
                 );
                 const isSelected = activeCutId === cut.id;
+                const clipTag = currentItem.isMultiClip ? `Clip ${clipIdx + 1} · ` : '';
                 return (
                   <button
                     key={cut.id}
                     type="button"
                     onClick={() => handleJumpToCut(cut.id)}
-                    aria-label={`Ir al corte ${formatSeconds(cut.start_sec)} a ${formatSeconds(cut.end_sec)}`}
+                    title={`${clipTag}${formatSeconds(cut.start_sec)} – ${formatSeconds(cut.end_sec)}`}
+                    aria-label={`Ir al corte ${clipTag}${formatSeconds(cut.start_sec)} a ${formatSeconds(cut.end_sec)}`}
                     style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
                     className={`absolute top-1 bottom-1 rounded-[3px] transition-opacity ${
                       !cut.enabled
@@ -484,14 +571,33 @@ export function StudioView({
                     className="flex-1 text-left min-w-0"
                   >
                     <div className="flex flex-wrap items-center justify-between gap-2">
-                      <span
-                        className={`font-mono text-xs tabular-nums font-medium ${
-                          cut.enabled ? 'text-[#EDF1F7]' : 'text-[#687487] line-through'
-                        }`}
-                      >
-                        {String(index + 1).padStart(2, '0')}. {formatSeconds(cut.start_sec)} –{' '}
-                        {formatSeconds(cut.end_sec)}
-                      </span>
+                      <div className="flex flex-wrap items-center gap-2 min-w-0">
+                        <span
+                          className={`font-mono text-xs tabular-nums font-medium ${
+                            cut.enabled ? 'text-[#EDF1F7]' : 'text-[#687487] line-through'
+                          }`}
+                        >
+                          {String(index + 1).padStart(2, '0')}. {formatSeconds(cut.start_sec)} –{' '}
+                          {formatSeconds(cut.end_sec)}
+                        </span>
+                        {currentItem.isMultiClip && (
+                          <>
+                            <span className="text-[#4B5565]" aria-hidden="true">
+                              ·
+                            </span>
+                            <span
+                              data-testid={`cut-clip-label-${index}`}
+                              className="font-mono text-[11px] font-medium text-[#F43F5E] truncate max-w-[200px]"
+                              title={getClipDisplayLabel(cut.clip_index).name}
+                            >
+                              {getClipDisplayLabel(cut.clip_index).short}
+                              {getClipDisplayLabel(cut.clip_index).name
+                                ? ` (${getClipDisplayLabel(cut.clip_index).name})`
+                                : ''}
+                            </span>
+                          </>
+                        )}
+                      </div>
                       <span className="font-mono text-xs tabular-nums text-[#8B96A8]">
                         {clipDuration.toFixed(1)}s
                       </span>
