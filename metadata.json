@@ -1,0 +1,8 @@
+{
+  "name": "AutoCut Drive AI",
+  "description": "Automatiza la edición de vídeos brutos en formato vertical corto y gracioso conectando tu carpeta de Google Drive con Gemini AI y FFmpeg.wasm.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
