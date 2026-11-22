@@ -3,7 +3,9 @@ import {
   Bug,
   Check,
   ClipboardCopy,
+  Cloud,
   Cpu,
+  ExternalLink,
   Folder,
   HardDrive,
   RotateCcw,
@@ -39,11 +41,15 @@ interface SettingsViewProps {
   onGoogleLogin: () => void;
   onGoogleLogout: () => void;
   geminiConfigured: boolean;
+  cloudRenderConfigured: boolean;
   cacheStats: VideoCacheStats;
   isClearingCache: boolean;
   onClearVideoCache: () => void;
   onCopyDiagnosticReport: () => Promise<boolean>;
 }
+
+const CLOUD_SETUP_DOC_URL =
+  'https://github.com/60F10/AutoCut-Drive-AI/blob/main/worker/CLOUD_SETUP.md';
 
 export function SettingsView({
   settings,
@@ -54,6 +60,7 @@ export function SettingsView({
   onGoogleLogin,
   onGoogleLogout,
   geminiConfigured,
+  cloudRenderConfigured,
   cacheStats,
   isClearingCache,
   onClearVideoCache,
@@ -491,6 +498,53 @@ export function SettingsView({
               <GoogleSignInButton onClick={onGoogleLogin} loading={isLoggingIn} />
             )}
           </div>
+        </section>
+
+        {/* Cloud Render (GitHub Actions) Status Card */}
+        <section
+          data-testid="cloud-render-settings-card"
+          className="cyber-panel rounded-md p-5 sm:p-6 space-y-4 border border-[#00f0ff]/35"
+        >
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-start gap-3 min-w-0">
+              <Cloud className="h-5 w-5 text-[#00f0ff] shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <h2 className="font-display text-base font-semibold text-[#EEF5FF]">
+                  Render en la nube
+                </h2>
+                <p className="text-xs text-[#94A8C4] leading-relaxed">
+                  Renderiza vídeos pesados y Multi-Clip con FFmpeg nativo en GitHub Actions (coste 0 €, sin tarjeta y sin dejar ningún PC encendido).
+                </p>
+              </div>
+            </div>
+            <span
+              data-testid="cloud-render-status-badge"
+              className={`font-mono text-[10px] font-semibold uppercase tracking-wider px-2 py-1 rounded-sm border shrink-0 ${
+                cloudRenderConfigured
+                  ? 'border-[#00f0ff]/55 bg-[#00f0ff]/12 text-[#00f0ff]'
+                  : 'border-[#fcee0a]/50 bg-[#fcee0a]/10 text-[#fcee0a]'
+              }`}
+            >
+              {cloudRenderConfigured ? 'Configurado' : 'No configurado'}
+            </span>
+          </div>
+
+          <p className="rounded-sm border border-[#00f0ff]/15 bg-[#05060a] px-3 py-2 text-[11px] text-[#94A8C4] leading-relaxed">
+            {cloudRenderConfigured
+              ? 'El servidor tiene los secretos de GitHub Actions listos. Puedes pulsar "Renderizar en la nube" directamente desde el Estudio de cortes.'
+              : 'Faltan las variables de servidor GITHUB_DISPATCH_TOKEN y GITHUB_REPO en Secrets. Sigue la guía paso a paso (10 min, una sola vez) para activarlo.'}
+          </p>
+
+          <a
+            href={CLOUD_SETUP_DOC_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            data-testid="cloud-setup-guide-link"
+            className="inline-flex min-h-[42px] w-full items-center justify-center gap-2 rounded-md border border-[#00f0ff]/45 bg-[#00f0ff]/12 px-3.5 font-mono text-xs font-semibold text-[#00f0ff] hover:bg-[#00f0ff]/22 transition-colors"
+          >
+            Ver guía de configuración (CLOUD_SETUP.md)
+            <ExternalLink className="h-3.5 w-3.5 shrink-0" />
+          </a>
         </section>
 
         {/* Diagnostic & Support Card */}

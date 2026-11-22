@@ -37,12 +37,16 @@ interface GalleryViewProps {
   onGoToSettings: () => void;
   pcJobs: PcJobSyncEntry[];
   pcOutputs: DriveFileMeta[];
+  cloudRenderConfigured: boolean;
   isSyncingPcJobs: boolean;
   lastPcSyncTime: number | null;
   downloadingOutputId: string | null;
   pcOutputPreviewUrls: Record<string, string>;
+  failedDispatchJobFileIds: Record<string, string>;
+  retryingDispatchJobFileId: string | null;
   onSyncPcJobs: () => void;
   onDownloadPcOutput: (outputFile: DriveFileMeta, triggerSave?: boolean) => void;
+  onRetryCloudDispatch: (jobFileId: string) => void;
 }
 
 export function GalleryView({
@@ -58,12 +62,16 @@ export function GalleryView({
   onGoToSettings,
   pcJobs,
   pcOutputs,
+  cloudRenderConfigured,
   isSyncingPcJobs,
   lastPcSyncTime,
   downloadingOutputId,
   pcOutputPreviewUrls,
+  failedDispatchJobFileIds,
+  retryingDispatchJobFileId,
   onSyncPcJobs,
   onDownloadPcOutput,
+  onRetryCloudDispatch,
 }: GalleryViewProps) {
   const [selectedTag, setSelectedTag] = useState<string>('ALL');
   const [query, setQuery] = useState('');
@@ -117,12 +125,16 @@ export function GalleryView({
           pcOutputs={pcOutputs}
           isDriveConnected={isDriveConnected}
           folderId={folderId}
+          cloudRenderConfigured={cloudRenderConfigured}
           isSyncing={isSyncingPcJobs}
           lastSyncTime={lastPcSyncTime}
           downloadingOutputId={downloadingOutputId}
           previewUrls={pcOutputPreviewUrls}
+          failedDispatchJobFileIds={failedDispatchJobFileIds}
+          retryingDispatchJobFileId={retryingDispatchJobFileId}
           onSync={onSyncPcJobs}
           onDownloadOutput={onDownloadPcOutput}
+          onRetryCloudDispatch={onRetryCloudDispatch}
           onGoToSettings={onGoToSettings}
         />
 
@@ -166,12 +178,16 @@ export function GalleryView({
         pcOutputs={pcOutputs}
         isDriveConnected={isDriveConnected}
         folderId={folderId}
+        cloudRenderConfigured={cloudRenderConfigured}
         isSyncing={isSyncingPcJobs}
         lastSyncTime={lastPcSyncTime}
         downloadingOutputId={downloadingOutputId}
         previewUrls={pcOutputPreviewUrls}
+        failedDispatchJobFileIds={failedDispatchJobFileIds}
+        retryingDispatchJobFileId={retryingDispatchJobFileId}
         onSync={onSyncPcJobs}
         onDownloadOutput={onDownloadPcOutput}
+        onRetryCloudDispatch={onRetryCloudDispatch}
         onGoToSettings={onGoToSettings}
       />
       {/* Toolbar: Tag Filters + Search */}

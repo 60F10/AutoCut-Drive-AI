@@ -16,6 +16,7 @@ export function useGoogleDriveAuth({ onError }: UseGoogleDriveAuthOptions) {
   const [accessToken, setAccessToken] = useState<string | null>(null);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [geminiConfigured, setGeminiConfigured] = useState(true);
+  const [cloudRenderConfigured, setCloudRenderConfigured] = useState(false);
 
   useEffect(() => {
     const unsubscribe = initGoogleAuth(
@@ -31,6 +32,7 @@ export function useGoogleDriveAuth({ onError }: UseGoogleDriveAuthOptions) {
 
     checkServerHealth().then((health) => {
       setGeminiConfigured(health.geminiConfigured);
+      setCloudRenderConfigured(health.cloudRenderConfigured);
     });
 
     return unsubscribe;
@@ -68,6 +70,7 @@ export function useGoogleDriveAuth({ onError }: UseGoogleDriveAuthOptions) {
     accessToken,
     isLoggingIn,
     geminiConfigured,
+    cloudRenderConfigured,
     isDriveConnected: Boolean(user && accessToken),
     handleGoogleLogin,
     handleGoogleLogout,

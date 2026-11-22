@@ -6,6 +6,9 @@ import {
   Captions,
   CheckCircle2,
   CheckSquare,
+  ChevronDown,
+  ChevronUp,
+  Cloud,
   CloudUpload,
   Download,
   Film,
@@ -14,13 +17,16 @@ import {
   Pause,
   Play,
   RefreshCw,
+  RotateCw,
   Scissors,
+  Settings,
+  Smartphone,
   Sparkles,
   Square,
   Star,
   Zap,
 } from 'lucide-react';
-import type { ExportQuality, QueueItem, TikTokEditOptions } from '../types';
+import type { ExportQuality, QueueItem, RenderJobTarget, TikTokEditOptions } from '../types';
 import {
   buildCombinedEditedFilename,
   buildEditedFilename,
@@ -50,9 +56,27 @@ interface StudioViewProps {
     patch: { start_sec?: number; end_sec?: number }
   ) => void;
   onRerenderItem: (itemId: string, qualityOverride?: ExportQuality) => void;
+  onSendToCloud: (itemId: string) => void;
   onSendToPc: (itemId: string) => void;
+  onRetryCloudDispatch: (jobFileId: string) => void;
+  cloudRenderConfigured: boolean;
   isSendingToPc: boolean;
-  lastSentPcJob: { itemId: string; jobId: string; outputFileName: string } | null;
+  sendingTarget: RenderJobTarget | null;
+  cloudUploadProgress: {
+    clipIndex: number;
+    totalClips: number;
+    percent: number;
+    message: string;
+  } | null;
+  lastSentPcJob: {
+    itemId: string;
+    jobId: string;
+    jobFileId: string;
+    target: RenderJobTarget;
+    outputFileName: string;
+  } | null;
+  failedDispatchJobFileIds: Record<string, string>;
+  retryingDispatchJobFileId: string | null;
   onRequestDriveUpload: (itemId: string) => void;
   exportQuality: ExportQuality;
   onChangeExportQuality: (quality: ExportQuality) => void;
@@ -63,6 +87,7 @@ interface StudioViewProps {
   canUploadToDrive: boolean;
   onBackToQueue: () => void;
   onGoToGallery: () => void;
+  onGoToSettings: () => void;
 }
 
 export function StudioView({
@@ -74,9 +99,16 @@ export function StudioView({
   onReorderCut,
   onUpdateCutTiming,
   onRerenderItem,
+  onSendToCloud,
   onSendToPc,
+  onRetryCloudDispatch,
+  cloudRenderConfigured,
   isSendingToPc,
+  sendingTarget,
+  cloudUploadProgress,
   lastSentPcJob,
+  failedDispatchJobFileIds,
+  retryingDispatchJobFileId,
   onRequestDriveUpload,
   exportQuality,
   onChangeExportQuality,
@@ -87,6 +119,7 @@ export function StudioView({
   canUploadToDrive,
   onBackToQueue,
   onGoToGallery,
+  onGoToSettings,
 }: StudioViewProps) {
   const analyzedItems = useMemo(() => items.filter((i) => Boolean(i.analysis)), [items]);
   const currentItem = useMemo(
@@ -98,6 +131,7 @@ export function StudioView({
   const [activeCutId, setActiveCutId] = useState<string | null>(null);
   const [demoPlaying, setDemoPlaying] = useState(false);
   const [demoCutIndex, setDemoCutIndex] = useState(0);
+  const [showOtherRenderOptions, setShowOtherRenderOptions] = useState(false);
 
   const enabledCuts = useMemo(
     () => (currentItem?.analysis?.cortes ?? []).filter((c) => c.enabled),
@@ -229,7 +263,17 @@ export function StudioView({
   const activePcJobId =
     (lastSentPcJob?.itemId === currentItem.id ? lastSentPcJob.jobId : undefined) ||
     currentItem.pcJobId;
+  const activeJobFileId =
+    (lastSentPcJob?.itemId === currentItem.id ? lastSentPcJob.jobFileId : undefined) ||
+    currentItem.pcJobFileId;
+  const activePcTarget: RenderJobTarget =
+    (lastSentPcJob?.itemId === currentItem.id ? lastSentPcJob.target : undefined) ||
+    currentItem.pcJobTarget ||
+    'pc';
   const activePcStatus = currentItem.pcJobStatus || (activePcJobId ? 'pending' : undefined);
+  const activeDispatchError = activeJobFileId ? failedDispatchJobFileIds[activeJobFileId] : undefined;
+  const isSendingCloud = isSendingToPc && sendingTarget === 'cloud';
+  const isSendingPc = isSendingToPc && sendingTarget === 'pc';
   const hasGeneratedSubtitles = Boolean(plan.subtitulos && plan.subtitulos.length > 0);
   const activeDemoCut =
     enabledCuts.find((c) => c.id === activeCutId) ?? enabledCuts[demoCutIndex] ?? plan.cortes[0];
@@ -604,94 +648,94 @@ export function StudioView({
               </div>
             </div>
 
-            {multiClipMobileGuard.shouldWarn && (
-              <div
-                role="note"
-                data-testid="studio-mobile-ram-guard"
-                className="rounded-md border border-[#ff2a85]/55 bg-[#ff2a85]/12 p-3 text-xs text-[#ffd1e3] space-y-2"
-              >
-                <div className="flex items-start gap-2">
-                  <AlertTriangle className="h-4 w-4 text-[#ff2a85] shrink-0 mt-0.5" />
-                  <p className="leading-relaxed">{multiClipMobileGuard.reason}</p>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    data-testid="studio-switch-720p-btn"
-                    onClick={() => onChangeExportQuality('mobile_fast')}
-                    className="inline-flex h-9 items-center gap-1.5 rounded-md border border-[#00f0ff]/65 bg-[#00f0ff]/18 px-3 font-mono text-[11px] font-semibold text-[#00f0ff] hover:bg-[#00f0ff]/28 transition-colors"
-                  >
-                    <Zap className="h-3.5 w-3.5" />
-                    Cambiar a 720p móvil
-                  </button>
-                  {hasRealSource && enabledCuts.length > 0 && (
-                    <button
-                      type="button"
-                      data-testid="studio-switch-720p-and-render-btn"
-                      disabled={isRendering}
-                      onClick={() => {
-                        onChangeExportQuality('mobile_fast');
-                        onRerenderItem(currentItem.id, 'mobile_fast');
-                      }}
-                      className="inline-flex h-9 items-center gap-1.5 cyber-btn-primary px-3 text-[11px] font-semibold disabled:opacity-45"
-                    >
-                      <Zap className="h-3.5 w-3.5" />
-                      720p y renderizar ahora
-                    </button>
-                  )}
-                </div>
-              </div>
-            )}
-
-            {/* Hybrid PC Render CTA (Google Drive _AutoCut_Jobs, zero mobile RAM usage) */}
-            <div
-              className={`rounded-md border p-2.5 space-y-2 ${
-                isPcRenderRecommended
-                  ? 'border-[#fcee0a]/55 bg-[#fcee0a]/[0.07]'
-                  : 'border-[#00f0ff]/35 bg-[#00f0ff]/[0.05]'
-              }`}
-            >
+            {/* Primary CTA: Cloud Render via GitHub Actions (0 €, no PC, no iOS RAM limit) */}
+            <div className="rounded-md border border-[#00f0ff]/45 bg-[#00f0ff]/[0.06] p-3 space-y-2.5">
               <div className="flex flex-wrap items-center justify-between gap-1.5">
                 <span className="inline-flex items-center gap-1.5 font-mono text-[10px] font-semibold uppercase tracking-wider text-[#00f0ff]">
-                  <Monitor className="h-3.5 w-3.5" />
-                  Render híbrido PC · 0 €
+                  <Cloud className="h-3.5 w-3.5" />
+                  GitHub Actions · 0 € · Sin PC
                 </span>
-                <span
-                  data-testid="studio-pc-recommended-tag"
-                  className={`font-mono text-[10px] font-semibold px-1.5 py-0.5 rounded-sm border ${
-                    isPcRenderRecommended
-                      ? 'border-[#fcee0a]/60 bg-[#fcee0a]/15 text-[#fcee0a]'
-                      : 'border-[#00f0ff]/30 bg-[#05060a] text-[#94A8C4]'
-                  }`}
-                >
-                  Recomendado para &gt;100 MB / Multi-Clip
-                </span>
+                {isPcRenderRecommended && (
+                  <span
+                    data-testid="studio-pc-recommended-tag"
+                    className="font-mono text-[10px] font-semibold px-1.5 py-0.5 rounded-sm border border-[#fcee0a]/60 bg-[#fcee0a]/15 text-[#fcee0a]"
+                  >
+                    Ideal para &gt;100 MB / Multi-Clip
+                  </span>
+                )}
               </div>
 
               <button
                 type="button"
-                data-testid="studio-send-to-pc-btn"
-                onClick={() => onSendToPc(currentItem.id)}
-                disabled={isSendingToPc || enabledCuts.length === 0 || !canUploadToDrive}
-                title={
+                data-testid="studio-render-cloud-btn"
+                onClick={() => onSendToCloud(currentItem.id)}
+                disabled={
+                  !cloudRenderConfigured ||
+                  isSendingToPc ||
+                  enabledCuts.length === 0 ||
                   !canUploadToDrive
-                    ? 'Conecta Google Drive y configura tu carpeta en Ajustes para enviar el manifiesto a _AutoCut_Jobs'
-                    : 'Sube únicamente el JSON de cortes a _AutoCut_Jobs sin descargar el vídeo bruto en el móvil'
                 }
-                className="flex min-h-[44px] w-full items-center justify-center gap-2 rounded-md border border-[#00f0ff]/70 bg-[#00f0ff]/16 px-3.5 py-2 text-xs sm:text-sm font-semibold text-[#EEF5FF] hover:bg-[#00f0ff]/26 hover:border-[#00f0ff] disabled:opacity-45 transition-colors"
+                title={
+                  !cloudRenderConfigured
+                    ? 'Configura GITHUB_DISPATCH_TOKEN y GITHUB_REPO en Secrets (ver Ajustes)'
+                    : !canUploadToDrive
+                    ? 'Conecta Google Drive y configura tu carpeta en Ajustes para renderizar en la nube'
+                    : 'Renderiza con FFmpeg nativo en GitHub Actions sin gastar RAM del móvil'
+                }
+                className="cyber-btn-primary flex min-h-[46px] w-full items-center justify-center gap-2 px-3.5 py-2 text-xs sm:text-sm font-semibold disabled:opacity-45 transition-colors"
               >
-                {isSendingToPc ? (
+                {!cloudRenderConfigured ? (
                   <>
-                    <Loader2 className="h-4 w-4 animate-spin text-[#00f0ff] shrink-0" />
-                    Enviando trabajo a Drive...
+                    <Settings className="h-4 w-4 shrink-0" />
+                    Configura el render en la nube (ver Ajustes)
+                  </>
+                ) : isSendingCloud ? (
+                  <>
+                    <Loader2 className="h-4 w-4 animate-spin shrink-0" />
+                    {cloudUploadProgress
+                      ? `Subiendo clip ${cloudUploadProgress.clipIndex}/${cloudUploadProgress.totalClips} (${cloudUploadProgress.percent}%)...`
+                      : 'Enviando a la nube...'}
                   </>
                 ) : (
                   <>
-                    <Monitor className="h-4 w-4 text-[#00f0ff] shrink-0" />
-                    Enviar render a PC ({enabledCuts.length} cortes)
+                    <Cloud className="h-4 w-4 shrink-0" />
+                    Renderizar en la nube (recomendado)
                   </>
                 )}
               </button>
+
+              {!cloudRenderConfigured && (
+                <button
+                  type="button"
+                  data-testid="studio-open-cloud-settings-btn"
+                  onClick={onGoToSettings}
+                  className="w-full text-center font-mono text-[11px] font-semibold text-[#00f0ff] hover:underline"
+                >
+                  Abrir guía en Ajustes →
+                </button>
+              )}
+
+              {cloudUploadProgress && (
+                <div
+                  data-testid="studio-cloud-upload-progress"
+                  className="rounded-sm border border-[#00f0ff]/35 bg-[#05060a] p-2.5 space-y-1.5"
+                >
+                  <div className="flex items-center justify-between gap-2 font-mono text-[11px]">
+                    <span className="text-[#C8D7EC] truncate">{cloudUploadProgress.message}</span>
+                    <span className="text-[#fcee0a] font-semibold tabular-nums shrink-0">
+                      {cloudUploadProgress.percent}%
+                    </span>
+                  </div>
+                  <div className="h-1.5 w-full overflow-hidden rounded-sm border border-[#00f0ff]/25 bg-[#0c0f1a]">
+                    <div
+                      className="h-full cyber-energy-bar transition-transform duration-150 origin-left"
+                      style={{
+                        transform: `scaleX(${Math.max(0.04, cloudUploadProgress.percent / 100)})`,
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
 
               {activePcJobId && activePcStatus && (
                 <div
@@ -702,16 +746,41 @@ export function StudioView({
                   <div className="flex items-center justify-between gap-2">
                     <span className="inline-flex items-center gap-1.5 font-mono font-semibold text-[#00f0ff]">
                       <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
-                      Enviado a _AutoCut_Jobs
+                      {activePcTarget === 'cloud' ? 'Enviado a la nube' : 'Enviado a PC'}
                     </span>
                     <span className="font-mono text-[#fcee0a]">
-                      {formatPcJobStatusLabel(activePcStatus, currentItem.pcJobProgress)}
+                      {formatPcJobStatusLabel(
+                        activePcStatus,
+                        currentItem.pcJobProgress,
+                        activePcTarget
+                      )}
                     </span>
                   </div>
                   <p className="font-mono text-[10px] text-[#8EA2BD] truncate">
                     job_{activePcJobId}.json → {targetOutputName}
                   </p>
-                  <div className="flex flex-wrap gap-2 pt-0.5">
+                  {activeDispatchError && activeJobFileId && activePcStatus === 'pending' && (
+                    <div className="pt-1 space-y-1.5">
+                      <p className="font-mono text-[10px] text-[#ff85b8] break-words">
+                        {activeDispatchError}
+                      </p>
+                      <button
+                        type="button"
+                        data-testid="studio-retry-dispatch-btn"
+                        disabled={retryingDispatchJobFileId === activeJobFileId}
+                        onClick={() => onRetryCloudDispatch(activeJobFileId)}
+                        className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[#ff2a85]/60 bg-[#ff2a85]/18 px-2.5 font-mono text-[11px] font-semibold text-[#ffd1e3] hover:bg-[#ff2a85]/28 disabled:opacity-45"
+                      >
+                        {retryingDispatchJobFileId === activeJobFileId ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <RotateCw className="h-3.5 w-3.5" />
+                        )}
+                        Reintentar envío
+                      </button>
+                    </div>
+                  )}
+                  <div className="flex flex-wrap gap-3 pt-0.5">
                     <button
                       type="button"
                       onClick={onBackToQueue}
@@ -731,23 +800,116 @@ export function StudioView({
               )}
             </div>
 
-            <button
-              type="button"
-              data-testid="studio-render-final-btn"
-              onClick={() => onRerenderItem(currentItem.id)}
-              disabled={isRendering || enabledCuts.length === 0 || !hasRealSource}
-              title={
-                !hasRealSource
-                  ? 'Disponible para vídeos reales descargados de Drive o cargados localmente'
-                  : undefined
-              }
-              className="cyber-btn-primary flex h-11 w-full items-center justify-center gap-2 px-4 text-sm disabled:opacity-45 whitespace-nowrap"
+            {/* Collapsible Secondary Render Options: PC Worker & Local Mobile FFmpeg.wasm */}
+            <div
+              data-testid="studio-other-render-options"
+              className="rounded-md border border-[#00f0ff]/22 bg-[#05060a]/85 overflow-hidden"
             >
-              <RefreshCw className={`h-4 w-4 ${isRendering ? 'animate-spin' : ''}`} />
-              {isPendingFinalRender
-                ? `Renderizar vídeo final (${enabledCuts.length})`
-                : `Re-renderizar vídeo final (${enabledCuts.length})`}
-            </button>
+              <button
+                type="button"
+                data-testid="studio-other-options-toggle"
+                aria-expanded={showOtherRenderOptions}
+                onClick={() => setShowOtherRenderOptions((prev) => !prev)}
+                className="flex min-h-[40px] w-full items-center justify-between gap-2 px-3 py-2 font-mono text-xs font-medium text-[#C8D7EC] hover:bg-[#00f0ff]/[0.06] hover:text-[#00f0ff] transition-colors"
+              >
+                <span>Otras opciones (PC / móvil)</span>
+                {showOtherRenderOptions ? (
+                  <ChevronUp className="h-4 w-4 text-[#00f0ff]" />
+                ) : (
+                  <ChevronDown className="h-4 w-4 text-[#8EA2BD]" />
+                )}
+              </button>
+
+              {showOtherRenderOptions && (
+                <div className="border-t border-[#00f0ff]/18 p-3 space-y-2.5">
+                  <button
+                    type="button"
+                    data-testid="studio-send-to-pc-btn"
+                    onClick={() => onSendToPc(currentItem.id)}
+                    disabled={isSendingToPc || enabledCuts.length === 0 || !canUploadToDrive}
+                    title={
+                      !canUploadToDrive
+                        ? 'Conecta Google Drive y configura tu carpeta en Ajustes para enviar el manifiesto a _AutoCut_Jobs'
+                        : 'Sube el JSON de cortes a _AutoCut_Jobs para tu worker de Windows'
+                    }
+                    className="flex min-h-[42px] w-full items-center justify-center gap-2 rounded-md border border-[#00f0ff]/50 bg-[#00f0ff]/12 px-3 py-2 text-xs font-semibold text-[#EEF5FF] hover:bg-[#00f0ff]/20 hover:border-[#00f0ff] disabled:opacity-45 transition-colors"
+                  >
+                    {isSendingPc ? (
+                      <>
+                        <Loader2 className="h-4 w-4 animate-spin text-[#00f0ff] shrink-0" />
+                        Enviando trabajo al PC...
+                      </>
+                    ) : (
+                      <>
+                        <Monitor className="h-4 w-4 text-[#00f0ff] shrink-0" />
+                        Enviar a PC ({enabledCuts.length} cortes)
+                      </>
+                    )}
+                  </button>
+
+                  {multiClipMobileGuard.shouldWarn && (
+                    <div
+                      role="note"
+                      data-testid="studio-mobile-ram-guard"
+                      className="rounded-md border border-[#ff2a85]/55 bg-[#ff2a85]/12 p-3 text-xs text-[#ffd1e3] space-y-2"
+                    >
+                      <div className="flex items-start gap-2">
+                        <AlertTriangle className="h-4 w-4 text-[#ff2a85] shrink-0 mt-0.5" />
+                        <p className="leading-relaxed">{multiClipMobileGuard.reason}</p>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          data-testid="studio-switch-720p-btn"
+                          onClick={() => onChangeExportQuality('mobile_fast')}
+                          className="inline-flex h-9 items-center gap-1.5 rounded-md border border-[#00f0ff]/65 bg-[#00f0ff]/18 px-3 font-mono text-[11px] font-semibold text-[#00f0ff] hover:bg-[#00f0ff]/28 transition-colors"
+                        >
+                          <Zap className="h-3.5 w-3.5" />
+                          Cambiar a 720p móvil
+                        </button>
+                        {hasRealSource && enabledCuts.length > 0 && (
+                          <button
+                            type="button"
+                            data-testid="studio-switch-720p-and-render-btn"
+                            disabled={isRendering}
+                            onClick={() => {
+                              onChangeExportQuality('mobile_fast');
+                              onRerenderItem(currentItem.id, 'mobile_fast');
+                            }}
+                            className="inline-flex h-9 items-center gap-1.5 cyber-btn-primary px-3 text-[11px] font-semibold disabled:opacity-45"
+                          >
+                            <Zap className="h-3.5 w-3.5" />
+                            720p y renderizar ahora
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  <button
+                    type="button"
+                    data-testid="studio-render-final-btn"
+                    onClick={() => onRerenderItem(currentItem.id)}
+                    disabled={isRendering || enabledCuts.length === 0 || !hasRealSource}
+                    title={
+                      !hasRealSource
+                        ? 'Disponible para vídeos reales descargados de Drive o cargados localmente'
+                        : 'Renderizado local con FFmpeg.wasm (recomendado solo para clips cortos)'
+                    }
+                    className="flex min-h-[42px] w-full items-center justify-center gap-2 rounded-md border border-[#fcee0a]/35 bg-[#fcee0a]/[0.08] px-3 text-xs font-semibold text-[#FEF08A] hover:bg-[#fcee0a]/15 hover:border-[#fcee0a]/65 disabled:opacity-45 transition-colors whitespace-nowrap"
+                  >
+                    {isRendering ? (
+                      <RefreshCw className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Smartphone className="h-4 w-4" />
+                    )}
+                    {isPendingFinalRender
+                      ? `Renderizar en este móvil (${enabledCuts.length})`
+                      : `Re-renderizar en este móvil (${enabledCuts.length})`}
+                  </button>
+                </div>
+              )}
+            </div>
 
             <div className="grid grid-cols-2 gap-2.5">
               <button
@@ -785,7 +947,7 @@ export function StudioView({
 
             {!canUploadToDrive && (
               <p className="text-[11px] text-[#8EA2BD] text-center">
-                Conecta Google Drive y define un ID de carpeta en Ajustes para enviar renders al PC o subir el MP4 final.
+                Conecta Google Drive y define un ID de carpeta en Ajustes para renderizar en la nube, enviar al PC o subir el MP4 final.
               </p>
             )}
           </div>

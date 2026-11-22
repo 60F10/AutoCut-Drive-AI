@@ -1283,19 +1283,24 @@ export function shouldRecommendPcRender(input: {
   return Boolean(input.isMultiClip || (Number(input.sizeBytes) || 0) > PC_RENDER_RECOMMENDED_BYTES);
 }
 
-export function formatPcJobStatusLabel(status: RenderJobStatus, progress = 0): string {
+export function formatPcJobStatusLabel(
+  status: RenderJobStatus,
+  progress = 0,
+  target?: import('../types').RenderJobTarget
+): string {
   const pct = Math.max(0, Math.min(100, Math.round(Number(progress) || 0)));
+  const isCloud = target === 'cloud';
   switch (status) {
     case 'pending':
-      return 'En cola PC';
+      return isCloud ? 'En cola nube' : 'En cola PC';
     case 'processing':
-      return `Renderizando en PC (${pct}%)`;
+      return isCloud ? `Renderizando en la nube (${pct}%)` : `Renderizando en PC (${pct}%)`;
     case 'completed':
       return 'Completado';
     case 'error':
       return 'Error';
     default:
-      return 'En cola PC';
+      return isCloud ? 'En cola nube' : 'En cola PC';
   }
 }
 
@@ -1306,7 +1311,8 @@ export function generatePcRenderJobId(nowMs = Date.now()): string {
 }
 
 /**
- * Builds the canonical `job_<jobId>.json` manifest consumed by `worker/pc-worker.mjs`
+ * Builds the canonical `job_<jobId>.json` manifest consumed by `worker/cloud-worker.mjs`
+ * (when `target: "cloud"`) or `worker/pc-worker.mjs` (when `target: "pc"` / omitted)
  * via Google Drive (`_AutoCut_Jobs` -> `_AutoCut_Output`).
  */
 export function buildRenderJobManifest(input: {
@@ -1323,6 +1329,8 @@ export function buildRenderJobManifest(input: {
   >;
   exportQuality: ExportQuality;
   tiktokOptions: TikTokEditOptions;
+  target?: import('../types').RenderJobTarget;
+  sourceFilesOverride?: import('../types').RenderJobSourceFile[];
   jobId?: string;
   createdAt?: string;
 }): RenderJobManifest {
@@ -1334,22 +1342,25 @@ export function buildRenderJobManifest(input: {
 
   const activeCuts = filterEditedCuts(plan.cortes, true);
   if (activeCuts.length === 0) {
-    throw new Error('Activa al menos un corte antes de enviar el trabajo al PC.');
+    throw new Error('Activa al menos un corte antes de enviar el trabajo de renderizado.');
   }
 
   const normalizedOpts = normalizeTikTokOptions(tiktokOptions);
   const isMulti = Boolean(item.isMultiClip && item.sourceClips && item.sourceClips.length > 0);
-  const sourceFiles = isMulti
-    ? item.sourceClips!.map((clip) => ({
-        name: clip.originalName,
-        ...(clip.driveFileId ? { driveFileId: clip.driveFileId } : {}),
-      }))
-    : [
-        {
-          name: item.originalName,
-          ...(item.driveFileId ? { driveFileId: item.driveFileId } : {}),
-        },
-      ];
+  const sourceFiles =
+    input.sourceFilesOverride && input.sourceFilesOverride.length > 0
+      ? input.sourceFilesOverride
+      : isMulti
+      ? item.sourceClips!.map((clip) => ({
+          name: clip.originalName,
+          ...(clip.driveFileId ? { driveFileId: clip.driveFileId } : {}),
+        }))
+      : [
+          {
+            name: item.originalName,
+            ...(item.driveFileId ? { driveFileId: item.driveFileId } : {}),
+          },
+        ];
 
   const rawOutputName =
     item.outputFileName?.trim() ||
@@ -1380,6 +1391,7 @@ export function buildRenderJobManifest(input: {
 
   return {
     jobId: input.jobId || generatePcRenderJobId(),
+    target: input.target || 'pc',
     createdAt: input.createdAt || new Date().toISOString(),
     status: 'pending',
     progress: 0,

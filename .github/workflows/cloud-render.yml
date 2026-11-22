@@ -1,0 +1,45 @@
+name: AutoCut Cloud Render
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_file_id:
+        description: 'ID del archivo job_<id>.json en _AutoCut_Jobs (opcional; vacío procesa todos los pendientes)'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloud-render
+  cancel-in-progress: false
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install native FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          ffmpeg -version | head -1
+
+      - name: Run AutoCut Cloud Worker
+        env:
+          GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
+          GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+          GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
+          AUTOCUT_ROOT_FOLDER_ID: ${{ secrets.AUTOCUT_ROOT_FOLDER_ID }}
+        run: node worker/cloud-worker.mjs --job-file-id "${{ inputs.job_file_id }}"

@@ -73,12 +73,16 @@ interface QueueViewProps {
   onGoToSettings: () => void;
   pcJobs: PcJobSyncEntry[];
   pcOutputs: DriveFileMeta[];
+  cloudRenderConfigured: boolean;
   isSyncingPcJobs: boolean;
   lastPcSyncTime: number | null;
   downloadingOutputId: string | null;
   pcOutputPreviewUrls: Record<string, string>;
+  failedDispatchJobFileIds: Record<string, string>;
+  retryingDispatchJobFileId: string | null;
   onSyncPcJobs: () => void;
   onDownloadPcOutput: (outputFile: DriveFileMeta, triggerSave?: boolean) => void;
+  onRetryCloudDispatch: (jobFileId: string) => void;
 }
 
 const STAGE_ORDER: QueueStage[] = [
@@ -144,12 +148,16 @@ export function QueueView({
   onGoToSettings,
   pcJobs,
   pcOutputs,
+  cloudRenderConfigured,
   isSyncingPcJobs,
   lastPcSyncTime,
   downloadingOutputId,
   pcOutputPreviewUrls,
+  failedDispatchJobFileIds,
+  retryingDispatchJobFileId,
   onSyncPcJobs,
   onDownloadPcOutput,
+  onRetryCloudDispatch,
 }: QueueViewProps) {
   const [filter, setFilter] = useState<StatusFilter>('all');
   const [query, setQuery] = useState('');
@@ -306,19 +314,23 @@ export function QueueView({
       {/* Analytics Dashboard (Recharts daily videos, total saved footage, Gemini tags breakdown) */}
       <QueueAnalyticsPanel records={analyticsRecords} />
 
-      {/* Hybrid PC Render Jobs Panel (_AutoCut_Jobs & _AutoCut_Output) */}
+      {/* Remote Render Jobs Panel (Cloud GitHub Actions & PC Worker) */}
       <PcJobsPanel
         mode="queue"
         pcJobs={pcJobs}
         pcOutputs={pcOutputs}
         isDriveConnected={isDriveConnected}
         folderId={folderId}
+        cloudRenderConfigured={cloudRenderConfigured}
         isSyncing={isSyncingPcJobs}
         lastSyncTime={lastPcSyncTime}
         downloadingOutputId={downloadingOutputId}
         previewUrls={pcOutputPreviewUrls}
+        failedDispatchJobFileIds={failedDispatchJobFileIds}
+        retryingDispatchJobFileId={retryingDispatchJobFileId}
         onSync={onSyncPcJobs}
         onDownloadOutput={onDownloadPcOutput}
+        onRetryCloudDispatch={onRetryCloudDispatch}
         onGoToSettings={onGoToSettings}
       />
 
@@ -614,7 +626,12 @@ export function QueueView({
 
                       {item.pcJobStatus && (
                         <p className="inline-flex items-center gap-1.5 rounded-sm border border-[#00f0ff]/30 bg-[#00f0ff]/10 px-2 py-0.5 font-mono text-[11px] font-semibold text-[#00f0ff]">
-                          PC: {formatPcJobStatusLabel(item.pcJobStatus, item.pcJobProgress)}
+                          {item.pcJobTarget === 'cloud' ? 'Nube' : 'PC'}:{' '}
+                          {formatPcJobStatusLabel(
+                            item.pcJobStatus,
+                            item.pcJobProgress,
+                            item.pcJobTarget
+                          )}
                         </p>
                       )}
 

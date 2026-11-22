@@ -1,7 +1,7 @@
 import type { AppSettings, EditStylePreset, TikTokEditOptions } from '../types';
 
 export type LogLevel = 'INFO' | 'WARN' | 'ERROR';
-export type LogCategory = 'UI' | 'Drive' | 'Frames' | 'IA' | 'FFmpeg' | 'Sistema';
+export type LogCategory = 'UI' | 'Drive' | 'Frames' | 'IA' | 'FFmpeg' | 'Nube' | 'Sistema';
 
 export interface DebugLogEntry {
   id: number;
@@ -47,6 +47,7 @@ const DATA_URI_BASE64_PATTERN =
 const BEARER_PATTERN = /\b(Bearer)\s+[A-Za-z0-9._~+/=-]{8,}/gi;
 const GOOGLE_API_KEY_PATTERN = /\bAIza[0-9A-Za-z_-]{20,}\b/g;
 const GOOGLE_OAUTH_TOKEN_PATTERN = /\bya29\.[0-9A-Za-z._-]{16,}\b/g;
+const GITHUB_TOKEN_PATTERN = /\b(?:github_pat_[A-Za-z0-9_]{16,}|gh[pousr]_[A-Za-z0-9]{16,})\b/g;
 const INLINE_SECRET_KV_PATTERN =
   /\b(access_token|refresh_token|id_token|api_key|apikey|authorization|client_secret|gemini_api_key)\s*([:=])\s*["']?[^\s"',;&}]+["']?/gi;
 const RAW_BASE64_BLOB_PATTERN = /\b[A-Za-z0-9+/]{160,}={0,2}\b/g;
@@ -126,6 +127,7 @@ export function hydrateDebugLogsFromStorage(): number {
           item.category === 'Frames' ||
           item.category === 'IA' ||
           item.category === 'FFmpeg' ||
+          item.category === 'Nube' ||
           item.category === 'Sistema'
             ? item.category
             : 'Sistema',
@@ -187,6 +189,7 @@ export function sanitizeLogString(input: string): string {
   out = out.replace(BEARER_PATTERN, '$1 [OMITIDO]');
   out = out.replace(GOOGLE_API_KEY_PATTERN, '[OMITIDO]');
   out = out.replace(GOOGLE_OAUTH_TOKEN_PATTERN, '[OMITIDO]');
+  out = out.replace(GITHUB_TOKEN_PATTERN, '[OMITIDO]');
   out = out.replace(INLINE_SECRET_KV_PATTERN, '$1$2[OMITIDO]');
   out = out.replace(RAW_BASE64_BLOB_PATTERN, (match) => `[base64: ${estimateBase64Kb(match.length)}]`);
 

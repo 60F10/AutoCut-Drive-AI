@@ -429,6 +429,7 @@ export async function analyzeMultiClipWithGemini(
 export async function checkServerHealth(): Promise<{
   status: string;
   geminiConfigured: boolean;
+  cloudRenderConfigured: boolean;
   defaultModel?: string;
 }> {
   try {
@@ -437,13 +438,22 @@ export async function checkServerHealth(): Promise<{
       { method: 'GET' },
       HEALTH_FETCH_TIMEOUT_MS
     );
-    if (!res.ok) return { status: 'error', geminiConfigured: false };
-    return (await res.json()) as {
-      status: string;
-      geminiConfigured: boolean;
+    if (!res.ok) {
+      return { status: 'error', geminiConfigured: false, cloudRenderConfigured: false };
+    }
+    const data = (await res.json()) as {
+      status?: string;
+      geminiConfigured?: boolean;
+      cloudRenderConfigured?: boolean;
       defaultModel?: string;
     };
+    return {
+      status: data.status || 'ok',
+      geminiConfigured: Boolean(data.geminiConfigured),
+      cloudRenderConfigured: Boolean(data.cloudRenderConfigured),
+      defaultModel: data.defaultModel,
+    };
   } catch {
-    return { status: 'error', geminiConfigured: false };
+    return { status: 'error', geminiConfigured: false, cloudRenderConfigured: false };
   }
 }

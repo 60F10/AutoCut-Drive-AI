@@ -122,6 +122,8 @@ export interface QueueItem {
   projectName?: string;
   sourceClips?: SourceClipRef[];
   pcJobId?: string;
+  pcJobFileId?: string;
+  pcJobTarget?: RenderJobTarget;
   pcJobStatus?: RenderJobStatus;
   pcJobProgress?: number;
   pcJobError?: string;
@@ -151,9 +153,13 @@ export interface AnalyticsRecord {
 
 export type RenderJobStatus = 'pending' | 'processing' | 'completed' | 'error';
 
+export type RenderJobTarget = 'pc' | 'cloud';
+
 export interface RenderJobSourceFile {
   name: string;
   driveFileId?: string;
+  /** True ONLY for local clips uploaded by the PWA into `_AutoCut_Jobs/_sources/` (safe to auto-delete on completion). */
+  uploadedTempSource?: boolean;
 }
 
 export interface RenderJobCut {
@@ -179,11 +185,15 @@ export interface RenderJobOptions {
 
 export interface RenderJobManifest {
   jobId: string;
+  target?: RenderJobTarget;
   createdAt: string;
   updatedAt?: string;
+  finishedAt?: string;
   status: RenderJobStatus;
   progress: number;
   outputFileName: string;
+  outputDriveId?: string;
+  outputWebViewLink?: string;
   errorMessage?: string;
   sourceFiles: RenderJobSourceFile[];
   cuts: RenderJobCut[];

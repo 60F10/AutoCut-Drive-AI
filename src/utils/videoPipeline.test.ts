@@ -1076,4 +1076,75 @@ test('Hybrid PC render contract: buildRenderJobManifest, shouldRecommendPcRender
   assert.deepEqual(singleManifest.sourceFiles, [
     { name: 'IMG_4021.MOV', driveFileId: 'drv-single' },
   ]);
+  assert.equal(singleManifest.target, 'pc');
 });
+
+test('Cloud render contract: target "cloud" manifest, uploadedTempSource, status labels, and GitHub PAT log redaction', () => {
+  assert.equal(formatPcJobStatusLabel('pending', 0, 'cloud'), 'En cola nube');
+  assert.equal(
+    formatPcJobStatusLabel('processing', 62, 'cloud'),
+    'Renderizando en la nube (62%)'
+  );
+  assert.equal(formatPcJobStatusLabel('completed', 100, 'cloud'), 'Completado');
+  assert.equal(formatPcJobStatusLabel('error', 10, 'cloud'), 'Error');
+
+  const cloudManifest = buildRenderJobManifest({
+    jobId: 'cloudjob1',
+    target: 'cloud',
+    createdAt: '2026-11-22T12:00:00.000Z',
+    exportQuality: 'high_1080p',
+    tiktokOptions: {
+      subtitlesEnabled: false,
+      silenceTrimEnabled: true,
+      audioNormalizeEnabled: true,
+      framingMode: 'center_crop',
+    },
+    sourceFilesOverride: [
+      { name: 'drive_clip.mp4', driveFileId: 'drv-original-1' },
+      { name: 'phone_clip.mov', driveFileId: 'drv-temp-2', uploadedTempSource: true },
+    ],
+    item: {
+      id: 'mc-cloud-1',
+      originalName: 'Proyecto_Nube',
+      projectName: 'Proyecto_Nube',
+      isMultiClip: true,
+      sourceClips: [
+        { id: 'c0', source: 'drive', driveFileId: 'drv-original-1', originalName: 'drive_clip.mp4', mimeType: 'video/mp4', sizeBytes: 150_000_000 },
+        { id: 'c1', source: 'local', originalName: 'phone_clip.mov', mimeType: 'video/quicktime', sizeBytes: 190_000_000 },
+      ],
+      analysis: {
+        etiqueta: 'VLOG',
+        titulo_interno: 'Día en la nube',
+        duracion_objetivo_seg: 15,
+        cortes: [
+          { id: 'cut-1', clip_index: 0, start_sec: 1, end_sec: 8, motivo: 'Inicio', enabled: true },
+          { id: 'cut-2', clip_index: 1, start_sec: 3, end_sec: 11, motivo: 'Cierre', enabled: true },
+        ],
+      },
+    },
+  });
+
+  assert.equal(cloudManifest.target, 'cloud');
+  assert.equal(cloudManifest.status, 'pending');
+  assert.equal(cloudManifest.sourceFiles.length, 2);
+  assert.equal(cloudManifest.sourceFiles[0].uploadedTempSource, undefined);
+  assert.equal(cloudManifest.sourceFiles[1].uploadedTempSource, true);
+  assert.equal(cloudManifest.sourceFiles[1].driveFileId, 'drv-temp-2');
+
+  // Verify debugLogger supports 'Nube' category and redacts GitHub PATs
+  clearDebugLogs();
+  const fakePat = 'github_pat_11ABCDEFG0123456789_secretTokenValueXYZ987654321';
+  const fakeClassicPat = 'ghp_1234567890abcdefghijklmnopqrstuvwxyzABCD';
+  logInfo('Nube', `Disparo fallido con ${fakePat} y ${fakeClassicPat}`, {
+    token: fakePat,
+    http: 401,
+  });
+  const logs = getDebugLogs();
+  assert.equal(logs.length, 1);
+  assert.equal(logs[0].category, 'Nube');
+  assert.ok(!logs[0].message.includes('secretTokenValue'));
+  assert.ok(!logs[0].message.includes('ghp_1234567890'));
+  assert.ok(logs[0].message.includes('[OMITIDO]'));
+  clearDebugLogs();
+});
+

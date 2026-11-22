@@ -111,6 +111,7 @@ export default function App() {
     accessToken,
     isLoggingIn,
     geminiConfigured,
+    cloudRenderConfigured,
     isDriveConnected,
     handleGoogleLogin,
     handleGoogleLogout,
@@ -151,6 +152,7 @@ export default function App() {
     folderId: settings.folderId,
     accessToken,
     isDriveConnected,
+    cloudRenderConfigured,
     exportQuality: settings.exportQuality,
     tiktokOptions,
     itemsRef: queue.itemsRef,
@@ -417,14 +419,18 @@ export default function App() {
               onGoToSettings={() => setActiveView('settings')}
               pcJobs={pcRender.pcJobs}
               pcOutputs={pcRender.pcOutputs}
+              cloudRenderConfigured={cloudRenderConfigured}
               isSyncingPcJobs={pcRender.isSyncingPcJobs}
               lastPcSyncTime={pcRender.lastPcSyncTime}
               downloadingOutputId={pcRender.downloadingOutputId}
               pcOutputPreviewUrls={pcRender.pcOutputPreviewUrls}
+              failedDispatchJobFileIds={pcRender.failedDispatchJobFileIds}
+              retryingDispatchJobFileId={pcRender.retryingDispatchJobFileId}
               onSyncPcJobs={() => void pcRender.syncPcJobs(false)}
               onDownloadPcOutput={(file, triggerSave) =>
                 void pcRender.downloadPcOutputVideo(file, triggerSave)
               }
+              onRetryCloudDispatch={(jobFileId) => void pcRender.retryCloudDispatch(jobFileId)}
             />
           )}
 
@@ -442,14 +448,18 @@ export default function App() {
               onGoToSettings={() => setActiveView('settings')}
               pcJobs={pcRender.pcJobs}
               pcOutputs={pcRender.pcOutputs}
+              cloudRenderConfigured={cloudRenderConfigured}
               isSyncingPcJobs={pcRender.isSyncingPcJobs}
               lastPcSyncTime={pcRender.lastPcSyncTime}
               downloadingOutputId={pcRender.downloadingOutputId}
               pcOutputPreviewUrls={pcRender.pcOutputPreviewUrls}
+              failedDispatchJobFileIds={pcRender.failedDispatchJobFileIds}
+              retryingDispatchJobFileId={pcRender.retryingDispatchJobFileId}
               onSyncPcJobs={() => void pcRender.syncPcJobs(false)}
               onDownloadPcOutput={(file, triggerSave) =>
                 void pcRender.downloadPcOutputVideo(file, triggerSave)
               }
+              onRetryCloudDispatch={(jobFileId) => void pcRender.retryCloudDispatch(jobFileId)}
             />
           )}
 
@@ -463,9 +473,16 @@ export default function App() {
               onReorderCut={studio.handleReorderCut}
               onUpdateCutTiming={studio.handleUpdateCutTiming}
               onRerenderItem={studio.handleRerenderItem}
+              onSendToCloud={(itemId) => void pcRender.sendItemToCloud(itemId)}
               onSendToPc={(itemId) => void pcRender.sendItemToPc(itemId)}
+              onRetryCloudDispatch={(jobFileId) => void pcRender.retryCloudDispatch(jobFileId)}
+              cloudRenderConfigured={cloudRenderConfigured}
               isSendingToPc={Boolean(pcRender.sendingToPcId)}
+              sendingTarget={pcRender.sendingTarget}
+              cloudUploadProgress={pcRender.cloudUploadProgress}
               lastSentPcJob={pcRender.lastSentPcJob}
+              failedDispatchJobFileIds={pcRender.failedDispatchJobFileIds}
+              retryingDispatchJobFileId={pcRender.retryingDispatchJobFileId}
               onRequestDriveUpload={queue.handleRequestDriveUpload}
               exportQuality={settings.exportQuality}
               onChangeExportQuality={handleChangeExportQuality}
@@ -476,6 +493,7 @@ export default function App() {
               canUploadToDrive={Boolean(isDriveConnected && settings.folderId)}
               onBackToQueue={() => setActiveView('queue')}
               onGoToGallery={() => setActiveView('gallery')}
+              onGoToSettings={() => setActiveView('settings')}
             />
           )}
 
@@ -489,6 +507,7 @@ export default function App() {
               onGoogleLogin={handleGoogleLogin}
               onGoogleLogout={handleGoogleLogout}
               geminiConfigured={geminiConfigured}
+              cloudRenderConfigured={cloudRenderConfigured}
               cacheStats={cacheStats}
               isClearingCache={queue.isClearingCache}
               onClearVideoCache={queue.handleClearVideoCache}

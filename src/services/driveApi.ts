@@ -185,6 +185,8 @@ export async function uploadEditedVideoMultipart(
 const DRIVE_FOLDER_MIME = 'application/vnd.google-apps.folder';
 export const PC_JOBS_SUBFOLDER = '_AutoCut_Jobs';
 export const PC_OUTPUT_SUBFOLDER = '_AutoCut_Output';
+export const PC_SOURCES_SUBFOLDER = '_sources';
+export const DRIVE_RESUMABLE_CHUNK_BYTES = 8 * 1024 * 1024; // 8 MB chunks (multiple of 256 KB)
 
 function escapeDriveQueryValue(value: string): string {
   return value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
@@ -299,8 +301,9 @@ export async function uploadRenderJobManifest(
 
   await assertDriveOk(res, 'Subir manifiesto de trabajo PC');
   const result = (await res.json()) as DriveUploadResult;
-  logInfo('Drive', 'Trabajo de render enviado a PC (_AutoCut_Jobs)', {
+  logInfo(manifest.target === 'cloud' ? 'Nube' : 'Drive', 'Manifiesto de render subido a _AutoCut_Jobs', {
     jobId: manifest.jobId,
+    destino: manifest.target || 'pc',
     archivo: fileName,
     clips: manifest.sourceFiles.length,
     cortes: manifest.cuts.length,
@@ -308,6 +311,154 @@ export async function uploadRenderJobManifest(
     ms: Math.round(performance.now() - t0),
   });
   return result;
+}
+
+/**
+ * Ensures `_AutoCut_Jobs/_sources/` exists for temporary uploads of local clips before cloud rendering.
+ */
+export async function ensureCloudSourcesSubfolder(
+  rootFolderId: string,
+  accessToken: string
+): Promise<string> {
+  const { jobsFolderId } = await ensurePcRenderFolders(rootFolderId, accessToken);
+  return ensureDriveSubfolder(jobsFolderId, PC_SOURCES_SUBFOLDER, accessToken);
+}
+
+/**
+ * Uploads a local video Blob into `_AutoCut_Jobs/_sources/` via Google Drive resumable upload
+ * in 8 MB chunks so large phone recordings upload reliably with real progress feedback.
+ */
+export async function uploadSourceVideoResumable8MB(
+  sourcesFolderId: string,
+  fileName: string,
+  videoBlob: Blob,
+  accessToken: string,
+  onProgress?: (percent: number) => void
+): Promise<DriveUploadResult> {
+  const t0 = performance.now();
+  const totalBytes = videoBlob.size;
+  const mimeType = videoBlob.type || 'video/mp4';
+
+  logInfo('Nube', 'Iniciando subida resumable de clip local a _sources/', {
+    pesoMB: Number((totalBytes / (1024 * 1024)).toFixed(2)),
+    chunkMB: 8,
+  });
+
+  const initRes = await fetch(
+    `${DRIVE_UPLOAD_BASE}/files?uploadType=resumable&fields=id,name,webViewLink,size`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json; charset=UTF-8',
+        'X-Upload-Content-Type': mimeType,
+        'X-Upload-Content-Length': String(totalBytes),
+      },
+      body: JSON.stringify({
+        name: fileName,
+        parents: [sourcesFolderId],
+        mimeType,
+      }),
+    }
+  );
+  await assertDriveOk(initRes, 'Iniciar subida resumable (_sources)');
+
+  const uploadUrl = initRes.headers.get('location');
+  if (!uploadUrl) {
+    throw new Error('Google Drive no devolvió la URL de subida resumable.');
+  }
+
+  let offset = 0;
+  let uploaded: DriveUploadResult | null = null;
+  onProgress?.(2);
+
+  while (offset < totalBytes) {
+    const endExclusive = Math.min(totalBytes, offset + DRIVE_RESUMABLE_CHUNK_BYTES);
+    const chunk = videoBlob.slice(offset, endExclusive);
+    const rangeEnd = endExclusive - 1;
+
+    const putRes = await fetch(uploadUrl, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': mimeType,
+        'Content-Range': `bytes ${offset}-${rangeEnd}/${totalBytes}`,
+      },
+      body: chunk,
+    });
+
+    if (putRes.status === 308) {
+      offset = endExclusive;
+      onProgress?.(Math.min(98, Math.round((offset / totalBytes) * 100)));
+      continue;
+    }
+
+    await assertDriveOk(putRes, 'Subir bloque de vídeo (_sources)');
+    uploaded = (await putRes.json()) as DriveUploadResult;
+    offset = totalBytes;
+    onProgress?.(100);
+    break;
+  }
+
+  if (!uploaded?.id) {
+    throw new Error('No se recibió el ID del archivo tras completar la subida resumable.');
+  }
+
+  logInfo('Nube', 'Clip local subido a _sources/ correctamente', {
+    pesoMB: Number((totalBytes / (1024 * 1024)).toFixed(2)),
+    ms: Math.round(performance.now() - t0),
+  });
+  return uploaded;
+}
+
+/**
+ * Deletes a temporary file from Drive (used strictly to clean up PWA-uploaded `_sources/` files).
+ */
+export async function deleteDriveFile(fileId: string, accessToken: string): Promise<void> {
+  const res = await fetch(`${DRIVE_API_BASE}/files/${encodeURIComponent(fileId)}`, {
+    method: 'DELETE',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+  if (res.status === 404) return; // Already cleaned up
+  await assertDriveOk(res, 'Limpiar temporal de _sources');
+}
+
+/**
+ * Dispatches the GitHub Actions cloud render workflow via the backend proxy (`/api/cloud-render/dispatch`).
+ */
+export async function dispatchCloudRenderJob(jobFileId: string): Promise<{ ok: true }> {
+  const t0 = performance.now();
+  const res = await fetch('/api/cloud-render/dispatch', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ jobFileId }),
+  });
+
+  if (res.status === 202 || res.ok) {
+    logInfo('Nube', 'Workflow de GitHub Actions disparado', {
+      http: res.status,
+      ms: Math.round(performance.now() - t0),
+    });
+    return { ok: true };
+  }
+
+  let message = `No se pudo disparar el render en la nube (HTTP ${res.status}).`;
+  try {
+    const json = (await res.json()) as { error?: string };
+    if (json?.error) message = json.error;
+  } catch {
+    // keep default
+  }
+
+  logError('Nube', 'Fallo al disparar GitHub Actions', {
+    http: res.status,
+    detalle: message,
+  });
+  throw new Error(message);
 }
 
 export interface PcRenderDriveSnapshot {
@@ -365,9 +516,17 @@ export async function listPcRenderJobsAndOutputs(
         const parsed = (await res.json()) as import('../types').RenderJobManifest;
         if (!parsed || typeof parsed !== 'object' || !parsed.jobId || !parsed.status) return;
 
-        const matchedOutput = parsed.outputFileName
-          ? outputByLowerName.get(parsed.outputFileName.toLowerCase())
-          : undefined;
+        const matchedOutput =
+          (parsed.outputFileName
+            ? outputByLowerName.get(parsed.outputFileName.toLowerCase())
+            : undefined) ||
+          (parsed.outputDriveId
+            ? {
+                id: parsed.outputDriveId,
+                name: parsed.outputFileName || `AutoCut_${parsed.jobId}.mp4`,
+                webViewLink: parsed.outputWebViewLink,
+              }
+            : undefined);
 
         jobs.push({
           manifest: parsed,

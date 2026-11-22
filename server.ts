@@ -19,6 +19,55 @@ const DEFAULT_SERVER_GEMINI_MODEL = sanitizeGeminiModelName(
   DEFAULT_GEMINI_MODEL
 );
 
+const JOB_FILE_ID_PATTERN = /^[A-Za-z0-9_-]{10,128}$/;
+const GITHUB_REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const DISPATCH_RATE_LIMIT_MAX = 10;
+const DISPATCH_RATE_WINDOW_MS = 60_000;
+const dispatchRequestTimestamps: number[] = [];
+
+function getCloudRenderServerConfig(): {
+  configured: boolean;
+  token: string;
+  repo: string;
+  ref: string;
+} {
+  const token = (process.env.GITHUB_DISPATCH_TOKEN || '').trim();
+  const repo = (process.env.GITHUB_REPO || '').trim();
+  const ref = (process.env.GITHUB_REF || 'main').trim() || 'main';
+  const configured = Boolean(token && GITHUB_REPO_PATTERN.test(repo));
+  return { configured, token, repo, ref };
+}
+
+function consumeDispatchRateLimitSlot(nowMs = Date.now()): boolean {
+  while (
+    dispatchRequestTimestamps.length > 0 &&
+    nowMs - dispatchRequestTimestamps[0] >= DISPATCH_RATE_WINDOW_MS
+  ) {
+    dispatchRequestTimestamps.shift();
+  }
+  if (dispatchRequestTimestamps.length >= DISPATCH_RATE_LIMIT_MAX) {
+    return false;
+  }
+  dispatchRequestTimestamps.push(nowMs);
+  return true;
+}
+
+function humanizeGitHubDispatchError(status: number): string {
+  if (status === 401 || status === 403) {
+    return 'Token de GitHub inválido o sin permisos de Actions (Read & Write). Revisa GITHUB_DISPATCH_TOKEN en Settings > Secrets.';
+  }
+  if (status === 404) {
+    return 'No se encontró el repositorio o el workflow cloud-render.yml en GitHub. Verifica GITHUB_REPO y que el archivo exista en la rama.';
+  }
+  if (status === 422) {
+    return 'GitHub rechazó el disparo del workflow (revisa GITHUB_REF o la definición de inputs en cloud-render.yml).';
+  }
+  if (status === 429) {
+    return 'GitHub Actions ha limitado temporalmente las peticiones. Espera unos segundos y reintenta.';
+  }
+  return `GitHub Actions devolvió un error inesperado (HTTP ${status}).`;
+}
+
 function createGeminiClient(): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
@@ -136,13 +185,88 @@ async function startServer() {
   app.use(express.json({ limit: '15mb' }));
 
   app.get('/api/health', (_req, res) => {
+    const cloudConfig = getCloudRenderServerConfig();
     res.json({
       status: 'ok',
       geminiConfigured: Boolean(process.env.GEMINI_API_KEY),
+      cloudRenderConfigured: cloudConfig.configured,
       defaultModel: DEFAULT_SERVER_GEMINI_MODEL,
       maxFrames: AI_FRAME_MAX_COUNT,
       maxPayloadBytes: AI_MAX_JSON_PAYLOAD_BYTES,
     });
+  });
+
+  // Dispatches the GitHub Actions `cloud-render.yml` workflow via repository workflow_dispatch
+  app.post('/api/cloud-render/dispatch', async (req, res) => {
+    try {
+      const rawJobFileId =
+        typeof req.body?.jobFileId === 'string' ? req.body.jobFileId.trim() : '';
+
+      if (!JOB_FILE_ID_PATTERN.test(rawJobFileId)) {
+        res.status(400).json({
+          error: 'El identificador jobFileId no es válido.',
+        });
+        return;
+      }
+
+      if (!consumeDispatchRateLimitSlot()) {
+        res.status(429).json({
+          error:
+            'Has alcanzado el límite de 10 envíos a la nube por minuto. Espera unos segundos e inténtalo de nuevo.',
+        });
+        return;
+      }
+
+      const cloudConfig = getCloudRenderServerConfig();
+      if (!cloudConfig.configured) {
+        res.status(503).json({
+          error:
+            'El render en la nube no está configurado en el servidor. Añade GITHUB_DISPATCH_TOKEN y GITHUB_REPO en Settings > Secrets.',
+          actionHint: 'settings',
+        });
+        return;
+      }
+
+      const dispatchUrl = `https://api.github.com/repos/${cloudConfig.repo}/actions/workflows/cloud-render.yml/dispatches`;
+      const ghRes = await fetch(dispatchUrl, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${cloudConfig.token}`,
+          Accept: 'application/vnd.github+json',
+          'X-GitHub-Api-Version': '2022-11-28',
+          'Content-Type': 'application/json',
+          'User-Agent': 'autocut-drive-ai',
+        },
+        body: JSON.stringify({
+          ref: cloudConfig.ref,
+          inputs: {
+            job_file_id: rawJobFileId,
+          },
+        }),
+      });
+
+      if (ghRes.status === 204) {
+        res.status(202).json({
+          ok: true,
+          status: 'dispatched',
+          jobFileId: rawJobFileId,
+        });
+        return;
+      }
+
+      const statusCode = ghRes.status >= 400 && ghRes.status < 600 ? ghRes.status : 502;
+      res.status(statusCode).json({
+        error: humanizeGitHubDispatchError(ghRes.status),
+        githubStatus: ghRes.status,
+      });
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : 'Error de red al contactar con GitHub.';
+      console.error('[Nube] Error en /api/cloud-render/dispatch:', msg);
+      res.status(502).json({
+        error:
+          'No se pudo contactar con la API de GitHub Actions. Comprueba la conexión y vuelve a intentarlo.',
+      });
+    }
   });
 
   // Lightweight storyboard frame analysis endpoint (never receives raw .MOV/.MP4 video files)
