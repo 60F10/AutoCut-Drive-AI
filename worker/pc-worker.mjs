@@ -42,11 +42,12 @@ function log(level, message, details) {
 }
 
 /**
- * PC worker claims pending jobs whose target is NOT `"cloud"` (backward-compatible with
- * manifests that omit `target` or set `target: "pc"`).
+ * PC worker claims pending render jobs whose target is NOT `"cloud"` and whose kind is NOT `"analyze"`
+ * (backward-compatible with manifests that omit `target` or `kind`).
  */
 export function shouldPcWorkerClaimJob(manifest) {
   if (!manifest || typeof manifest !== 'object') return false;
+  if (manifest.kind === 'analyze') return false;
   if (manifest.status !== 'pending') return false;
   if (manifest.target === 'cloud') return false;
   return true;

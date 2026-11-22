@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   ArrowDown,
   ArrowUp,
+  BookOpen,
   Captions,
   CheckCircle2,
   CheckSquare,
@@ -24,9 +25,16 @@ import {
   Sparkles,
   Square,
   Star,
+  Wand2,
   Zap,
 } from 'lucide-react';
-import type { ExportQuality, QueueItem, RenderJobTarget, TikTokEditOptions } from '../types';
+import type {
+  ExportQuality,
+  PlanCutFunction,
+  QueueItem,
+  RenderJobTarget,
+  TikTokEditOptions,
+} from '../types';
 import {
   buildCombinedEditedFilename,
   buildEditedFilename,
@@ -58,9 +66,11 @@ interface StudioViewProps {
   onRerenderItem: (itemId: string, qualityOverride?: ExportQuality) => void;
   onSendToCloud: (itemId: string) => void;
   onSendToPc: (itemId: string) => void;
+  onRedoStory: (itemId: string, instruction: string) => void;
   onRetryCloudDispatch: (jobFileId: string) => void;
   cloudRenderConfigured: boolean;
   isSendingToPc: boolean;
+  isSendingAnalyze: boolean;
   sendingTarget: RenderJobTarget | null;
   cloudUploadProgress: {
     clipIndex: number;
@@ -90,6 +100,40 @@ interface StudioViewProps {
   onGoToSettings: () => void;
 }
 
+const CUT_FUNCTION_META: Record<
+  PlanCutFunction,
+  { label: string; className: string }
+> = {
+  gancho: {
+    label: 'Gancho',
+    className: 'border-[#ff2a85]/60 bg-[#ff2a85]/16 text-[#ff85b8]',
+  },
+  contexto: {
+    label: 'Contexto',
+    className: 'border-[#00f0ff]/45 bg-[#00f0ff]/12 text-[#7df7ff]',
+  },
+  desarrollo: {
+    label: 'Desarrollo',
+    className: 'border-[#8EA2BD]/45 bg-[#8EA2BD]/12 text-[#C8D7EC]',
+  },
+  climax: {
+    label: 'Clímax',
+    className: 'border-[#fcee0a]/60 bg-[#fcee0a]/15 text-[#fcee0a]',
+  },
+  remate: {
+    label: 'Remate',
+    className: 'border-[#ff2a85]/55 bg-[#ff2a85]/14 text-[#ffb3d1]',
+  },
+  cierre: {
+    label: 'Cierre',
+    className: 'border-[#00f0ff]/55 bg-[#00f0ff]/15 text-[#00f0ff]',
+  },
+  recurso: {
+    label: 'Recurso',
+    className: 'border-[#a855f7]/55 bg-[#a855f7]/15 text-[#d8b4fe]',
+  },
+};
+
 export function StudioView({
   items,
   selectedItemId,
@@ -101,9 +145,11 @@ export function StudioView({
   onRerenderItem,
   onSendToCloud,
   onSendToPc,
+  onRedoStory,
   onRetryCloudDispatch,
   cloudRenderConfigured,
   isSendingToPc,
+  isSendingAnalyze,
   sendingTarget,
   cloudUploadProgress,
   lastSentPcJob,
@@ -132,6 +178,9 @@ export function StudioView({
   const [demoPlaying, setDemoPlaying] = useState(false);
   const [demoCutIndex, setDemoCutIndex] = useState(0);
   const [showOtherRenderOptions, setShowOtherRenderOptions] = useState(false);
+  const [showFullScript, setShowFullScript] = useState(false);
+  const [showRedoStory, setShowRedoStory] = useState(false);
+  const [redoInstruction, setRedoInstruction] = useState('');
 
   const enabledCuts = useMemo(
     () => (currentItem?.analysis?.cortes ?? []).filter((c) => c.enabled),
@@ -192,6 +241,9 @@ export function StudioView({
     setDemoPlaying(false);
     setDemoCutIndex(0);
     setActiveCutId(enabledCuts[0]?.id ?? null);
+    setShowFullScript(false);
+    setShowRedoStory(false);
+    setRedoInstruction(currentItem?.customInstruction ?? '');
   }, [currentItem?.id]);
 
   useEffect(() => {
@@ -274,7 +326,13 @@ export function StudioView({
   const activeDispatchError = activeJobFileId ? failedDispatchJobFileIds[activeJobFileId] : undefined;
   const isSendingCloud = isSendingToPc && sendingTarget === 'cloud';
   const isSendingPc = isSendingToPc && sendingTarget === 'pc';
-  const hasGeneratedSubtitles = Boolean(plan.subtitulos && plan.subtitulos.length > 0);
+  const hasWordLevelSubtitles = Boolean(plan.cortes.some((c) => c.words && c.words.length > 0));
+  const hasGeneratedSubtitles = Boolean(
+    (plan.subtitulos && plan.subtitulos.length > 0) || hasWordLevelSubtitles
+  );
+  const hasCloudStoryInfo = Boolean(
+    plan.gancho || plan.historia || plan.guionResultante || plan.revision
+  );
   const activeDemoCut =
     enabledCuts.find((c) => c.id === activeCutId) ?? enabledCuts[demoCutIndex] ?? plan.cortes[0];
 
@@ -1001,6 +1059,169 @@ export function StudioView({
                 </strong>
               </div>
             </div>
+
+            {/* Cloud Story Overview Card (titulo, gancho, historia, revision.notas, Ver guion, Rehacer historia) */}
+            {hasCloudStoryInfo && (
+              <div
+                data-testid="studio-story-card"
+                className="mt-4 rounded-md border border-[#00f0ff]/30 bg-[#05060a]/90 p-3.5 space-y-3"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="inline-flex items-center gap-1.5 font-mono text-[10px] font-semibold uppercase tracking-wider text-[#00f0ff]">
+                    <Sparkles className="h-3.5 w-3.5 text-[#fcee0a]" />
+                    Guion multimodal (Whisper + Gemini)
+                  </span>
+                  {plan.revision && (
+                    <span
+                      data-testid="studio-revision-badge"
+                      className={`font-mono text-[10px] font-semibold px-2 py-0.5 rounded-sm border ${
+                        plan.revision.coherente
+                          ? 'border-[#00f0ff]/45 bg-[#00f0ff]/12 text-[#00f0ff]'
+                          : 'border-[#fcee0a]/55 bg-[#fcee0a]/12 text-[#fcee0a]'
+                      }`}
+                    >
+                      {plan.revision.coherente ? 'Coherencia verificada' : 'Revisar ritmo'}
+                    </span>
+                  )}
+                </div>
+
+                {plan.gancho && (
+                  <div className="space-y-0.5">
+                    <p className="font-mono text-[10px] font-semibold uppercase tracking-wider text-[#ff85b8]">
+                      Gancho
+                    </p>
+                    <p
+                      data-testid="studio-story-gancho"
+                      className="text-xs font-medium text-[#EEF5FF] leading-relaxed"
+                    >
+                      {plan.gancho}
+                    </p>
+                  </div>
+                )}
+
+                {plan.historia && (
+                  <div className="space-y-0.5">
+                    <p className="font-mono text-[10px] font-semibold uppercase tracking-wider text-[#8EA2BD]">
+                      Historia
+                    </p>
+                    <p
+                      data-testid="studio-story-historia"
+                      className="text-xs text-[#C8D7EC] leading-relaxed"
+                    >
+                      {plan.historia}
+                    </p>
+                  </div>
+                )}
+
+                {plan.revision && plan.revision.notas && plan.revision.notas.length > 0 && (
+                  <div
+                    data-testid="studio-revision-notas"
+                    className="rounded-sm border border-[#00f0ff]/18 bg-[#0c0f1a]/80 px-3 py-2 space-y-1"
+                  >
+                    <p className="font-mono text-[10px] font-semibold uppercase tracking-wider text-[#fcee0a]">
+                      Notas de revisión
+                    </p>
+                    <ul className="space-y-1 text-[11px] text-[#B5C6DC] list-disc list-inside">
+                      {plan.revision.notas.map((nota, idx) => (
+                        <li key={idx} className="leading-relaxed">
+                          {nota}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  {plan.guionResultante && (
+                    <button
+                      type="button"
+                      data-testid="studio-view-full-script-btn"
+                      onClick={() => setShowFullScript((prev) => !prev)}
+                      className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[#00f0ff]/35 bg-[#00f0ff]/10 px-3 font-mono text-[11px] font-semibold text-[#00f0ff] hover:bg-[#00f0ff]/18 transition-colors"
+                    >
+                      <BookOpen className="h-3.5 w-3.5" />
+                      {showFullScript ? 'Ocultar guion completo' : 'Ver guion completo'}
+                    </button>
+                  )}
+
+                  <button
+                    type="button"
+                    data-testid="studio-redo-story-toggle-btn"
+                    onClick={() => setShowRedoStory((prev) => !prev)}
+                    className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[#ff2a85]/45 bg-[#ff2a85]/12 px-3 font-mono text-[11px] font-semibold text-[#ffb3d1] hover:bg-[#ff2a85]/22 transition-colors"
+                  >
+                    <Wand2 className="h-3.5 w-3.5" />
+                    Rehacer historia
+                  </button>
+                </div>
+
+                {showFullScript && plan.guionResultante && (
+                  <div
+                    data-testid="studio-full-script-panel"
+                    className="rounded-sm border border-[#00f0ff]/25 bg-[#0c0f1a] p-3 space-y-1.5"
+                  >
+                    <p className="font-mono text-[10px] font-semibold uppercase tracking-wider text-[#00f0ff]">
+                      Guion resultante (texto hablado continuo)
+                    </p>
+                    <p className="text-xs leading-relaxed text-[#EEF5FF] whitespace-pre-wrap">
+                      {plan.guionResultante}
+                    </p>
+                  </div>
+                )}
+
+                {showRedoStory && (
+                  <div
+                    data-testid="studio-redo-story-form"
+                    className="rounded-sm border border-[#ff2a85]/35 bg-[#0c0f1a] p-3 space-y-2.5"
+                  >
+                    <label
+                      htmlFor="studio-redo-story-input"
+                      className="block text-[11px] font-medium text-[#EEF5FF]"
+                    >
+                      Nueva indicación para Gemini (reutiliza la transcripción en caché de Drive)
+                    </label>
+                    <input
+                      id="studio-redo-story-input"
+                      data-testid="studio-redo-story-input"
+                      type="text"
+                      value={redoInstruction}
+                      onChange={(e) => setRedoInstruction(e.target.value)}
+                      placeholder="Ej: Hazlo más dinámico, empieza por el momento gracioso y déjalo en 35s..."
+                      className="h-9 w-full rounded-md border border-[#00f0ff]/25 bg-[#05060a] px-3 text-xs text-[#EEF5FF] placeholder:text-[#5F738E] focus:border-[#00f0ff] focus:outline-none"
+                    />
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-[10px] text-[#8EA2BD]">
+                        No vuelve a ejecutar Whisper si la transcripción ya está en _AutoCut_Jobs/_cache.
+                      </span>
+                      <button
+                        type="button"
+                        data-testid="studio-redo-story-submit-btn"
+                        disabled={!cloudRenderConfigured || !canUploadToDrive || isSendingAnalyze}
+                        title={
+                          !cloudRenderConfigured
+                            ? 'Configura GitHub Actions y GEMINI_API_KEY en Ajustes'
+                            : !canUploadToDrive
+                            ? 'Conecta Google Drive y configura tu carpeta en Ajustes'
+                            : 'Generar un nuevo guion en la nube reutilizando la transcripción'
+                        }
+                        onClick={() => {
+                          onRedoStory(currentItem.id, redoInstruction);
+                          setShowRedoStory(false);
+                        }}
+                        className="cyber-btn-magenta inline-flex h-8 items-center gap-1.5 px-3 text-[11px] font-semibold disabled:opacity-45 whitespace-nowrap"
+                      >
+                        {isSendingAnalyze ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Cloud className="h-3.5 w-3.5" />
+                        )}
+                        Generar nueva historia
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Visual Timeline Track */}
@@ -1145,6 +1366,17 @@ export function StudioView({
                             {formatSeconds(cut.end_sec)}
                           </span>
 
+                          {cut.funcion && CUT_FUNCTION_META[cut.funcion] && (
+                            <span
+                              data-testid={`cut-funcion-${index}`}
+                              className={`inline-flex items-center rounded-sm border px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wider ${
+                                CUT_FUNCTION_META[cut.funcion].className
+                              }`}
+                            >
+                              {CUT_FUNCTION_META[cut.funcion].label}
+                            </span>
+                          )}
+
                           <span
                             data-testid={`cut-score-${index}`}
                             title="Puntuación de interés estimada por Gemini"
@@ -1168,10 +1400,26 @@ export function StudioView({
                             </span>
                           )}
                         </div>
+                        {cut.texto && (
+                          <p
+                            data-testid={`cut-texto-${index}`}
+                            className={`mt-1.5 text-xs font-medium leading-relaxed ${
+                              cut.enabled ? 'text-[#EEF5FF]' : 'text-[#6A7E99]'
+                            }`}
+                          >
+                            «{cut.texto}»
+                          </p>
+                        )}
                         <p
                           data-testid={`cut-reason-${index}`}
                           className={`mt-1 text-xs leading-relaxed ${
-                            cut.enabled ? 'text-[#C8D7EC]' : 'text-[#5A6C86]'
+                            cut.texto
+                              ? cut.enabled
+                                ? 'text-[#8EA2BD]'
+                                : 'text-[#52647D]'
+                              : cut.enabled
+                              ? 'text-[#C8D7EC]'
+                              : 'text-[#5A6C86]'
                           }`}
                         >
                           {cut.motivo}

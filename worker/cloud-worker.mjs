@@ -1,17 +1,21 @@
 #!/usr/bin/env node
 /**
- * AutoCut Drive AI — Cloud Render Worker for GitHub Actions (Node 20+, zero deps)
+ * AutoCut Drive AI — Cloud Render & Analysis Worker for GitHub Actions (Node 20+, zero deps)
  *
- * Authenticates to Google Drive via OAuth refresh token, streams source videos
- * directly to disk (never buffering raw video in RAM), renders via `worker/render-core.mjs`
- * with `libx264` (`-preset veryfast` in 1080p, `-preset ultrafast` in 720p),
- * uploads the finished MP4 to `_AutoCut_Output` using 8 MB resumable chunks,
- * and updates `job_<id>.json` progress/status.
+ * Handles two job kinds in `_AutoCut_Jobs/`:
+ * 1. `analyze_<id>.json` (`kind: "analyze"`):
+ *    Streams source videos to disk -> Whisper transcription (with Drive `_cache` reuse) ->
+ *    Gemini multimodal Phase A (video+audio proxy) + Phase B (global story script) +
+ *    deterministic cut conversion + Phase C (coherence review) -> writes `plan` & `status: "analyzed"`.
+ * 2. `job_<id>.json` (render):
+ *    Streams source videos to disk -> renders via `worker/render-core.mjs` (`libx264` + HDR->SDR +
+ *    2-pass loudnorm + word-level ASS subtitles) -> uploads MP4 to `_AutoCut_Output` in 8 MB chunks.
  *
  * PRIVACY GUARANTEE (public GitHub Actions logs):
- * - Emits `::add-mask::<token>` immediately for every obtained OAuth token.
- * - Logs ONLY safe telemetry: jobId, clip count, MB, elapsed seconds, HTTP codes,
- *   stage, progress, encoder. NEVER logs filenames, tokens, headers, or folder IDs.
+ * - Emits `::add-mask::<token>` immediately for OAuth tokens and `GEMINI_API_KEY`.
+ * - Logs ONLY safe telemetry: jobId, kind, clip count, MB, elapsed seconds, HTTP codes,
+ *   stage, progress, encoder, quality, cacheHit. NEVER logs filenames, transcripts, tokens,
+ *   headers, or Drive IDs.
  */
 
 import fs from 'node:fs';
@@ -26,12 +30,14 @@ import {
   renderJob,
   sanitizeOutputFilename,
 } from './render-core.mjs';
+import { analyzeCloudJob } from './analyze-core.mjs';
 
 const DRIVE_API_BASE = 'https://www.googleapis.com/drive/v3';
 const DRIVE_UPLOAD_BASE = 'https://www.googleapis.com/upload/drive/v3';
 const DRIVE_FOLDER_MIME = 'application/vnd.google-apps.folder';
 const JOBS_SUBFOLDER = '_AutoCut_Jobs';
 const OUTPUT_SUBFOLDER = '_AutoCut_Output';
+const CACHE_SUBFOLDER = '_cache';
 
 const TOKEN_REFRESH_AGE_MS = 45 * 60 * 1000; // Refresh proactively after 45 min
 const PROGRESS_WRITE_THROTTLE_MS = 10_000; // At most 1 progress write every 10 s
@@ -39,6 +45,7 @@ export const RESUMABLE_CHUNK_BYTES = 8 * 1024 * 1024; // 8 MB chunks (multiple o
 
 const SAFE_LOG_KEYS = new Set([
   'jobId',
+  'kind',
   'clips',
   'cuts',
   'mb',
@@ -49,11 +56,14 @@ const SAFE_LOG_KEYS = new Set([
   'encoder',
   'quality',
   'jobsFound',
+  'cacheHit',
+  'whisperModel',
+  'coherent',
 ]);
 
 /**
  * Formats a privacy-safe log line strictly whitelisting numeric/structural telemetry.
- * Guarantees no filenames, OAuth tokens, headers, or folder IDs can ever leak into Actions logs.
+ * Guarantees no filenames, transcripts, OAuth tokens, headers, or folder IDs can ever leak.
  */
 export function formatSafeCloudLog(level, stage, metrics = {}) {
   const ts = new Date().toISOString().slice(11, 23);
@@ -62,8 +72,9 @@ export function formatSafeCloudLog(level, stage, metrics = {}) {
     if (!SAFE_LOG_KEYS.has(k) || v === undefined || v === null) continue;
     if (typeof v === 'number' && Number.isFinite(v)) {
       safe[k] = v;
+    } else if (typeof v === 'boolean') {
+      safe[k] = v;
     } else if (typeof v === 'string') {
-      // Strictly allow short safe identifiers (jobId, stage, encoder, quality) — never paths or tokens
       const trimmed = v.trim();
       if (
         trimmed.length <= 48 &&
@@ -89,9 +100,26 @@ function logSafe(level, stage, metrics) {
   }
 }
 
+export function isAnalyzeManifest(manifest) {
+  return Boolean(manifest && typeof manifest === 'object' && manifest.kind === 'analyze');
+}
+
+export function getCloudJobRoute(manifest) {
+  if (isAnalyzeManifest(manifest)) return 'analyze';
+  return 'render';
+}
+
 export function shouldCloudWorkerClaimJob(manifest) {
   if (!manifest || typeof manifest !== 'object') return false;
-  return manifest.status === 'pending' && manifest.target === 'cloud';
+  if (manifest.status !== 'pending') return false;
+  if (manifest.kind === 'analyze') return true;
+  return manifest.target === 'cloud';
+}
+
+export function buildTranscriptCacheFilename(driveFileId, modifiedTime = '') {
+  const safeId = String(driveFileId || 'unknown').replace(/[^A-Za-z0-9_-]/g, '_');
+  const safeMod = String(modifiedTime || 'nomod').replace(/[^A-Za-z0-9_-]/g, '_');
+  return `transcript_${safeId}_${safeMod}.json`;
 }
 
 export function parseCloudCliArgs(argv) {
@@ -160,7 +188,6 @@ class DriveTokenManager {
       throw new PhaseError('Drive', 'Google OAuth no devolvió un access_token válido.');
     }
 
-    // Immediately register token mask in GitHub Actions so it can never appear in logs
     console.log(`::add-mask::${token}`);
     this.accessToken = token;
     this.obtainedAtMs = Date.now();
@@ -263,6 +290,91 @@ async function patchJobManifest(tokenManager, fileId, manifest) {
   );
 }
 
+async function readCachedTranscriptFromDrive(tokenManager, cacheFolderId, fileName) {
+  try {
+    const q = encodeURIComponent(
+      `'${escapeDriveQuery(cacheFolderId)}' in parents and name = '${escapeDriveQuery(
+        fileName
+      )}' and trashed = false`
+    );
+    const listRes = await driveFetch(
+      tokenManager,
+      `${DRIVE_API_BASE}/files?q=${q}&fields=files(id)&pageSize=1`,
+      { method: 'GET' }
+    );
+    const listData = await listRes.json();
+    const fileId = listData?.files?.[0]?.id;
+    if (!fileId) return null;
+
+    const dlRes = await driveFetch(
+      tokenManager,
+      `${DRIVE_API_BASE}/files/${encodeURIComponent(fileId)}?alt=media`,
+      { method: 'GET' }
+    );
+    const parsed = await dlRes.json();
+    if (!parsed || !Array.isArray(parsed.segments)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+async function writeCachedTranscriptToDrive(tokenManager, cacheFolderId, fileName, transcriptObj) {
+  try {
+    const q = encodeURIComponent(
+      `'${escapeDriveQuery(cacheFolderId)}' in parents and name = '${escapeDriveQuery(
+        fileName
+      )}' and trashed = false`
+    );
+    const listRes = await driveFetch(
+      tokenManager,
+      `${DRIVE_API_BASE}/files?q=${q}&fields=files(id)&pageSize=1`,
+      { method: 'GET' }
+    );
+    const listData = await listRes.json();
+    const existingId = listData?.files?.[0]?.id;
+    const jsonContent = JSON.stringify(transcriptObj);
+
+    if (existingId) {
+      await driveFetch(
+        tokenManager,
+        `${DRIVE_UPLOAD_BASE}/files/${encodeURIComponent(existingId)}?uploadType=media`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json; charset=UTF-8' },
+          body: jsonContent,
+        }
+      );
+      return;
+    }
+
+    const boundary = `autocut_cache_${Date.now()}`;
+    const metadata = {
+      name: fileName,
+      parents: [cacheFolderId],
+      mimeType: 'application/json',
+    };
+    const multipartBody =
+      `--${boundary}\r\n` +
+      'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
+      `${JSON.stringify(metadata)}\r\n` +
+      `--${boundary}\r\n` +
+      'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
+      `${jsonContent}\r\n` +
+      `--${boundary}--`;
+
+    await driveFetch(tokenManager, `${DRIVE_UPLOAD_BASE}/files?uploadType=multipart&fields=id`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': `multipart/related; boundary=${boundary}`,
+      },
+      body: multipartBody,
+    });
+  } catch {
+    // Non-fatal: cache write failure should never abort analysis
+  }
+}
+
 /**
  * Streams a Drive video directly to a local file on disk (never buffering the file in RAM).
  */
@@ -304,7 +416,6 @@ async function uploadMp4Resumable8MB(tokenManager, outputFolderId, fileName, loc
     throw new PhaseError('Subida', 'El MP4 generado está vacío (0 bytes).');
   }
 
-  // 1. Initiate resumable session
   const initRes = await driveFetch(
     tokenManager,
     `${DRIVE_UPLOAD_BASE}/files?uploadType=resumable&fields=id,name,webViewLink,size`,
@@ -329,7 +440,6 @@ async function uploadMp4Resumable8MB(tokenManager, outputFolderId, fileName, loc
     throw new PhaseError('Subida', 'Google Drive no devolvió la URL de sesión resumable.');
   }
 
-  // 2. Stream 8 MB chunks from disk
   const fh = await fsp.open(localFilePath, 'r');
   try {
     let offset = 0;
@@ -397,7 +507,7 @@ async function listPendingCloudJobs(tokenManager, jobsFolderId) {
     { method: 'GET' }
   );
   const data = await res.json();
-  const files = (data?.files || []).filter((f) => /^job_.*\.json$/i.test(f.name || ''));
+  const files = (data?.files || []).filter((f) => /^(job|analyze)_.*\.json$/i.test(f.name || ''));
 
   const pending = [];
   for (const file of files) {
@@ -420,7 +530,177 @@ async function listPendingCloudJobs(tokenManager, jobsFolderId) {
   return pending;
 }
 
+/**
+ * Processes an `analyze_<id>.json` (`kind: "analyze"`) job:
+ * descarga (5-20) -> transcripcion (20-55) -> vision (55-80) -> guion (80-92) -> revision (92-100).
+ */
+async function processAnalyzeJob({ tokenManager, jobFileId, manifest, jobsFolderId }) {
+  const jobId = String(manifest.jobId || 'unknown').slice(0, 48);
+  const workDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'autocut_analyze_'));
+  const tJobStart = Date.now();
+  const whisperModel =
+    manifest.options?.whisperModel === 'medium'
+      ? 'medium'
+      : manifest.options?.whisperModel === 'small'
+      ? 'small'
+      : (process.env.WHISPER_MODEL || 'small').trim() || 'small';
+  const geminiApiKey = (process.env.GEMINI_API_KEY || '').trim();
+  const workerDir = path.dirname(fileURLToPath(import.meta.url));
+  const transcribeScriptPath = path.join(workerDir, 'transcribe.py');
+
+  let lastProgressWriteMs = 0;
+  let lastStage = '';
+  const workingManifest = {
+    ...manifest,
+    kind: 'analyze',
+    target: 'cloud',
+    status: 'processing',
+    stage: 'descarga',
+    progress: 5,
+    errorMessage: undefined,
+  };
+
+  const writeProgress = async (stage, progress, force = false) => {
+    const now = Date.now();
+    const stageChanged = stage && stage !== lastStage;
+    workingManifest.stage = stage || workingManifest.stage;
+    workingManifest.progress = Math.max(0, Math.min(100, Math.round(progress)));
+    if (!force && !stageChanged && now - lastProgressWriteMs < PROGRESS_WRITE_THROTTLE_MS) {
+      return;
+    }
+    lastStage = workingManifest.stage;
+    lastProgressWriteMs = now;
+    await patchJobManifest(tokenManager, jobFileId, workingManifest);
+  };
+
+  logSafe('INFO', 'analyze_started', {
+    jobId,
+    kind: 'analyze',
+    clips: manifest.sourceFiles?.length ?? 0,
+    whisperModel,
+  });
+
+  try {
+    await writeProgress('descarga', 5, true);
+
+    if (!geminiApiKey) {
+      throw new PhaseError(
+        'Análisis IA',
+        'Falta el secreto GEMINI_API_KEY en GitHub Actions. Añádelo en Settings > Secrets > Actions.'
+      );
+    }
+
+    if (!Array.isArray(manifest.sourceFiles) || manifest.sourceFiles.length === 0) {
+      throw new PhaseError('Drive', 'El manifiesto de análisis no contiene archivos fuente.');
+    }
+
+    const cacheFolderId = await findOrCreateSubfolder(tokenManager, jobsFolderId, CACHE_SUBFOLDER);
+
+    // 1. Stream-download source videos (progress 5 -> 20)
+    const sourcePaths = [];
+    const totalClips = manifest.sourceFiles.length;
+    for (let i = 0; i < totalClips; i += 1) {
+      const src = manifest.sourceFiles[i];
+      if (!src?.driveFileId || typeof src.driveFileId !== 'string') {
+        throw new PhaseError(
+          'Drive',
+          `Falta el identificador driveFileId del clip ${i + 1} en el manifiesto.`
+        );
+      }
+      const localPath = path.join(workDir, `source_${String(i).padStart(3, '0')}.bin`);
+      const dlStats = await streamDownloadDriveFile(tokenManager, src.driveFileId, localPath);
+      sourcePaths.push(localPath);
+
+      const dlPct = 5 + Math.round(((i + 1) / totalClips) * 15);
+      await writeProgress('descarga', dlPct, i === totalClips - 1);
+      logSafe('INFO', 'analyze_source_downloaded', {
+        jobId,
+        clips: i + 1,
+        mb: dlStats.mb,
+        sec: dlStats.sec,
+        http: dlStats.http,
+      });
+    }
+
+    // 2. Run Whisper + Gemini Phases A/B/C
+    const plan = await analyzeCloudJob({
+      manifest,
+      sourcePaths,
+      workDir,
+      apiKey: geminiApiKey,
+      ffmpegBin: process.env.AUTOCUT_FFMPEG_BIN || 'ffmpeg',
+      ffprobeBin: process.env.AUTOCUT_FFPROBE_BIN || undefined,
+      pythonBin: process.env.AUTOCUT_PYTHON_BIN || 'python3',
+      transcribeScriptPath,
+      whisperModel,
+      getCachedTranscript: async (driveFileId, modifiedTime) => {
+        const cacheName = buildTranscriptCacheFilename(driveFileId, modifiedTime);
+        const hit = await readCachedTranscriptFromDrive(tokenManager, cacheFolderId, cacheName);
+        logSafe('INFO', 'transcript_cache_lookup', { jobId, cacheHit: Boolean(hit) });
+        return hit;
+      },
+      saveCachedTranscript: async (driveFileId, modifiedTime, transcriptObj) => {
+        const cacheName = buildTranscriptCacheFilename(driveFileId, modifiedTime);
+        await writeCachedTranscriptToDrive(tokenManager, cacheFolderId, cacheName, transcriptObj);
+      },
+      onProgress: async ({ stage, progress }) => {
+        await writeProgress(stage, progress, false);
+        logSafe('INFO', 'analyze_progress', { jobId, stage, progress });
+      },
+    });
+
+    // 3. Write final CloudEditPlan & mark analyzed
+    workingManifest.status = 'analyzed';
+    workingManifest.stage = 'revision';
+    workingManifest.progress = 100;
+    workingManifest.plan = plan;
+    workingManifest.finishedAt = new Date().toISOString();
+    delete workingManifest.errorMessage;
+
+    await patchJobManifest(tokenManager, jobFileId, workingManifest);
+    logSafe('INFO', 'analyze_completed', {
+      jobId,
+      kind: 'analyze',
+      cuts: plan.cortes.length,
+      coherent: Boolean(plan.revision?.coherente),
+      sec: Number(((Date.now() - tJobStart) / 1000).toFixed(1)),
+      progress: 100,
+    });
+  } catch (err) {
+    const rawMsg = err instanceof Error ? err.message : String(err);
+    const message =
+      err instanceof PhaseError
+        ? err.message
+        : rawMsg.startsWith('[')
+        ? rawMsg
+        : `[Análisis IA] ${rawMsg}`;
+    logSafe('ERROR', 'analyze_failed', {
+      jobId,
+      kind: 'analyze',
+      stage: workingManifest.stage,
+      sec: Number(((Date.now() - tJobStart) / 1000).toFixed(1)),
+    });
+    try {
+      await patchJobManifest(tokenManager, jobFileId, {
+        ...workingManifest,
+        status: 'error',
+        errorMessage: message.slice(0, 480),
+        finishedAt: new Date().toISOString(),
+      });
+    } catch {
+      logSafe('ERROR', 'analyze_error_patch_failed', { jobId });
+    }
+    throw err;
+  } finally {
+    await fsp.rm(workDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 async function processCloudJob({ tokenManager, jobFileId, manifest, outputFolderId }) {
+  if (isAnalyzeManifest(manifest)) {
+    throw new PhaseError('Sistema', 'Un manifiesto kind="analyze" no puede entrar en el flujo de render.');
+  }
+
   const jobId = String(manifest.jobId || 'unknown').slice(0, 48);
   const qualityKey = manifest.options?.quality === '720p' ? '720p' : '1080p';
   const cpuPreset = getCloudCpuPreset(qualityKey);
@@ -450,6 +730,7 @@ async function processCloudJob({ tokenManager, jobFileId, manifest, outputFolder
 
   logSafe('INFO', 'job_started', {
     jobId,
+    kind: 'render',
     clips: manifest.sourceFiles?.length ?? 0,
     cuts: manifest.cuts?.length ?? 0,
     quality: qualityKey,
@@ -466,7 +747,6 @@ async function processCloudJob({ tokenManager, jobFileId, manifest, outputFolder
       throw new PhaseError('FFmpeg', 'El manifiesto no contiene cortes activos (cuts).');
     }
 
-    // 1. Stream-download all source clips directly to disk using generic safe names
     const sourcePaths = [];
     for (let i = 0; i < manifest.sourceFiles.length; i += 1) {
       const src = manifest.sourceFiles[i];
@@ -488,7 +768,6 @@ async function processCloudJob({ tokenManager, jobFileId, manifest, outputFolder
       });
     }
 
-    // 2. Render via shared FFmpeg core with cloud CPU libx264 presets
     const tRenderStart = Date.now();
     let finalLocalPath;
     try {
@@ -521,7 +800,6 @@ async function processCloudJob({ tokenManager, jobFileId, manifest, outputFolder
       encoder: 'libx264',
     });
 
-    // 3. Upload finished MP4 to _AutoCut_Output via 8 MB resumable chunks
     await writeProgress(90, true);
     const finalFileName = sanitizeOutputFilename(manifest.outputFileName, jobId);
     const uploaded = await uploadMp4Resumable8MB(
@@ -538,7 +816,6 @@ async function processCloudJob({ tokenManager, jobFileId, manifest, outputFolder
       http: 200,
     });
 
-    // 4. Mark job completed with Drive ID + webViewLink + finishedAt
     workingManifest.status = 'completed';
     workingManifest.progress = 100;
     workingManifest.outputFileName = finalFileName;
@@ -553,6 +830,7 @@ async function processCloudJob({ tokenManager, jobFileId, manifest, outputFolder
     await patchJobManifest(tokenManager, jobFileId, workingManifest);
     logSafe('INFO', 'job_completed', {
       jobId,
+      kind: 'render',
       mb: uploaded.mb,
       sec: Number(((Date.now() - tJobStart) / 1000).toFixed(1)),
       progress: 100,
@@ -564,6 +842,7 @@ async function processCloudJob({ tokenManager, jobFileId, manifest, outputFolder
         : `[FFmpeg] ${err instanceof Error ? err.message : String(err)}`;
     logSafe('ERROR', 'job_failed', {
       jobId,
+      kind: 'render',
       sec: Number(((Date.now() - tJobStart) / 1000).toFixed(1)),
     });
     try {
@@ -587,15 +866,18 @@ async function main() {
   const clientSecret = (process.env.GDRIVE_CLIENT_SECRET || '').trim();
   const refreshToken = (process.env.GDRIVE_REFRESH_TOKEN || '').trim();
   const rootFolderId = (process.env.AUTOCUT_ROOT_FOLDER_ID || '').trim();
+  const geminiApiKey = (process.env.GEMINI_API_KEY || '').trim();
 
   if (!clientId || !clientSecret || !refreshToken || !rootFolderId) {
     logSafe('ERROR', 'missing_required_env_secrets');
     process.exit(1);
   }
 
-  // Mask raw secrets defensively too
   console.log(`::add-mask::${clientSecret}`);
   console.log(`::add-mask::${refreshToken}`);
+  if (geminiApiKey) {
+    console.log(`::add-mask::${geminiApiKey}`);
+  }
 
   const cli = parseCloudCliArgs(process.argv.slice(2));
   const tokenManager = new DriveTokenManager({ clientId, clientSecret, refreshToken });
@@ -629,12 +911,21 @@ async function main() {
   let hadFailure = false;
   for (const entry of jobsToRun) {
     try {
-      await processCloudJob({
-        tokenManager,
-        jobFileId: entry.fileId,
-        manifest: entry.manifest,
-        outputFolderId,
-      });
+      if (getCloudJobRoute(entry.manifest) === 'analyze') {
+        await processAnalyzeJob({
+          tokenManager,
+          jobFileId: entry.fileId,
+          manifest: entry.manifest,
+          jobsFolderId,
+        });
+      } else {
+        await processCloudJob({
+          tokenManager,
+          jobFileId: entry.fileId,
+          manifest: entry.manifest,
+          outputFolderId,
+        });
+      }
     } catch {
       hadFailure = true;
     }

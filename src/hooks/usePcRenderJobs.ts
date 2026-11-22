@@ -1,14 +1,28 @@
-import { useCallback, useEffect, useRef, useState, type MutableRefObject } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type Dispatch,
+  type MutableRefObject,
+  type SetStateAction,
+} from 'react';
 import type {
+  AnalyzeJobManifest,
+  AnalyzeJobSourceFile,
+  AnalyzeJobSyncEntry,
   AppErrorBanner,
   DriveFileMeta,
+  EditStylePreset,
   ExportQuality,
   PcJobSyncEntry,
   QueueItem,
   RenderJobManifest,
   RenderJobSourceFile,
   RenderJobTarget,
+  SourceClipRef,
   TikTokEditOptions,
+  WhisperModelId,
 } from '../types';
 import {
   DriveAuthExpiredError,
@@ -17,12 +31,18 @@ import {
   downloadDriveVideo,
   ensureCloudSourcesSubfolder,
   listPcRenderJobsAndOutputs,
+  uploadAnalyzeJobManifest,
   uploadRenderJobManifest,
   uploadSourceVideoResumable8MB,
 } from '../services/driveApi';
 import { getCachedDriveToken } from '../services/googleAuth';
 import {
+  buildAnalyzeJobManifest,
+  buildCombinedEditedFilename,
+  buildEditedFilename,
   buildRenderJobManifest,
+  cloudEditPlanToGeminiEditPlan,
+  formatAnalyzeStageLabel,
   formatPcJobStatusLabel,
   formatPhaseError,
 } from '../utils/videoPipeline';
@@ -33,10 +53,18 @@ interface UsePcRenderJobsParams {
   accessToken: string | null;
   isDriveConnected: boolean;
   cloudRenderConfigured: boolean;
+  geminiModel: string;
+  whisperModel: WhisperModelId;
+  stylePreset: EditStylePreset;
+  customInstruction: string;
   exportQuality: ExportQuality;
   tiktokOptions: TikTokEditOptions;
   itemsRef: MutableRefObject<QueueItem[]>;
+  setItems: Dispatch<SetStateAction<QueueItem[]>>;
   updateQueueItem: (id: string, patch: Partial<QueueItem>) => void;
+  onOpenStudio: (itemId: string) => void;
+  onCloseMultiClipModal?: () => void;
+  onClearCombineSelection?: () => void;
   clearAuthSession: () => void;
   onError: (error: string | AppErrorBanner | null) => void;
 }
@@ -57,6 +85,15 @@ export interface CloudUploadProgress {
   message: string;
 }
 
+interface ClipUploadCandidate {
+  index: number;
+  name: string;
+  driveFileId?: string;
+  modifiedTime?: string;
+  rawBlob?: Blob;
+  uploadedTempSource?: boolean;
+}
+
 const ACTIVE_REMOTE_POLL_INTERVAL_MS = 15_000;
 const AUTO_RELAUNCH_PENDING_MS = 3 * 60 * 1000; // 3 minutes
 
@@ -65,19 +102,29 @@ export function usePcRenderJobs({
   accessToken,
   isDriveConnected,
   cloudRenderConfigured,
+  geminiModel,
+  whisperModel,
+  stylePreset,
+  customInstruction,
   exportQuality,
   tiktokOptions,
   itemsRef,
+  setItems,
   updateQueueItem,
+  onOpenStudio,
+  onCloseMultiClipModal,
+  onClearCombineSelection,
   clearAuthSession,
   onError,
 }: UsePcRenderJobsParams) {
   const [pcJobs, setPcJobs] = useState<PcJobSyncEntry[]>([]);
+  const [analyzeJobs, setAnalyzeJobs] = useState<AnalyzeJobSyncEntry[]>([]);
   const [pcOutputs, setPcOutputs] = useState<DriveFileMeta[]>([]);
   const [isSyncingPcJobs, setIsSyncingPcJobs] = useState(false);
   const [lastPcSyncTime, setLastPcSyncTime] = useState<number | null>(null);
   const [sendingToPcId, setSendingToPcId] = useState<string | null>(null);
   const [sendingTarget, setSendingTarget] = useState<RenderJobTarget | null>(null);
+  const [sendingAnalyzeId, setSendingAnalyzeId] = useState<string | null>(null);
   const [cloudUploadProgress, setCloudUploadProgress] = useState<CloudUploadProgress | null>(null);
   const [lastSentPcJob, setLastSentPcJob] = useState<LastSentPcJobInfo | null>(null);
   const [failedDispatchJobFileIds, setFailedDispatchJobFileIds] = useState<Record<string, string>>(
@@ -94,6 +141,7 @@ export function usePcRenderJobs({
   const syncingRef = useRef(false);
   const autoRetriedJobIdsRef = useRef<Set<string>>(new Set());
   const cleanedTempJobsRef = useRef<Set<string>>(new Set());
+  const appliedAnalyzeJobIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     return () => {
@@ -119,6 +167,83 @@ export function usePcRenderJobs({
   const resolveDriveToken = useCallback((): string | null => {
     return accessToken || getCachedDriveToken();
   }, [accessToken]);
+
+  const ensureSourceFilesInDrive = useCallback(
+    async (
+      clipCandidates: ClipUploadCandidate[],
+      token: string
+    ): Promise<AnalyzeJobSourceFile[]> => {
+      const needsLocalUpload = clipCandidates.some((c) => !c.driveFileId);
+      let sourcesFolderId: string | null = null;
+
+      if (needsLocalUpload) {
+        const missingRealSource = clipCandidates.find((c) => !c.driveFileId && !c.rawBlob);
+        if (missingRealSource) {
+          throw new Error(
+            'Este clip de ejemplo no tiene archivo real para subir a la nube. Usa un vídeo de Google Drive o súbelo desde tu dispositivo.'
+          );
+        }
+        logInfo('Nube', 'Preparando carpeta _AutoCut_Jobs/_sources para clips locales', {
+          clipsLocales: clipCandidates.filter((c) => !c.driveFileId).length,
+        });
+        sourcesFolderId = await ensureCloudSourcesSubfolder(folderId.trim(), token);
+      }
+
+      const resolvedSourceFiles: AnalyzeJobSourceFile[] = [];
+      const localToUpload = clipCandidates.filter((c) => !c.driveFileId);
+      let uploadedLocalCount = 0;
+
+      for (const clip of clipCandidates) {
+        if (clip.driveFileId) {
+          resolvedSourceFiles.push({
+            name: clip.name,
+            driveFileId: clip.driveFileId,
+            ...(clip.modifiedTime ? { modifiedTime: clip.modifiedTime } : {}),
+            ...(clip.uploadedTempSource ? { uploadedTempSource: true } : {}),
+          });
+          continue;
+        }
+
+        uploadedLocalCount += 1;
+        const uploadIndex = uploadedLocalCount;
+        const totalLocal = localToUpload.length;
+        const tempFileName = `src_${Date.now().toString(36)}_${clip.index}_${clip.name}`;
+
+        setCloudUploadProgress({
+          clipIndex: uploadIndex,
+          totalClips: totalLocal,
+          percent: 2,
+          message: `Subiendo clip local ${uploadIndex}/${totalLocal} a Drive (_sources)...`,
+        });
+
+        const uploadedClip = await uploadSourceVideoResumable8MB(
+          sourcesFolderId!,
+          tempFileName,
+          clip.rawBlob!,
+          token,
+          (pct) => {
+            setCloudUploadProgress({
+              clipIndex: uploadIndex,
+              totalClips: totalLocal,
+              percent: pct,
+              message: `Subiendo clip local ${uploadIndex}/${totalLocal} a Drive (${pct}%)...`,
+            });
+          }
+        );
+
+        resolvedSourceFiles.push({
+          name: clip.name,
+          driveFileId: uploadedClip.id,
+          modifiedTime: new Date().toISOString(),
+          uploadedTempSource: true,
+        });
+      }
+
+      setCloudUploadProgress(null);
+      return resolvedSourceFiles;
+    },
+    [folderId]
+  );
 
   const cleanupTempSourcesForJob = useCallback(
     async (manifest: RenderJobManifest, token: string) => {
@@ -161,7 +286,7 @@ export function usePcRenderJobs({
         if (!silent) {
           onError({
             message:
-              'Conecta Google Drive y configura el ID de carpeta en Ajustes para consultar los renders remotos.',
+              'Conecta Google Drive y configura el ID de carpeta en Ajustes para consultar los trabajos remotos.',
             actionHint: 'settings',
           });
         }
@@ -175,17 +300,18 @@ export function usePcRenderJobs({
       try {
         const snapshot = await listPcRenderJobsAndOutputs(folderId.trim(), token);
         setPcJobs(snapshot.jobs);
+        setAnalyzeJobs(snapshot.analyzeJobs);
         setPcOutputs(snapshot.outputs);
         setLastPcSyncTime(Date.now());
 
         const nowMs = Date.now();
         const currentItems = itemsRef.current;
 
+        // 1. Sync Render Jobs (`job_*.json`)
         for (const entry of snapshot.jobs) {
           const { manifest, outputFile } = entry;
           const target: RenderJobTarget = manifest.target === 'cloud' ? 'cloud' : 'pc';
 
-          // Clear failed dispatch marker once worker picks up or finishes the job
           if (manifest.status === 'processing' || manifest.status === 'completed') {
             setFailedDispatchJobFileIds((prev) => {
               if (!prev[entry.jobFileId]) return prev;
@@ -195,12 +321,10 @@ export function usePcRenderJobs({
             });
           }
 
-          // Clean up PWA-uploaded `_sources/` temp clips once cloud render completes
           if (target === 'cloud' && manifest.status === 'completed') {
             void cleanupTempSourcesForJob(manifest, token);
           }
 
-          // Auto-relaunch pending cloud jobs older than 3 minutes (once per session)
           if (
             target === 'cloud' &&
             manifest.status === 'pending' &&
@@ -210,7 +334,7 @@ export function usePcRenderJobs({
             const createdMs = Date.parse(manifest.createdAt || '');
             if (Number.isFinite(createdMs) && nowMs - createdMs > AUTO_RELAUNCH_PENDING_MS) {
               autoRetriedJobIdsRef.current.add(entry.jobFileId);
-              logInfo('Nube', 'Relanzando trabajo en la nube pendiente > 3 min', {
+              logInfo('Nube', 'Relanzando render en la nube pendiente > 3 min', {
                 jobId: manifest.jobId,
                 esperaMin: Math.round((nowMs - createdMs) / 60_000),
               });
@@ -234,7 +358,6 @@ export function usePcRenderJobs({
             }
           }
 
-          // Reflect live remote status back onto matching QueueItems
           const matchingItem = currentItems.find(
             (it) =>
               (it.pcJobId && it.pcJobId === manifest.jobId) ||
@@ -290,6 +413,205 @@ export function usePcRenderJobs({
 
           updateQueueItem(matchingItem.id, patch);
         }
+
+        // 2. Sync Cloud Analyze Jobs (`analyze_*.json`)
+        let newlyReadyStudioItemId: string | null = null;
+
+        for (const entry of snapshot.analyzeJobs) {
+          const { manifest } = entry;
+
+          if (manifest.status === 'processing' || manifest.status === 'analyzed') {
+            setFailedDispatchJobFileIds((prev) => {
+              if (!prev[entry.jobFileId]) return prev;
+              const next = { ...prev };
+              delete next[entry.jobFileId];
+              return next;
+            });
+          }
+
+          if (
+            manifest.status === 'pending' &&
+            cloudRenderConfigured &&
+            !autoRetriedJobIdsRef.current.has(entry.jobFileId)
+          ) {
+            const createdMs = Date.parse(manifest.createdAt || '');
+            if (Number.isFinite(createdMs) && nowMs - createdMs > AUTO_RELAUNCH_PENDING_MS) {
+              autoRetriedJobIdsRef.current.add(entry.jobFileId);
+              logInfo('Nube', 'Relanzando análisis en la nube pendiente > 3 min', {
+                jobId: manifest.jobId,
+                esperaMin: Math.round((nowMs - createdMs) / 60_000),
+              });
+              void dispatchCloudRenderJob(entry.jobFileId)
+                .then(() => {
+                  setFailedDispatchJobFileIds((prev) => {
+                    if (!prev[entry.jobFileId]) return prev;
+                    const next = { ...prev };
+                    delete next[entry.jobFileId];
+                    return next;
+                  });
+                })
+                .catch((err) => {
+                  const errMsg =
+                    err instanceof Error ? err.message : 'No se pudo relanzar GitHub Actions.';
+                  setFailedDispatchJobFileIds((prev) => ({
+                    ...prev,
+                    [entry.jobFileId]: errMsg,
+                  }));
+                });
+            }
+          }
+
+          const matchingItem = itemsRef.current.find(
+            (it) =>
+              (it.analyzeJobId && it.analyzeJobId === manifest.jobId) ||
+              (it.analyzeJobFileId && it.analyzeJobFileId === entry.jobFileId) ||
+              (manifest.queueItemId && it.id === manifest.queueItemId)
+          );
+
+          const stageLabel = formatAnalyzeStageLabel(
+            manifest.stage,
+            manifest.status,
+            manifest.progress
+          );
+
+          if (manifest.status === 'analyzed' && manifest.plan) {
+            const alreadyApplied = appliedAnalyzeJobIdsRef.current.has(manifest.jobId);
+            if (!alreadyApplied) {
+              appliedAnalyzeJobIdsRef.current.add(manifest.jobId);
+
+              const convertedPlan = cloudEditPlanToGeminiEditPlan(manifest.plan, {
+                targetDurationSec: manifest.options?.targetDurationSec,
+              });
+
+              const isMulti = Boolean(manifest.isMultiClip || manifest.sourceFiles.length > 1);
+              const baseName =
+                manifest.projectName ||
+                matchingItem?.projectName ||
+                matchingItem?.originalName ||
+                manifest.sourceFiles[0]?.name ||
+                'Video_Nube';
+              const outputFileName = isMulti
+                ? buildCombinedEditedFilename(baseName, convertedPlan.etiqueta)
+                : buildEditedFilename(baseName, convertedPlan.etiqueta);
+
+              if (matchingItem) {
+                updateQueueItem(matchingItem.id, {
+                  stage: 'review',
+                  progress: 100,
+                  stageDetail: 'Historia lista · Revisa los cortes y renderiza en la nube',
+                  errorMessage: undefined,
+                  analysis: convertedPlan,
+                  outputFileName,
+                  geminiFileCleaned: true,
+                  analyzeJobId: manifest.jobId,
+                  analyzeJobFileId: entry.jobFileId,
+                  analyzeJobStatus: 'analyzed',
+                  analyzeJobStage: 'revision',
+                  analyzeJobProgress: 100,
+                  analyzeJobError: undefined,
+                });
+                newlyReadyStudioItemId = matchingItem.id;
+              } else {
+                // Hydrate an analyzed cloud job even if the user reloaded the PWA while Actions ran
+                const hydratedId = manifest.queueItemId || `cloud-analyzed-${manifest.jobId}`;
+                const hydratedClips: SourceClipRef[] = manifest.sourceFiles.map((sf, idx) => ({
+                  id: `${hydratedId}-clip-${idx}`,
+                  source: 'drive',
+                  driveFileId: sf.driveFileId,
+                  modifiedTime: sf.modifiedTime,
+                  originalName: sf.name,
+                  mimeType: 'video/mp4',
+                  sizeBytes: 0,
+                }));
+
+                const hydratedItem: QueueItem = {
+                  id: hydratedId,
+                  source: 'drive',
+                  driveFileId: isMulti ? undefined : manifest.sourceFiles[0]?.driveFileId,
+                  isMultiClip: isMulti,
+                  projectName: manifest.projectName,
+                  originalName: isMulti
+                    ? manifest.projectName
+                      ? `${manifest.projectName} (${manifest.sourceFiles.length} clips)`
+                      : `${manifest.sourceFiles[0]?.name || 'Multi-Clip'} + ${manifest.sourceFiles.length - 1} más`
+                    : manifest.sourceFiles[0]?.name || 'Vídeo analizado en la nube',
+                  mimeType: 'video/mp4',
+                  sizeBytes: 0,
+                  modifiedTime: manifest.sourceFiles[0]?.modifiedTime || manifest.createdAt,
+                  stage: 'review',
+                  stageDetail: 'Historia lista · Revisa los cortes y renderiza en la nube',
+                  progress: 100,
+                  outputFileName,
+                  geminiFileCleaned: true,
+                  analysis: convertedPlan,
+                  sourceClips: isMulti ? hydratedClips : undefined,
+                  stylePreset: manifest.options?.stylePreset,
+                  customInstruction: manifest.options?.customInstruction,
+                  analyzeJobId: manifest.jobId,
+                  analyzeJobFileId: entry.jobFileId,
+                  analyzeJobStatus: 'analyzed',
+                  analyzeJobStage: 'revision',
+                  analyzeJobProgress: 100,
+                  lastUpdated: Date.now(),
+                };
+
+                setItems((prev) => {
+                  if (prev.some((it) => it.id === hydratedId || it.analyzeJobId === manifest.jobId)) {
+                    return prev;
+                  }
+                  return [hydratedItem, ...prev];
+                });
+              }
+
+              logInfo('IA', 'Plan multimodal recibido desde la nube y cargado en Estudio', {
+                jobId: manifest.jobId,
+                cortes: convertedPlan.cortes.length,
+                etiqueta: convertedPlan.etiqueta,
+              });
+            }
+          } else if (manifest.status === 'pending' || manifest.status === 'processing') {
+            if (matchingItem && matchingItem.stage !== 'completed') {
+              // Only update if this analyze job is the active one on the item
+              if (!matchingItem.analyzeJobId || matchingItem.analyzeJobId === manifest.jobId) {
+                updateQueueItem(matchingItem.id, {
+                  stage: 'analyzing',
+                  progress: Math.max(5, Math.min(99, manifest.progress || 5)),
+                  stageDetail: stageLabel,
+                  errorMessage: undefined,
+                  analyzeJobId: manifest.jobId,
+                  analyzeJobFileId: entry.jobFileId,
+                  analyzeJobStatus: manifest.status,
+                  analyzeJobStage: manifest.stage,
+                  analyzeJobProgress: manifest.progress || 0,
+                  analyzeJobError: undefined,
+                });
+              }
+            }
+          } else if (manifest.status === 'error') {
+            if (
+              matchingItem &&
+              (!matchingItem.analyzeJobId || matchingItem.analyzeJobId === manifest.jobId)
+            ) {
+              updateQueueItem(matchingItem.id, {
+                stage: 'error',
+                progress: 0,
+                stageDetail: stageLabel,
+                errorMessage:
+                  manifest.errorMessage || 'Error inesperado durante el análisis en la nube.',
+                analyzeJobId: manifest.jobId,
+                analyzeJobFileId: entry.jobFileId,
+                analyzeJobStatus: 'error',
+                analyzeJobStage: manifest.stage,
+                analyzeJobProgress: manifest.progress || 0,
+                analyzeJobError: manifest.errorMessage,
+              });
+            }
+          }
+        }
+
+        if (newlyReadyStudioItemId) {
+          onOpenStudio(newlyReadyStudioItemId);
+        }
       } catch (err) {
         if (err instanceof DriveAuthExpiredError) {
           clearAuthSession();
@@ -298,7 +620,7 @@ export function usePcRenderJobs({
           }
         } else {
           const msg = err instanceof Error ? err.message : 'No se pudo consultar _AutoCut_Jobs.';
-          logError('Drive', 'Error al sincronizar renders remotos', { error: msg });
+          logError('Drive', 'Error al sincronizar trabajos remotos', { error: msg });
           if (!silent) {
             onError(formatPhaseError('Drive', msg));
           }
@@ -313,10 +635,491 @@ export function usePcRenderJobs({
       folderId,
       cloudRenderConfigured,
       itemsRef,
+      setItems,
       updateQueueItem,
+      onOpenStudio,
       clearAuthSession,
       onError,
       cleanupTempSourcesForJob,
+    ]
+  );
+
+  const submitAnalyzeManifest = useCallback(
+    async (params: {
+      queueItemId: string;
+      sourceFiles: AnalyzeJobSourceFile[];
+      preset: EditStylePreset;
+      instruction?: string;
+      projectName?: string;
+      isMultiClip: boolean;
+      token: string;
+    }): Promise<AnalyzeJobManifest> => {
+      const manifest = buildAnalyzeJobManifest({
+        sourceFiles: params.sourceFiles,
+        model: geminiModel,
+        whisperModel,
+        stylePreset: params.preset,
+        customInstruction: params.instruction,
+        tiktokOptions,
+        queueItemId: params.queueItemId,
+        projectName: params.projectName,
+        isMultiClip: params.isMultiClip,
+      });
+
+      logInfo('Nube', 'Subiendo manifiesto de análisis cloud a _AutoCut_Jobs', {
+        jobId: manifest.jobId,
+        clips: manifest.sourceFiles.length,
+        modelo: manifest.options.model,
+        whisper: manifest.options.whisperModel,
+        estilo: manifest.options.stylePreset,
+      });
+
+      const uploaded = await uploadAnalyzeJobManifest(folderId.trim(), manifest, params.token);
+
+      const newEntry: AnalyzeJobSyncEntry = {
+        manifest,
+        jobFileId: uploaded.id,
+        jobFileName: uploaded.name,
+        modifiedTime: manifest.createdAt,
+      };
+
+      setAnalyzeJobs((prev) => [
+        newEntry,
+        ...prev.filter((entry) => entry.manifest.jobId !== manifest.jobId),
+      ]);
+      setLastPcSyncTime(Date.now());
+
+      updateQueueItem(params.queueItemId, {
+        stage: 'analyzing',
+        progress: 5,
+        errorMessage: undefined,
+        analyzeJobId: manifest.jobId,
+        analyzeJobFileId: uploaded.id,
+        analyzeJobStatus: 'pending',
+        analyzeJobStage: 'descarga',
+        analyzeJobProgress: 0,
+        analyzeJobError: undefined,
+        stageDetail: 'Nube: Enviando señal de análisis a GitHub Actions...',
+      });
+
+      try {
+        await dispatchCloudRenderJob(uploaded.id);
+        setFailedDispatchJobFileIds((prev) => {
+          if (!prev[uploaded.id]) return prev;
+          const next = { ...prev };
+          delete next[uploaded.id];
+          return next;
+        });
+        updateQueueItem(params.queueItemId, {
+          stageDetail: 'En cola nube (análisis) · GitHub Actions disparado',
+        });
+      } catch (dispatchErr) {
+        const dispatchMsg =
+          dispatchErr instanceof Error
+            ? dispatchErr.message
+            : 'No se pudo disparar el workflow de GitHub Actions.';
+        logError('Nube', 'Manifiesto de análisis guardado pero falló el disparo de GitHub Actions', {
+          jobId: manifest.jobId,
+          error: dispatchMsg,
+        });
+        setFailedDispatchJobFileIds((prev) => ({
+          ...prev,
+          [uploaded.id]: dispatchMsg,
+        }));
+        updateQueueItem(params.queueItemId, {
+          stageDetail: 'Nube: Análisis en cola (pendiente de reintento de envío)',
+        });
+        onError(
+          `El análisis se guardó en Drive pero falló el aviso a GitHub Actions: ${dispatchMsg}`
+        );
+      }
+
+      return manifest;
+    },
+    [folderId, geminiModel, whisperModel, tiktokOptions, updateQueueItem, onError]
+  );
+
+  const sendItemToCloudAnalyze = useCallback(
+    async (itemId: string): Promise<AnalyzeJobManifest | null> => {
+      if (!cloudRenderConfigured) {
+        onError({
+          message:
+            'El análisis en la nube aún no está configurado en el servidor. Consulta la guía en Ajustes.',
+          actionHint: 'settings',
+        });
+        return null;
+      }
+
+      const token = resolveDriveToken();
+      if (!token) {
+        onError('Inicia sesión con Google Drive para analizar en la nube.');
+        return null;
+      }
+      if (!folderId.trim()) {
+        onError({
+          message: 'Configura primero el ID de tu carpeta de Google Drive en Ajustes.',
+          actionHint: 'settings',
+        });
+        return null;
+      }
+
+      const item = itemsRef.current.find((i) => i.id === itemId);
+      if (!item) return null;
+
+      setSendingAnalyzeId(itemId);
+      setCloudUploadProgress(null);
+      onError(null);
+
+      try {
+        const isMulti = Boolean(item.isMultiClip && item.sourceClips && item.sourceClips.length > 0);
+        const clipCandidates: ClipUploadCandidate[] = isMulti
+          ? item.sourceClips!.map((clip, idx) => ({
+              index: idx,
+              name: clip.originalName,
+              driveFileId: clip.driveFileId,
+              modifiedTime: clip.modifiedTime,
+              rawBlob: clip.rawBlob,
+            }))
+          : [
+              {
+                index: 0,
+                name: item.originalName,
+                driveFileId: item.driveFileId,
+                modifiedTime: item.modifiedTime,
+                rawBlob: item.rawBlob,
+              },
+            ];
+
+        updateQueueItem(itemId, {
+          stage: 'analyzing',
+          progress: 3,
+          errorMessage: undefined,
+          stageDetail: 'Preparando clips para análisis en la nube...',
+        });
+
+        const resolvedSourceFiles = await ensureSourceFilesInDrive(clipCandidates, token);
+
+        // Persist Drive file IDs back onto local items so render/redo won't re-upload
+        if (!isMulti && !item.driveFileId && resolvedSourceFiles[0]?.driveFileId) {
+          updateQueueItem(itemId, {
+            driveFileId: resolvedSourceFiles[0].driveFileId,
+            modifiedTime: resolvedSourceFiles[0].modifiedTime || item.modifiedTime,
+          });
+        } else if (isMulti && item.sourceClips) {
+          const updatedClips = item.sourceClips.map((clip, idx) => ({
+            ...clip,
+            driveFileId: clip.driveFileId || resolvedSourceFiles[idx]?.driveFileId,
+            modifiedTime: clip.modifiedTime || resolvedSourceFiles[idx]?.modifiedTime,
+          }));
+          updateQueueItem(itemId, { sourceClips: updatedClips });
+        }
+
+        return await submitAnalyzeManifest({
+          queueItemId: itemId,
+          sourceFiles: resolvedSourceFiles,
+          preset: item.stylePreset || stylePreset,
+          instruction: item.customInstruction ?? customInstruction,
+          projectName: item.projectName,
+          isMultiClip: isMulti,
+          token,
+        });
+      } catch (err) {
+        if (err instanceof DriveAuthExpiredError) {
+          clearAuthSession();
+          onError(formatPhaseError('Drive', err.message));
+        } else {
+          const msg =
+            err instanceof Error
+              ? err.message
+              : 'No se pudo lanzar el análisis en la nube.';
+          logError('Nube', 'Error al lanzar análisis en la nube', { error: msg });
+          updateQueueItem(itemId, {
+            stage: 'error',
+            progress: 0,
+            errorMessage: msg,
+            stageDetail: 'Error al lanzar análisis en la nube',
+          });
+          onError(msg);
+        }
+        return null;
+      } finally {
+        setCloudUploadProgress(null);
+        setSendingAnalyzeId(null);
+      }
+    },
+    [
+      cloudRenderConfigured,
+      resolveDriveToken,
+      folderId,
+      itemsRef,
+      stylePreset,
+      customInstruction,
+      updateQueueItem,
+      ensureSourceFilesInDrive,
+      submitAnalyzeManifest,
+      clearAuthSession,
+      onError,
+    ]
+  );
+
+  const sendMultiClipToCloudAnalyze = useCallback(
+    async (
+      orderedIds: string[],
+      projectName: string,
+      chosenPreset: EditStylePreset,
+      chosenInstruction: string
+    ): Promise<AnalyzeJobManifest | null> => {
+      if (!cloudRenderConfigured) {
+        onError({
+          message:
+            'El análisis en la nube aún no está configurado en el servidor. Consulta la guía en Ajustes.',
+          actionHint: 'settings',
+        });
+        return null;
+      }
+
+      const token = resolveDriveToken();
+      if (!token) {
+        onError('Inicia sesión con Google Drive para analizar en la nube.');
+        return null;
+      }
+      if (!folderId.trim()) {
+        onError({
+          message: 'Configura primero el ID de tu carpeta de Google Drive en Ajustes.',
+          actionHint: 'settings',
+        });
+        return null;
+      }
+
+      const orderedItems = orderedIds
+        .map((id) => itemsRef.current.find((i) => i.id === id))
+        .filter((i): i is QueueItem => Boolean(i));
+
+      if (orderedItems.length < 2) return null;
+
+      const missingSource = orderedItems.find((clip) => !clip.driveFileId && !clip.rawBlob);
+      if (missingSource) {
+        onCloseMultiClipModal?.();
+        onError(
+          'Los clips de ejemplo no contienen archivo real para enviar a la nube. Selecciona 2 o más vídeos de Google Drive o subidos desde tu móvil/PC.'
+        );
+        return null;
+      }
+
+      onCloseMultiClipModal?.();
+      onClearCombineSelection?.();
+      onError(null);
+
+      const combinedId = `multiclip-${Date.now()}`;
+      const displayName = projectName.trim()
+        ? `${projectName.trim()} (${orderedItems.length} clips)`
+        : `${orderedItems[0].originalName} + ${orderedItems.length - 1} más`;
+
+      const initialSourceClips: SourceClipRef[] = orderedItems.map((clip) => ({
+        id: clip.id,
+        source: clip.source,
+        driveFileId: clip.driveFileId,
+        modifiedTime: clip.modifiedTime,
+        originalName: clip.originalName,
+        mimeType: clip.mimeType,
+        sizeBytes: clip.sizeBytes,
+        durationSec: clip.durationSec,
+        rawBlob: clip.rawBlob,
+        rawUrl: clip.rawUrl,
+      }));
+
+      const totalSizeBytes = initialSourceClips.reduce((sum, c) => sum + c.sizeBytes, 0);
+
+      const combinedItem: QueueItem = {
+        id: combinedId,
+        source: initialSourceClips.some((c) => c.source === 'drive') ? 'drive' : 'local',
+        isMultiClip: true,
+        projectName: projectName.trim() || undefined,
+        originalName: displayName,
+        mimeType: 'video/mp4',
+        sizeBytes: totalSizeBytes,
+        stage: 'analyzing',
+        stageDetail: `Preparando ${orderedItems.length} clips para análisis en la nube...`,
+        progress: 3,
+        sourceClips: initialSourceClips,
+        stylePreset: chosenPreset,
+        customInstruction: chosenInstruction.trim() || undefined,
+        exportQuality,
+        lastUpdated: Date.now(),
+      };
+
+      setItems((prev) => [combinedItem, ...prev]);
+      setSendingAnalyzeId(combinedId);
+      setCloudUploadProgress(null);
+
+      try {
+        const clipCandidates: ClipUploadCandidate[] = initialSourceClips.map((clip, idx) => ({
+          index: idx,
+          name: clip.originalName,
+          driveFileId: clip.driveFileId,
+          modifiedTime: clip.modifiedTime,
+          rawBlob: clip.rawBlob,
+        }));
+
+        const resolvedSourceFiles = await ensureSourceFilesInDrive(clipCandidates, token);
+
+        // Persist any newly uploaded Drive IDs back onto sourceClips for render / redo
+        const hydratedSourceClips = initialSourceClips.map((clip, idx) => ({
+          ...clip,
+          driveFileId: clip.driveFileId || resolvedSourceFiles[idx]?.driveFileId,
+          modifiedTime: clip.modifiedTime || resolvedSourceFiles[idx]?.modifiedTime,
+        }));
+        updateQueueItem(combinedId, { sourceClips: hydratedSourceClips });
+
+        return await submitAnalyzeManifest({
+          queueItemId: combinedId,
+          sourceFiles: resolvedSourceFiles,
+          preset: chosenPreset,
+          instruction: chosenInstruction.trim(),
+          projectName: projectName.trim() || undefined,
+          isMultiClip: true,
+          token,
+        });
+      } catch (err) {
+        if (err instanceof DriveAuthExpiredError) {
+          clearAuthSession();
+          onError(formatPhaseError('Drive', err.message));
+        } else {
+          const msg =
+            err instanceof Error
+              ? err.message
+              : 'No se pudo lanzar el análisis Multi-Clip en la nube.';
+          logError('Nube', 'Error al lanzar análisis Multi-Clip en la nube', { error: msg });
+          updateQueueItem(combinedId, {
+            stage: 'error',
+            progress: 0,
+            errorMessage: msg,
+            stageDetail: 'Error al lanzar análisis en la nube',
+          });
+          onError(msg);
+        }
+        return null;
+      } finally {
+        setCloudUploadProgress(null);
+        setSendingAnalyzeId(null);
+      }
+    },
+    [
+      cloudRenderConfigured,
+      resolveDriveToken,
+      folderId,
+      itemsRef,
+      exportQuality,
+      setItems,
+      updateQueueItem,
+      onCloseMultiClipModal,
+      onClearCombineSelection,
+      ensureSourceFilesInDrive,
+      submitAnalyzeManifest,
+      clearAuthSession,
+      onError,
+    ]
+  );
+
+  const redoCloudStory = useCallback(
+    async (itemId: string, newInstruction: string): Promise<AnalyzeJobManifest | null> => {
+      if (!cloudRenderConfigured) {
+        onError({
+          message:
+            'El análisis en la nube aún no está configurado en el servidor. Consulta la guía en Ajustes.',
+          actionHint: 'settings',
+        });
+        return null;
+      }
+
+      const token = resolveDriveToken();
+      if (!token) {
+        onError('Inicia sesión con Google Drive para rehacer la historia en la nube.');
+        return null;
+      }
+      if (!folderId.trim()) {
+        onError({
+          message: 'Configura primero el ID de tu carpeta de Google Drive en Ajustes.',
+          actionHint: 'settings',
+        });
+        return null;
+      }
+
+      const item = itemsRef.current.find((i) => i.id === itemId);
+      if (!item) return null;
+
+      setSendingAnalyzeId(itemId);
+      setCloudUploadProgress(null);
+      onError(null);
+
+      try {
+        const isMulti = Boolean(item.isMultiClip && item.sourceClips && item.sourceClips.length > 0);
+        const clipCandidates: ClipUploadCandidate[] = isMulti
+          ? item.sourceClips!.map((clip, idx) => ({
+              index: idx,
+              name: clip.originalName,
+              driveFileId: clip.driveFileId,
+              modifiedTime: clip.modifiedTime,
+              rawBlob: clip.rawBlob,
+            }))
+          : [
+              {
+                index: 0,
+                name: item.originalName,
+                driveFileId: item.driveFileId,
+                modifiedTime: item.modifiedTime,
+                rawBlob: item.rawBlob,
+              },
+            ];
+
+        const resolvedSourceFiles = await ensureSourceFilesInDrive(clipCandidates, token);
+        const trimmedInstruction = newInstruction.trim();
+
+        updateQueueItem(itemId, {
+          customInstruction: trimmedInstruction || undefined,
+          stage: 'analyzing',
+          progress: 5,
+          stageDetail: 'Rehaciendo historia en la nube (reutilizando transcripción)...',
+        });
+
+        return await submitAnalyzeManifest({
+          queueItemId: itemId,
+          sourceFiles: resolvedSourceFiles,
+          preset: item.stylePreset || stylePreset,
+          instruction: trimmedInstruction,
+          projectName: item.projectName,
+          isMultiClip: isMulti,
+          token,
+        });
+      } catch (err) {
+        if (err instanceof DriveAuthExpiredError) {
+          clearAuthSession();
+          onError(formatPhaseError('Drive', err.message));
+        } else {
+          const msg =
+            err instanceof Error
+              ? err.message
+              : 'No se pudo relanzar la historia en la nube.';
+          logError('Nube', 'Error al rehacer historia en la nube', { error: msg });
+          onError(msg);
+        }
+        return null;
+      } finally {
+        setCloudUploadProgress(null);
+        setSendingAnalyzeId(null);
+      }
+    },
+    [
+      cloudRenderConfigured,
+      resolveDriveToken,
+      folderId,
+      itemsRef,
+      stylePreset,
+      updateQueueItem,
+      ensureSourceFilesInDrive,
+      submitAnalyzeManifest,
+      clearAuthSession,
+      onError,
     ]
   );
 
@@ -468,11 +1271,12 @@ export function usePcRenderJobs({
 
       try {
         const isMulti = Boolean(item.isMultiClip && item.sourceClips && item.sourceClips.length > 0);
-        const clipCandidates = isMulti
+        const clipCandidates: ClipUploadCandidate[] = isMulti
           ? item.sourceClips!.map((clip, idx) => ({
               index: idx,
               name: clip.originalName,
               driveFileId: clip.driveFileId,
+              modifiedTime: clip.modifiedTime,
               rawBlob: clip.rawBlob,
             }))
           : [
@@ -480,74 +1284,17 @@ export function usePcRenderJobs({
                 index: 0,
                 name: item.originalName,
                 driveFileId: item.driveFileId,
+                modifiedTime: item.modifiedTime,
                 rawBlob: item.rawBlob,
               },
             ];
 
-        // Check if any local clips need resumable upload to `_AutoCut_Jobs/_sources/`
-        const needsLocalUpload = clipCandidates.some((c) => !c.driveFileId);
-        let sourcesFolderId: string | null = null;
-        if (needsLocalUpload) {
-          const missingRealSource = clipCandidates.find((c) => !c.driveFileId && !c.rawBlob);
-          if (missingRealSource) {
-            throw new Error(
-              'Este clip de ejemplo no tiene archivo real para subir a la nube. Usa un vídeo de Google Drive o súbelo desde tu dispositivo.'
-            );
-          }
-          logInfo('Nube', 'Preparando carpeta _AutoCut_Jobs/_sources para clips locales', {
-            clipsLocales: clipCandidates.filter((c) => !c.driveFileId).length,
-          });
-          sourcesFolderId = await ensureCloudSourcesSubfolder(folderId.trim(), token);
-        }
-
-        const resolvedSourceFiles: RenderJobSourceFile[] = [];
-        const localToUpload = clipCandidates.filter((c) => !c.driveFileId);
-        let uploadedLocalCount = 0;
-
-        for (const clip of clipCandidates) {
-          if (clip.driveFileId) {
-            resolvedSourceFiles.push({
-              name: clip.name,
-              driveFileId: clip.driveFileId,
-            });
-            continue;
-          }
-
-          uploadedLocalCount += 1;
-          const uploadIndex = uploadedLocalCount;
-          const totalLocal = localToUpload.length;
-          const tempFileName = `src_${Date.now().toString(36)}_${clip.index}_${clip.name}`;
-
-          setCloudUploadProgress({
-            clipIndex: uploadIndex,
-            totalClips: totalLocal,
-            percent: 2,
-            message: `Subiendo clip local ${uploadIndex}/${totalLocal} a Drive (_sources)...`,
-          });
-
-          const uploadedClip = await uploadSourceVideoResumable8MB(
-            sourcesFolderId!,
-            tempFileName,
-            clip.rawBlob!,
-            token,
-            (pct) => {
-              setCloudUploadProgress({
-                clipIndex: uploadIndex,
-                totalClips: totalLocal,
-                percent: pct,
-                message: `Subiendo clip local ${uploadIndex}/${totalLocal} a Drive (${pct}%)...`,
-              });
-            }
-          );
-
-          resolvedSourceFiles.push({
-            name: clip.name,
-            driveFileId: uploadedClip.id,
-            uploadedTempSource: true,
-          });
-        }
-
-        setCloudUploadProgress(null);
+        const uploadedSources = await ensureSourceFilesInDrive(clipCandidates, token);
+        const resolvedSourceFiles: RenderJobSourceFile[] = uploadedSources.map((s) => ({
+          name: s.name,
+          driveFileId: s.driveFileId,
+          ...(s.uploadedTempSource ? { uploadedTempSource: true } : {}),
+        }));
 
         const manifest = buildRenderJobManifest({
           item,
@@ -599,7 +1346,6 @@ export function usePcRenderJobs({
           stageDetail: 'Nube: Enviando señal a GitHub Actions...',
         });
 
-        // Dispatch GitHub Actions workflow via server proxy
         try {
           await dispatchCloudRenderJob(uploaded.id);
           setFailedDispatchJobFileIds((prev) => {
@@ -659,6 +1405,7 @@ export function usePcRenderJobs({
       itemsRef,
       exportQuality,
       tiktokOptions,
+      ensureSourceFilesInDrive,
       updateQueueItem,
       clearAuthSession,
       onError,
@@ -689,13 +1436,14 @@ export function usePcRenderJobs({
           return next;
         });
 
-        const matchingEntry = pcJobs.find((j) => j.jobFileId === jobFileId);
-        if (matchingEntry) {
+        const matchingRenderEntry = pcJobs.find((j) => j.jobFileId === jobFileId);
+        if (matchingRenderEntry) {
           const matchingItem = itemsRef.current.find(
             (it) =>
               it.pcJobFileId === jobFileId ||
-              it.pcJobId === matchingEntry.manifest.jobId ||
-              (matchingEntry.manifest.queueItemId && it.id === matchingEntry.manifest.queueItemId)
+              it.pcJobId === matchingRenderEntry.manifest.jobId ||
+              (matchingRenderEntry.manifest.queueItemId &&
+                it.id === matchingRenderEntry.manifest.queueItemId)
           );
           if (matchingItem) {
             updateQueueItem(matchingItem.id, {
@@ -703,6 +1451,23 @@ export function usePcRenderJobs({
             });
           }
         }
+
+        const matchingAnalyzeEntry = analyzeJobs.find((j) => j.jobFileId === jobFileId);
+        if (matchingAnalyzeEntry) {
+          const matchingItem = itemsRef.current.find(
+            (it) =>
+              it.analyzeJobFileId === jobFileId ||
+              it.analyzeJobId === matchingAnalyzeEntry.manifest.jobId ||
+              (matchingAnalyzeEntry.manifest.queueItemId &&
+                it.id === matchingAnalyzeEntry.manifest.queueItemId)
+          );
+          if (matchingItem) {
+            updateQueueItem(matchingItem.id, {
+              stageDetail: 'En cola nube (análisis) · Reenvío aceptado',
+            });
+          }
+        }
+
         return true;
       } catch (err) {
         const msg =
@@ -718,7 +1483,7 @@ export function usePcRenderJobs({
         setRetryingDispatchJobFileId(null);
       }
     },
-    [cloudRenderConfigured, pcJobs, itemsRef, updateQueueItem, onError]
+    [cloudRenderConfigured, pcJobs, analyzeJobs, itemsRef, updateQueueItem, onError]
   );
 
   const downloadPcOutputVideo = useCallback(
@@ -795,10 +1560,14 @@ export function usePcRenderJobs({
     void syncPcJobs(true);
   }, [isDriveConnected, folderId, syncPcJobs]);
 
-  // Active remote jobs polling: every 15 s ONLY while pending/processing AND tab is visible
-  const hasActivePcJobs = pcJobs.some(
-    (entry) => entry.manifest.status === 'pending' || entry.manifest.status === 'processing'
-  );
+  // Active remote jobs polling: every 15 s ONLY while pending/processing (render OR analyze) AND tab is visible
+  const hasActivePcJobs =
+    pcJobs.some(
+      (entry) => entry.manifest.status === 'pending' || entry.manifest.status === 'processing'
+    ) ||
+    analyzeJobs.some(
+      (entry) => entry.manifest.status === 'pending' || entry.manifest.status === 'processing'
+    );
 
   useEffect(() => {
     if (!isDriveConnected || !folderId.trim() || !hasActivePcJobs || !isPageVisible) return;
@@ -817,11 +1586,13 @@ export function usePcRenderJobs({
 
   return {
     pcJobs,
+    analyzeJobs,
     pcOutputs,
     isSyncingPcJobs,
     lastPcSyncTime,
     sendingToPcId,
     sendingTarget,
+    sendingAnalyzeId,
     cloudUploadProgress,
     lastSentPcJob,
     failedDispatchJobFileIds,
@@ -831,6 +1602,9 @@ export function usePcRenderJobs({
     hasActivePcJobs,
     sendItemToPc,
     sendItemToCloud,
+    sendItemToCloudAnalyze,
+    sendMultiClipToCloudAnalyze,
+    redoCloudStory,
     retryCloudDispatch,
     syncPcJobs,
     downloadPcOutputVideo,

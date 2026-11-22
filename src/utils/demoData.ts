@@ -1,4 +1,4 @@
-import type { AnalyticsRecord, QueueItem } from '../types';
+import type { AnalyticsRecord, GeminiEditPlan, QueueItem } from '../types';
 import {
   buildCombinedEditedFilename,
   buildEditedFilename,
@@ -8,55 +8,130 @@ import {
 export function createDemoQueueItems(): QueueItem[] {
   const now = Date.now();
 
-  const smoothiePlan = {
+  const smoothiePlan: GeminiEditPlan = {
     etiqueta: 'COCINA',
     titulo_interno: 'El batido de plátano que casi explota en toda la cocina',
     duracion_objetivo_seg: 30,
+    gancho: 'Os prometo el mejor batido proteico en diez segundos… spoiler: sale mal.',
+    historia:
+      'Arranca con la promesa rápida en la encimera, sube la tensión cuando se derrama la avena, explota al encender la batidora sin encajar la tapa y cierra probándolo entre risas.',
+    ordenClips: [0],
+    guionResultante:
+      'Os prometo el mejor batido proteico en diez segundos. Vale, igual se me ha ido media bolsa de avena fuera del vaso. ¡Ay, que no estaba puesta la tapa! Mira cómo ha quedado la lente. Bueno, oye, al menos está brutal.',
+    revision: {
+      coherente: true,
+      notas: [
+        'Ritmo limpio con gancho directo, nudo cómico y remate en 29.9s.',
+        'Subtítulos alineados palabra a palabra desde la transcripción real.',
+      ],
+    },
+    analysisMode: 'cloud',
     cortes: [
       {
         id: 'demo-cut-1',
         clip_index: 0,
         start_sec: 1.2,
         end_sec: 5.8,
-        motivo: 'Gancho inicial rápido enseñando el plátano y prometiendo el mejor batido en 10 segundos',
+        funcion: 'gancho',
+        texto: 'Os prometo el mejor batido proteico en diez segundos.',
+        motivo: 'Gancho inicial rápido enseñando el plátano y prometiendo el resultado',
         puntuacion_interes: 9,
         enabled: true,
+        words: [
+          { start: 1.35, end: 1.65, text: 'Os' },
+          { start: 1.66, end: 2.1, text: 'prometo' },
+          { start: 2.11, end: 2.3, text: 'el' },
+          { start: 2.31, end: 2.7, text: 'mejor' },
+          { start: 2.72, end: 3.25, text: 'batido' },
+          { start: 3.26, end: 3.85, text: 'proteico' },
+          { start: 3.86, end: 4.1, text: 'en' },
+          { start: 4.12, end: 4.5, text: 'diez' },
+          { start: 4.52, end: 5.3, text: 'segundos.' },
+        ],
       },
       {
         id: 'demo-cut-2',
         clip_index: 0,
         start_sec: 14.4,
         end_sec: 19.6,
+        funcion: 'desarrollo',
+        texto: 'Vale, igual se me ha ido media bolsa de avena fuera del vaso.',
         motivo: 'Comentario espontáneo mientras cae media bolsa de avena fuera del vaso',
         puntuacion_interes: 8,
         enabled: true,
+        words: [
+          { start: 14.6, end: 15.0, text: 'Vale,' },
+          { start: 15.05, end: 15.45, text: 'igual' },
+          { start: 15.46, end: 15.65, text: 'se' },
+          { start: 15.66, end: 15.85, text: 'me' },
+          { start: 15.86, end: 16.05, text: 'ha' },
+          { start: 16.06, end: 16.35, text: 'ido' },
+          { start: 16.36, end: 16.8, text: 'media' },
+          { start: 16.82, end: 17.25, text: 'bolsa' },
+          { start: 17.26, end: 17.5, text: 'de' },
+          { start: 17.52, end: 18.0, text: 'avena' },
+          { start: 18.02, end: 18.45, text: 'fuera' },
+          { start: 18.46, end: 18.75, text: 'del' },
+          { start: 18.76, end: 19.3, text: 'vaso.' },
+        ],
       },
       {
         id: 'demo-cut-3',
         clip_index: 0,
         start_sec: 32.1,
         end_sec: 38.9,
+        funcion: 'climax',
+        texto: '¡Ay, que no estaba puesta la tapa!',
         motivo: 'Momento fail: enciende la batidora sin encajar bien la tapa y pega un salto',
         puntuacion_interes: 10,
         enabled: true,
+        words: [
+          { start: 32.4, end: 32.9, text: '¡Ay,' },
+          { start: 32.95, end: 33.25, text: 'que' },
+          { start: 33.26, end: 33.55, text: 'no' },
+          { start: 33.56, end: 34.1, text: 'estaba' },
+          { start: 34.12, end: 34.65, text: 'puesta' },
+          { start: 34.66, end: 34.9, text: 'la' },
+          { start: 34.92, end: 35.65, text: 'tapa!' },
+        ],
       },
       {
         id: 'demo-cut-4',
         clip_index: 0,
         start_sec: 54.0,
         end_sec: 61.5,
+        funcion: 'recurso',
+        texto: 'Mira cómo ha quedado la lente.',
         motivo: 'Risa incrédula limpiando la salpicadura de la cámara y queja cómica',
         puntuacion_interes: 8,
         enabled: true,
+        words: [
+          { start: 54.4, end: 54.85, text: 'Mira' },
+          { start: 54.86, end: 55.25, text: 'cómo' },
+          { start: 55.26, end: 55.5, text: 'ha' },
+          { start: 55.52, end: 56.1, text: 'quedado' },
+          { start: 56.12, end: 56.35, text: 'la' },
+          { start: 56.36, end: 57.0, text: 'lente.' },
+        ],
       },
       {
         id: 'demo-cut-5',
         clip_index: 0,
         start_sec: 78.3,
         end_sec: 84.1,
-        motivo: 'Remate final probando el batido con cara seria: "Bueno, al menos está brutal"',
+        funcion: 'remate',
+        texto: 'Bueno, oye, al menos está brutal.',
+        motivo: 'Remate final probando el batido con cara seria',
         puntuacion_interes: 9,
         enabled: true,
+        words: [
+          { start: 78.7, end: 79.2, text: 'Bueno,' },
+          { start: 79.25, end: 79.65, text: 'oye,' },
+          { start: 79.7, end: 79.95, text: 'al' },
+          { start: 79.96, end: 80.4, text: 'menos' },
+          { start: 80.42, end: 80.85, text: 'está' },
+          { start: 80.86, end: 81.65, text: 'brutal.' },
+        ],
       },
     ],
     subtitulos: [
@@ -67,16 +142,29 @@ export function createDemoQueueItems(): QueueItem[] {
     ],
   };
 
-  const multiClipPlan = {
+  const multiClipPlan: GeminiEditPlan = {
     etiqueta: 'VIAJE',
     titulo_interno: 'Escapada improvisada: lluvia sorpresa y café de gasolinera',
     duracion_objetivo_seg: 34,
+    gancho: 'Dije que hoy no caía ni una gota… y a los dos minutos diluvio universal.',
+    historia:
+      'Contrasta el optimismo en el coche con el corte seco a la tormenta con paraguas roto, continúa secándose con servilletas y remata brindando con café justo cuando vuelve a salir el sol.',
+    ordenClips: [0, 1],
+    guionResultante:
+      'Hoy he mirado el tiempo y no va a llover ni una gota, día perfecto. Dos minutos después: paraguas roto y calado hasta los huesos. Aquí intentando secarme con servilletas de gasolinera. Al menos brindamos con café mientras sale el sol justo al volver.',
+    revision: {
+      coherente: true,
+      notas: ['Arco narrativo Multi-Clip validado en orden cronológico (2 clips).'],
+    },
+    analysisMode: 'cloud',
     cortes: [
       {
         id: 'demo-mc-1',
         clip_index: 0,
         start_sec: 2.4,
         end_sec: 8.6,
+        funcion: 'gancho',
+        texto: 'Hoy he mirado el tiempo y no va a llover ni una gota, día perfecto.',
         motivo: 'Gancho desde el coche presumiendo de que no va a llover ni una gota',
         puntuacion_interes: 9,
         enabled: true,
@@ -86,6 +174,8 @@ export function createDemoQueueItems(): QueueItem[] {
         clip_index: 1,
         start_sec: 1.0,
         end_sec: 9.2,
+        funcion: 'climax',
+        texto: 'Dos minutos después: paraguas roto y calado hasta los huesos.',
         motivo: 'Corte seco a tormenta torrencial dos minutos después corriendo con paraguas roto',
         puntuacion_interes: 10,
         enabled: true,
@@ -95,6 +185,8 @@ export function createDemoQueueItems(): QueueItem[] {
         clip_index: 0,
         start_sec: 41.5,
         end_sec: 49.0,
+        funcion: 'desarrollo',
+        texto: 'Aquí intentando secarme con servilletas de gasolinera.',
         motivo: 'Queja cómica intentando secarse con servilletas del coche',
         puntuacion_interes: 8,
         enabled: true,
@@ -104,6 +196,8 @@ export function createDemoQueueItems(): QueueItem[] {
         clip_index: 1,
         start_sec: 35.8,
         end_sec: 45.4,
+        funcion: 'cierre',
+        texto: 'Al menos brindamos con café mientras sale el sol justo al volver.',
         motivo: 'Remate brindando con café de máquina mientras sale el sol justo al volver',
         puntuacion_interes: 9,
         enabled: true,

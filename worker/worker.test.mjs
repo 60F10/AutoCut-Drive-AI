@@ -17,10 +17,21 @@ import {
 import { shouldPcWorkerClaimJob } from './pc-worker.mjs';
 import {
   RESUMABLE_CHUNK_BYTES,
+  buildTranscriptCacheFilename,
   formatSafeCloudLog,
+  getCloudJobRoute,
+  isAnalyzeManifest,
   parseCloudCliArgs,
   shouldCloudWorkerClaimJob,
 } from './cloud-worker.mjs';
+import {
+  convertPlanSegmentsToCuts,
+  enforceTargetDuration,
+  formatSentencesForPrompt,
+  sortClipsChronologically,
+  splitTranscriptIntoSentences,
+  splitWordsBySilencePauses,
+} from './analyze-core.mjs';
 
 test('Segment FFmpeg args enforce exact A/V sync (0:v:0, 0:a:0, apad=whole_dur, matching -t) and forbid silenceremove/loudnorm/subtitles', () => {
   assert.equal(getCloudCpuPreset('1080p'), 'veryfast');
@@ -472,3 +483,386 @@ test('cloud-worker formatSafeCloudLog never leaks filenames, OAuth tokens, heade
 
   assert.equal(sanitizeOutputFilename('../evil/name.mp4', 'j9'), 'name.mp4');
 });
+
+test('splitTranscriptIntoSentences divides by punctuation (., ?, !) and > 0.7 s gaps with C{clip}-F{nnn} IDs', () => {
+  const transcript = {
+    duration: 15.0,
+    language: 'es',
+    segments: [
+      {
+        id: 0,
+        start: 0.5,
+        end: 6.2,
+        text: 'Hola equipo. ¿Qué tal estáis? ¡Brutal! Y ahora viene pausa larga seguimos',
+        words: [
+          { start: 0.5, end: 0.8, text: 'Hola' },
+          { start: 0.82, end: 1.2, text: 'equipo.' },
+          { start: 1.3, end: 1.55, text: '¿Qué' },
+          { start: 1.56, end: 1.8, text: 'tal' },
+          { start: 1.82, end: 2.25, text: 'estáis?' },
+          { start: 2.4, end: 2.9, text: '¡Brutal!' },
+          { start: 3.1, end: 3.3, text: 'Y' },
+          { start: 3.32, end: 3.7, text: 'ahora' },
+          { start: 3.72, end: 4.1, text: 'viene' },
+          // Gap of 0.90 s (> 0.70 s) with NO punctuation -> forces sentence split!
+          { start: 5.0, end: 5.4, text: 'pausa' },
+          { start: 5.42, end: 5.8, text: 'larga' },
+          { start: 5.82, end: 6.2, text: 'seguimos' },
+        ],
+      },
+    ],
+  };
+
+  const clip1Sentences = splitTranscriptIntoSentences(transcript, 0);
+  assert.deepEqual(
+    clip1Sentences.map((s) => s.id),
+    ['C1-F001', 'C1-F002', 'C1-F003', 'C1-F004', 'C1-F005']
+  );
+  assert.deepEqual(
+    clip1Sentences.map((s) => s.text),
+    ['Hola equipo.', '¿Qué tal estáis?', '¡Brutal!', 'Y ahora viene', 'pausa larga seguimos']
+  );
+  assert.equal(clip1Sentences[0].start, 0.5);
+  assert.equal(clip1Sentences[0].end, 1.2);
+  assert.equal(clip1Sentences[4].start, 5.0);
+  assert.equal(clip1Sentences[4].end, 6.2);
+
+  // Clip 2 numbering uses C2-F001
+  const clip2Sentences = splitTranscriptIntoSentences(
+    {
+      duration: 4.0,
+      language: 'es',
+      segments: [
+        {
+          id: 0,
+          start: 0.2,
+          end: 1.5,
+          text: 'Segundo clip.',
+          words: [
+            { start: 0.2, end: 0.8, text: 'Segundo' },
+            { start: 0.85, end: 1.5, text: 'clip.' },
+          ],
+        },
+      ],
+    },
+    1
+  );
+  assert.equal(clip2Sentences[0].id, 'C2-F001');
+  assert.ok(formatSentencesForPrompt(clip2Sentences).includes('C2-F001 [0.20–1.50] "Segundo clip."'));
+
+  // Chronological clip sorting by creationTime with originalIndex tie-breaker
+  const sorted = sortClipsChronologically([
+    { originalIndex: 0, creationTimeMs: Date.parse('2026-11-20T12:05:00Z') },
+    { originalIndex: 1, creationTimeMs: Date.parse('2026-11-20T12:00:00Z') },
+    { originalIndex: 2, creationTimeMs: null },
+  ]);
+  assert.deepEqual(sorted, [1, 0, 2]);
+});
+
+test('convertPlanSegmentsToCuts converts frases (-0.12/+0.25s without neighbor overlap) and recurso (1-4s clamped)', () => {
+  const sentencesByClip = new Map([
+    [
+      0,
+      [
+        {
+          id: 'C1-F001',
+          clipIndex: 0,
+          start: 1.0,
+          end: 2.0,
+          text: 'Primera frase.',
+          words: [
+            { start: 1.0, end: 1.45, text: 'Primera' },
+            { start: 1.5, end: 2.0, text: 'frase.' },
+          ],
+        },
+        {
+          id: 'C1-F002',
+          clipIndex: 0,
+          start: 2.05,
+          end: 3.5,
+          text: 'Segunda frase pegada.',
+          words: [
+            { start: 2.05, end: 2.5, text: 'Segunda' },
+            { start: 2.55, end: 3.0, text: 'frase' },
+            { start: 3.02, end: 3.5, text: 'pegada.' },
+          ],
+        },
+        {
+          id: 'C1-F003',
+          clipIndex: 0,
+          start: 5.0,
+          end: 6.5,
+          text: 'Tercera frase libre.',
+          words: [
+            { start: 5.0, end: 5.5, text: 'Tercera' },
+            { start: 5.52, end: 6.0, text: 'frase' },
+            { start: 6.02, end: 6.5, text: 'libre.' },
+          ],
+        },
+      ],
+    ],
+  ]);
+
+  const result = convertPlanSegmentsToCuts({
+    segmentos: [
+      {
+        tipo: 'frases',
+        clip_index: 0,
+        desde_frase: 'C1-F002',
+        hasta_frase: 'C1-F002',
+        funcion: 'gancho',
+        motivo: 'Gancho con vecino pegado al inicio',
+      },
+      {
+        tipo: 'recurso',
+        clip_index: 0,
+        desde: 10.0,
+        hasta: 18.0, // 8s -> MUST clamp to max 4s (14.0)
+        funcion: 'recurso',
+        motivo: 'Plano recurso demasiado largo',
+      },
+      {
+        tipo: 'recurso',
+        clip_index: 0,
+        desde: 19.2,
+        hasta: 19.5, // 0.3s -> MUST expand to min 1s and clamp inside clip duration 20s
+        funcion: 'recurso',
+        motivo: 'Plano recurso muy corto cerca del final',
+      },
+      {
+        tipo: 'frases',
+        clip_index: 0,
+        desde_frase: 'C1-F003',
+        hasta_frase: 'C1-F003',
+        funcion: 'cierre',
+        motivo: 'Cierre con margen completo',
+      },
+    ],
+    sentencesByClip,
+    clipDurations: [20.0],
+    silenceTrimEnabled: false,
+    targetDurationSec: 10,
+  });
+
+  assert.equal(result.cortes.length, 4);
+
+  // C1-F002 starts at 2.05; prev sentence ends at 2.0 -> clamped to 2.00 (not 1.93!)
+  // Next sentence starts at 5.0 -> full +0.25s post margin (3.75)
+  assert.equal(result.cortes[0].start_sec, 2.0);
+  assert.equal(result.cortes[0].end_sec, 3.75);
+  assert.equal(result.cortes[0].funcion, 'gancho');
+  assert.equal(result.cortes[0].texto, 'Segunda frase pegada.');
+  assert.equal(result.cortes[0].words.length, 3);
+
+  // Recurso 1: clamped to 4.0 s max
+  assert.equal(result.cortes[1].start_sec, 10.0);
+  assert.equal(result.cortes[1].end_sec, 14.0);
+  assert.equal(result.cortes[1].funcion, 'recurso');
+  assert.equal(result.cortes[1].texto, '');
+
+  // Recurso 2: expanded to at least 1.0 s while staying <= 20.0 s
+  assert.equal(result.cortes[2].end_sec, 20.0);
+  assert.equal(result.cortes[2].start_sec, 19.0);
+
+  // C1-F003 has plenty of room on both sides: 5.0 - 0.12 = 4.88, 6.5 + 0.25 = 6.75
+  assert.equal(result.cortes[3].start_sec, 4.88);
+  assert.equal(result.cortes[3].end_sec, 6.75);
+});
+
+test('Silence sub-cuts split pauses > 0.45 s with ±0.08 s margins, discard < 0.35 s, and preserve funcion/motivo/texto/words', () => {
+  const words = [
+    { start: 1.0, end: 1.4, text: 'Mira' },
+    { start: 1.45, end: 1.9, text: 'esto,' },
+    // Pause of 0.80 s (> 0.45 s) -> splits here
+    // Tiny filler word "eh" lasts only 0.10 s -> with ±0.08 s = 0.26 s (< 0.35 s) -> MUST be discarded!
+    { start: 2.7, end: 2.8, text: 'eh' },
+    // Another pause of 0.90 s (> 0.45 s) -> splits here
+    { start: 3.7, end: 4.2, text: 'funciona' },
+    { start: 4.25, end: 4.8, text: 'genial!' },
+  ];
+
+  const subPieces = splitWordsBySilencePauses({
+    words,
+    cutStartSec: 0.88,
+    cutEndSec: 5.05,
+    minBoundSec: 0,
+    maxBoundSec: 10,
+  });
+
+  assert.equal(subPieces.length, 2, 'Middle 0.26 s filler sub-cut must be discarded');
+  assert.equal(subPieces[0].start_sec, 0.88);
+  assert.equal(subPieces[0].end_sec, 1.98); // 1.90 + 0.08
+  assert.deepEqual(
+    subPieces[0].words.map((w) => w.text),
+    ['Mira', 'esto,']
+  );
+  assert.equal(subPieces[1].start_sec, 3.62); // 3.70 - 0.08
+  assert.equal(subPieces[1].end_sec, 5.05);
+  assert.deepEqual(
+    subPieces[1].words.map((w) => w.text),
+    ['funciona', 'genial!']
+  );
+
+  // Full end-to-end via convertPlanSegmentsToCuts preserves funcion, motivo, texto & words
+  const sentencesByClip = new Map([
+    [
+      0,
+      [
+        {
+          id: 'C1-F001',
+          clipIndex: 0,
+          start: 1.0,
+          end: 4.8,
+          text: 'Mira esto, eh funciona genial!',
+          words,
+        },
+      ],
+    ],
+  ]);
+
+  const converted = convertPlanSegmentsToCuts({
+    segmentos: [
+      {
+        tipo: 'frases',
+        clip_index: 0,
+        desde_frase: 'C1-F001',
+        hasta_frase: 'C1-F001',
+        funcion: 'climax',
+        motivo: 'Reacción principal sin pausas muertas',
+      },
+    ],
+    sentencesByClip,
+    clipDurations: [10],
+    silenceTrimEnabled: true,
+    targetDurationSec: 10,
+  });
+
+  assert.equal(converted.cortes.length, 2);
+  assert.equal(converted.cortes[0].funcion, 'climax');
+  assert.equal(converted.cortes[0].motivo, 'Reacción principal sin pausas muertas');
+  assert.equal(converted.cortes[0].texto, 'Mira esto,');
+  assert.equal(converted.cortes[1].funcion, 'climax');
+  assert.equal(converted.cortes[1].motivo, 'Reacción principal sin pausas muertas');
+  assert.equal(converted.cortes[1].texto, 'funciona genial!');
+});
+
+test('enforceTargetDuration trims lowest-scored "desarrollo" cuts first when > +15% and adds Spanish note when < -15%', () => {
+  // Target 20s -> max 23s. Total below = 32s.
+  const longCuts = [
+    { id: 'c1', clip_index: 0, start_sec: 0, end_sec: 8, funcion: 'gancho', puntuacion_interes: 9 },
+    { id: 'c2', clip_index: 0, start_sec: 8, end_sec: 16, funcion: 'desarrollo', puntuacion_interes: 5 },
+    { id: 'c3', clip_index: 0, start_sec: 16, end_sec: 24, funcion: 'desarrollo', puntuacion_interes: 8 },
+    { id: 'c4', clip_index: 0, start_sec: 24, end_sec: 32, funcion: 'remate', puntuacion_interes: 10 },
+  ];
+
+  const trimmed = enforceTargetDuration(longCuts, 20);
+  // Must drop c2 (desarrollo score 5) first, then c3 (desarrollo score 8) to get <= 23s, keeping gancho & remate!
+  assert.deepEqual(
+    trimmed.cuts.map((c) => c.id),
+    ['c1', 'c4']
+  );
+  assert.equal(trimmed.duracionTotalSec, 16);
+  // 16s < 17s (20 * 0.85) -> also records informative note
+  assert.ok(trimmed.notes.length >= 1);
+  assert.ok(trimmed.notes[0].includes('por debajo del objetivo'));
+
+  // Under-target case (< -15 %) keeps all cuts and adds Spanish note
+  const shortCuts = [
+    { id: 's1', clip_index: 0, start_sec: 0, end_sec: 5, funcion: 'gancho', puntuacion_interes: 9 },
+    { id: 's2', clip_index: 0, start_sec: 5, end_sec: 10, funcion: 'cierre', puntuacion_interes: 9 },
+  ];
+  const under = enforceTargetDuration(shortCuts, 30);
+  assert.equal(under.cuts.length, 2);
+  assert.equal(under.duracionTotalSec, 10);
+  assert.equal(under.notes.length, 1);
+  assert.ok(under.notes[0].includes('10.0 s'));
+});
+
+test('convertPlanSegmentsToCuts throws controlled [Análisis IA] error on non-existent phrase ID', () => {
+  const sentencesByClip = new Map([
+    [
+      0,
+      [
+        {
+          id: 'C1-F001',
+          clipIndex: 0,
+          start: 0.5,
+          end: 2.0,
+          text: 'Única frase.',
+          words: [{ start: 0.5, end: 2.0, text: 'Única frase.' }],
+        },
+      ],
+    ],
+  ]);
+
+  assert.throws(
+    () =>
+      convertPlanSegmentsToCuts({
+        segmentos: [
+          {
+            tipo: 'frases',
+            clip_index: 0,
+            desde_frase: 'C1-F001',
+            hasta_frase: 'C1-F999',
+            funcion: 'gancho',
+            motivo: 'Alucinación de ID',
+          },
+        ],
+        sentencesByClip,
+        clipDurations: [10],
+      }),
+    /\[Análisis IA\] Frase inexistente referenciada en el guion: "C1-F999"/
+  );
+});
+
+test('kind: "analyze" manifests route strictly to analyze (never render), are claimed by cloud-worker, and ignored by pc-worker', () => {
+  const analyzePending = {
+    jobId: 'ana_001',
+    kind: 'analyze',
+    target: 'cloud',
+    status: 'pending',
+    sourceFiles: [{ name: 'clip.mov', driveFileId: 'drv123' }],
+  };
+  const analyzeNoTarget = {
+    jobId: 'ana_002',
+    kind: 'analyze',
+    status: 'pending',
+    sourceFiles: [{ name: 'clip.mov', driveFileId: 'drv123' }],
+  };
+  const analyzeDone = {
+    jobId: 'ana_003',
+    kind: 'analyze',
+    target: 'cloud',
+    status: 'analyzed',
+  };
+  const renderCloud = {
+    jobId: 'ren_001',
+    kind: 'render',
+    target: 'cloud',
+    status: 'pending',
+  };
+
+  assert.equal(isAnalyzeManifest(analyzePending), true);
+  assert.equal(isAnalyzeManifest(renderCloud), false);
+
+  assert.equal(getCloudJobRoute(analyzePending), 'analyze');
+  assert.equal(getCloudJobRoute(analyzeNoTarget), 'analyze');
+  assert.equal(getCloudJobRoute(renderCloud), 'render');
+
+  // Cloud worker claims pending analyze jobs (with or without explicit target) and ignores analyzed ones
+  assert.equal(shouldCloudWorkerClaimJob(analyzePending), true);
+  assert.equal(shouldCloudWorkerClaimJob(analyzeNoTarget), true);
+  assert.equal(shouldCloudWorkerClaimJob(analyzeDone), false);
+
+  // PC worker MUST strictly ignore ALL kind === 'analyze' jobs
+  assert.equal(shouldPcWorkerClaimJob(analyzePending), false);
+  assert.equal(shouldPcWorkerClaimJob(analyzeNoTarget), false);
+  assert.equal(shouldPcWorkerClaimJob(analyzeDone), false);
+
+  // Safe deterministic Drive transcript cache key
+  assert.equal(
+    buildTranscriptCacheFilename('1AbC_dEf-123', '2026-11-22T10:30:00.000Z'),
+    'transcript_1AbC_dEf-123_2026-11-22T10_30_00_000Z.json'
+  );
+});
+

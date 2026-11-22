@@ -8,11 +8,13 @@ import {
   AI_MAX_JSON_PAYLOAD_BYTES,
   DEFAULT_GEMINI_MODEL,
   DEFAULT_TIKTOK_OPTIONS,
+  DEFAULT_WHISPER_MODEL,
   EDIT_STYLE_PRESETS,
   MOBILE_MULTICLIP_SAFE_CLIP_LIMIT,
   MOBILE_RAM_WARNING_BYTES,
   PC_RENDER_RECOMMENDED_BYTES,
   RECOMMENDED_GEMINI_MODELS,
+  buildAnalyzeJobManifest,
   buildAssSubtitles,
   buildCombinedEditedFilename,
   buildConcatCopyFfmpegArgs,
@@ -25,6 +27,7 @@ import {
   buildSingleSegmentFfmpegArgs,
   buildSrtSubtitles,
   calculateSelectedDuration,
+  cloudEditPlanToGeminiEditPlan,
   computeFrameTimestamps,
   computeQueueAnalytics,
   computeScaledDimensions,
@@ -36,15 +39,18 @@ import {
   exceedsMobileRamThreshold,
   extractDriveFolderId,
   filterEditedCuts,
+  formatAnalyzeStageLabel,
   formatBytes,
   formatDurationHuman,
   formatPcJobStatusLabel,
   formatPhaseError,
   formatSeconds,
+  getDefaultTargetDurationForPreset,
   isMobileViewportOrUserAgent,
   mergeMultiClipEditPlans,
   normalizeStylePreset,
   normalizeTikTokOptions,
+  normalizeWhisperModel,
   parseGeminiEditPlan,
   parseHumanReadableApiError,
   planSequentialMultiClipJobs,
@@ -1218,6 +1224,101 @@ test('buildRenderJobManifest preserves cut.words and evaluateHeavyVideoWarning s
     { start: 4.6, end: 4.95, text: 'Hola' },
     { start: 5.0, end: 5.45, text: 'mundo!' },
   ]);
+  assert.equal(manifestWithWords.kind, 'render');
 });
+
+test('Cloud multimodal analysis contract: buildAnalyzeJobManifest, cloudEditPlanToGeminiEditPlan, stage labels, and Whisper model', () => {
+  assert.equal(DEFAULT_WHISPER_MODEL, 'small');
+  assert.equal(normalizeWhisperModel('medium'), 'medium');
+  assert.equal(normalizeWhisperModel('small'), 'small');
+  assert.equal(normalizeWhisperModel('large-v3'), 'small');
+  assert.equal(getDefaultTargetDurationForPreset('express_summary'), 35);
+  assert.equal(getDefaultTargetDurationForPreset('agile_vlog'), 50);
+  assert.equal(getDefaultTargetDurationForPreset('funny_jumpcut'), 42);
+
+  assert.equal(formatAnalyzeStageLabel('transcripcion', 'processing', 40), 'Transcribiendo audio (40%)...');
+  assert.equal(formatAnalyzeStageLabel('vision', 'processing', 65), 'Gemini viendo el vídeo (65%)...');
+  assert.equal(formatAnalyzeStageLabel('guion', 'processing', 85), 'Montando la historia (85%)...');
+  assert.equal(formatAnalyzeStageLabel('revision', 'analyzed', 100), 'Historia lista para revisar');
+
+  const analyzeManifest = buildAnalyzeJobManifest({
+    jobId: 'ana_test_1',
+    createdAt: '2026-11-22T14:00:00.000Z',
+    sourceFiles: [
+      { name: 'clip1.MOV', driveFileId: 'drv-c1', modifiedTime: '2026-11-22T09:00:00Z' },
+      { name: 'clip2.MOV', driveFileId: 'drv-c2', modifiedTime: '2026-11-22T09:05:00Z', uploadedTempSource: true },
+    ],
+    model: 'gemini-3.8-flash',
+    whisperModel: 'medium',
+    stylePreset: 'funny_jumpcut',
+    customInstruction: 'Prioriza el momento del café',
+    tiktokOptions: {
+      subtitlesEnabled: true,
+      silenceTrimEnabled: true,
+      audioNormalizeEnabled: true,
+      framingMode: 'center_crop',
+    },
+    queueItemId: 'mc-99',
+    projectName: 'Cafe_Asturias',
+  });
+
+  assert.equal(analyzeManifest.jobId, 'ana_test_1');
+  assert.equal(analyzeManifest.kind, 'analyze');
+  assert.equal(analyzeManifest.target, 'cloud');
+  assert.equal(analyzeManifest.status, 'pending');
+  assert.equal(analyzeManifest.stage, 'descarga');
+  assert.equal(analyzeManifest.isMultiClip, true);
+  assert.equal(analyzeManifest.options.whisperModel, 'medium');
+  assert.equal(analyzeManifest.options.model, 'gemini-3.8-flash');
+  assert.equal(analyzeManifest.options.targetDurationSec, 42);
+  assert.equal(analyzeManifest.options.customInstruction, 'Prioriza el momento del café');
+  assert.equal(analyzeManifest.sourceFiles[1].uploadedTempSource, true);
+
+  const geminiPlan = cloudEditPlanToGeminiEditPlan(
+    {
+      etiqueta: 'viaje épico',
+      titulo: 'Café bajo la lluvia',
+      gancho: 'Dije que no llovía… y mira esto.',
+      historia: 'Salida soleada, tormenta sorpresa y remate con café caliente.',
+      ordenClips: [0, 1],
+      cortes: [
+        {
+          id: 'cloud-1',
+          clip_index: 0,
+          start_sec: 1.5,
+          end_sec: 5.2,
+          funcion: 'gancho',
+          motivo: 'Promesa inicial',
+          puntuacion_interes: 9,
+          texto: 'Hoy no cae ni una gota.',
+          words: [
+            { start: 1.6, end: 1.9, text: 'Hoy' },
+            { start: 1.95, end: 2.2, text: 'no' },
+          ],
+        },
+      ],
+      guionResultante: 'Hoy no cae ni una gota.',
+      duracionTotalSec: 3.7,
+      revision: {
+        coherente: true,
+        notas: ['Buen ritmo narrativo.'],
+      },
+    },
+    { targetDurationSec: 40 }
+  );
+
+  assert.equal(geminiPlan.etiqueta, 'VIAJE');
+  assert.equal(geminiPlan.titulo_interno, 'Café bajo la lluvia');
+  assert.equal(geminiPlan.gancho, 'Dije que no llovía… y mira esto.');
+  assert.equal(geminiPlan.historia, 'Salida soleada, tormenta sorpresa y remate con café caliente.');
+  assert.equal(geminiPlan.guionResultante, 'Hoy no cae ni una gota.');
+  assert.equal(geminiPlan.analysisMode, 'cloud');
+  assert.equal(geminiPlan.revision?.coherente, true);
+  assert.deepEqual(geminiPlan.revision?.notas, ['Buen ritmo narrativo.']);
+  assert.equal(geminiPlan.cortes[0].funcion, 'gancho');
+  assert.equal(geminiPlan.cortes[0].texto, 'Hoy no cae ni una gota.');
+  assert.equal(geminiPlan.cortes[0].words?.length, 2);
+});
+
 
 

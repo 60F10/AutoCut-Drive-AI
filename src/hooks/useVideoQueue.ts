@@ -810,6 +810,7 @@ export function useVideoQueue({
         id: clip.id,
         source: clip.source,
         driveFileId: clip.driveFileId,
+        modifiedTime: clip.modifiedTime,
         originalName: clip.originalName,
         mimeType: clip.mimeType,
         sizeBytes: clip.sizeBytes,

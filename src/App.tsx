@@ -149,19 +149,6 @@ export default function App() {
 
   selectStudioRef.current = studio.setSelectedStudioId;
 
-  const pcRender = usePcRenderJobs({
-    folderId: settings.folderId,
-    accessToken,
-    isDriveConnected,
-    cloudRenderConfigured,
-    exportQuality: settings.exportQuality,
-    tiktokOptions,
-    itemsRef: queue.itemsRef,
-    updateQueueItem: queue.updateQueueItem,
-    clearAuthSession,
-    onError: reportError,
-  });
-
   const openItemInStudio = useCallback(
     (itemId: string) => {
       studio.setSelectedStudioId(itemId);
@@ -169,6 +156,27 @@ export default function App() {
     },
     [studio]
   );
+
+  const pcRender = usePcRenderJobs({
+    folderId: settings.folderId,
+    accessToken,
+    isDriveConnected,
+    cloudRenderConfigured,
+    geminiModel: settings.model,
+    whisperModel: settings.whisperModel,
+    stylePreset,
+    customInstruction,
+    exportQuality: settings.exportQuality,
+    tiktokOptions,
+    itemsRef: queue.itemsRef,
+    setItems: queue.setItems,
+    updateQueueItem: queue.updateQueueItem,
+    onOpenStudio: openItemInStudio,
+    onCloseMultiClipModal: () => queue.setMultiClipModalOpen(false),
+    onClearCombineSelection: () => queue.setSelectedForCombine([]),
+    clearAuthSession,
+    onError: reportError,
+  });
 
   const handleCopyDiagnosticReport = useCallback(async (): Promise<boolean> => {
     const items = queue.itemsRef.current;
@@ -413,6 +421,7 @@ export default function App() {
               folderId={settings.folderId}
               onScanFolder={queue.handleScanFolder}
               onProcessItem={queue.processSingleItem}
+              onCloudAnalyzeItem={(itemId) => void pcRender.sendItemToCloudAnalyze(itemId)}
               onProcessAllPending={queue.handleProcessAllPending}
               onOpenStudio={openItemInStudio}
               onAddLocalFiles={queue.handleAddLocalFiles}
@@ -421,6 +430,8 @@ export default function App() {
               pcJobs={pcRender.pcJobs}
               pcOutputs={pcRender.pcOutputs}
               cloudRenderConfigured={cloudRenderConfigured}
+              sendingAnalyzeId={pcRender.sendingAnalyzeId}
+              cloudUploadProgress={pcRender.cloudUploadProgress}
               isSyncingPcJobs={pcRender.isSyncingPcJobs}
               lastPcSyncTime={pcRender.lastPcSyncTime}
               downloadingOutputId={pcRender.downloadingOutputId}
@@ -476,9 +487,11 @@ export default function App() {
               onRerenderItem={studio.handleRerenderItem}
               onSendToCloud={(itemId) => void pcRender.sendItemToCloud(itemId)}
               onSendToPc={(itemId) => void pcRender.sendItemToPc(itemId)}
+              onRedoStory={(itemId, instruction) => void pcRender.redoCloudStory(itemId, instruction)}
               onRetryCloudDispatch={(jobFileId) => void pcRender.retryCloudDispatch(jobFileId)}
               cloudRenderConfigured={cloudRenderConfigured}
               isSendingToPc={Boolean(pcRender.sendingToPcId)}
+              isSendingAnalyze={Boolean(pcRender.sendingAnalyzeId)}
               sendingTarget={pcRender.sendingTarget}
               cloudUploadProgress={pcRender.cloudUploadProgress}
               lastSentPcJob={pcRender.lastSentPcJob}
@@ -538,7 +551,12 @@ export default function App() {
         onChangeExportQuality={handleChangeExportQuality}
         onClose={() => queue.setMultiClipModalOpen(false)}
         onStartCombine={queue.handleStartMultiClipCombine}
-        isProcessing={queue.isProcessingAny}
+        onStartCloudAnalyze={(orderedIds, projectName, preset, instruction) =>
+          void pcRender.sendMultiClipToCloudAnalyze(orderedIds, projectName, preset, instruction)
+        }
+        cloudRenderConfigured={cloudRenderConfigured}
+        canUseCloud={Boolean(isDriveConnected && settings.folderId)}
+        isProcessing={queue.isProcessingAny || Boolean(pcRender.sendingAnalyzeId)}
       />
 
       <DriveConfirmModal

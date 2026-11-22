@@ -1,5 +1,10 @@
 import type {
+  AnalyzeJobManifest,
+  AnalyzeJobSourceFile,
+  AnalyzeJobStage,
+  AnalyzeJobStatus,
   AnalyticsRecord,
+  CloudEditPlan,
   DriveFileMeta,
   EditStylePreset,
   ExportQuality,
@@ -11,6 +16,7 @@ import type {
   SubtitleBlock,
   TikTokEditOptions,
   VideoCut,
+  WhisperModelId,
 } from '../types';
 
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.webm']);
@@ -1309,10 +1315,165 @@ export function formatPcJobStatusLabel(
   }
 }
 
+export const DEFAULT_WHISPER_MODEL: WhisperModelId = 'small';
+
+export function normalizeWhisperModel(raw: unknown): WhisperModelId {
+  return raw === 'medium' ? 'medium' : 'small';
+}
+
+export function getDefaultTargetDurationForPreset(preset: EditStylePreset): number {
+  switch (preset) {
+    case 'express_summary':
+      return 35;
+    case 'agile_vlog':
+      return 50;
+    case 'funny_jumpcut':
+    default:
+      return 42;
+  }
+}
+
+export function formatAnalyzeStageLabel(
+  stage?: AnalyzeJobStage,
+  status?: AnalyzeJobStatus,
+  progress = 0
+): string {
+  const pct = Math.max(0, Math.min(100, Math.round(Number(progress) || 0)));
+  if (status === 'analyzed') return 'Historia lista para revisar';
+  if (status === 'error') return 'Error en análisis en la nube';
+  if (status === 'pending') return 'En cola nube (análisis)...';
+
+  switch (stage) {
+    case 'descarga':
+      return `Descargando clips en la nube (${pct}%)...`;
+    case 'transcripcion':
+      return `Transcribiendo audio (${pct}%)...`;
+    case 'vision':
+      return `Gemini viendo el vídeo (${pct}%)...`;
+    case 'guion':
+      return `Montando la historia (${pct}%)...`;
+    case 'revision':
+      return `Revisando coherencia del guion (${pct}%)...`;
+    default:
+      return `Analizando en la nube (${pct}%)...`;
+  }
+}
+
 export function generatePcRenderJobId(nowMs = Date.now()): string {
   const stamp = nowMs.toString(36);
   const rand = Math.random().toString(36).slice(2, 7);
   return `${stamp}_${rand}`;
+}
+
+/**
+ * Builds the canonical `analyze_<jobId>.json` manifest (`kind: "analyze"`) consumed by
+ * GitHub Actions `worker/cloud-worker.mjs` for Whisper + multimodal Gemini story analysis.
+ */
+export function buildAnalyzeJobManifest(input: {
+  sourceFiles: AnalyzeJobSourceFile[];
+  model: string;
+  whisperModel?: WhisperModelId;
+  stylePreset: EditStylePreset;
+  customInstruction?: string;
+  targetDurationSec?: number;
+  tiktokOptions: TikTokEditOptions;
+  queueItemId?: string;
+  projectName?: string;
+  isMultiClip?: boolean;
+  jobId?: string;
+  createdAt?: string;
+}): AnalyzeJobManifest {
+  if (!Array.isArray(input.sourceFiles) || input.sourceFiles.length === 0) {
+    throw new Error('Se necesita al menos un clip fuente para lanzar el análisis en la nube.');
+  }
+
+  const normalizedOpts = normalizeTikTokOptions(input.tiktokOptions);
+  const targetDurationSec = Math.max(
+    15,
+    Math.round(Number(input.targetDurationSec) || getDefaultTargetDurationForPreset(input.stylePreset))
+  );
+  const createdAt = input.createdAt || new Date().toISOString();
+
+  return {
+    jobId: input.jobId || generatePcRenderJobId(),
+    kind: 'analyze',
+    target: 'cloud',
+    createdAt,
+    updatedAt: createdAt,
+    status: 'pending',
+    progress: 0,
+    stage: 'descarga',
+    sourceFiles: input.sourceFiles.map((s) => ({
+      name: s.name,
+      driveFileId: s.driveFileId,
+      ...(s.modifiedTime ? { modifiedTime: s.modifiedTime } : {}),
+      ...(s.uploadedTempSource ? { uploadedTempSource: true } : {}),
+    })),
+    options: {
+      model: sanitizeGeminiModelName(input.model, DEFAULT_GEMINI_MODEL),
+      whisperModel: normalizeWhisperModel(input.whisperModel),
+      stylePreset: normalizeStylePreset(input.stylePreset),
+      ...(input.customInstruction?.trim()
+        ? { customInstruction: input.customInstruction.trim() }
+        : {}),
+      targetDurationSec,
+      silenceTrimEnabled: normalizedOpts.silenceTrimEnabled,
+      subtitlesEnabled: normalizedOpts.subtitlesEnabled,
+    },
+    ...(input.queueItemId ? { queueItemId: input.queueItemId } : {}),
+    ...(input.projectName ? { projectName: input.projectName } : {}),
+    isMultiClip: Boolean(input.isMultiClip || input.sourceFiles.length > 1),
+  };
+}
+
+/**
+ * Converts a completed `CloudEditPlan` returned by GitHub Actions into the Studio's `GeminiEditPlan`,
+ * preserving word-level timestamps, cut functions, spoken text, hook, story summary, full script, and review notes.
+ */
+export function cloudEditPlanToGeminiEditPlan(
+  plan: CloudEditPlan,
+  options?: { targetDurationSec?: number }
+): GeminiEditPlan {
+  const cortes: VideoCut[] = (Array.isArray(plan.cortes) ? plan.cortes : []).map((cut, idx) => ({
+    id: cut.id || `cloud-cut-${idx + 1}`,
+    clip_index: Math.max(0, Number(cut.clip_index) || 0),
+    start_sec: Number(Math.max(0, Number(cut.start_sec) || 0).toFixed(3)),
+    end_sec: Number(Math.max((Number(cut.start_sec) || 0) + 0.15, Number(cut.end_sec) || 0.15).toFixed(3)),
+    motivo: String(cut.motivo || 'Corte seleccionado por IA').trim(),
+    puntuacion_interes: Math.max(1, Math.min(10, Math.round(Number(cut.puntuacion_interes) || 8))),
+    enabled: true,
+    funcion: cut.funcion,
+    texto: String(cut.texto || '').trim(),
+    words: Array.isArray(cut.words)
+      ? cut.words.map((w) => ({
+          start: Number(Number(w.start).toFixed(3)),
+          end: Number(Number(w.end).toFixed(3)),
+          text: String(w.text || '').trim(),
+        }))
+      : [],
+  }));
+
+  const targetSec = Math.round(
+    Number(options?.targetDurationSec) || Number(plan.duracionTotalSec) || calculateSelectedDuration(cortes)
+  );
+
+  return {
+    etiqueta: sanitizeEtiqueta(plan.etiqueta),
+    titulo_interno: String(plan.titulo || 'Historia editada en la nube').trim(),
+    duracion_objetivo_seg: Math.max(5, targetSec),
+    cortes,
+    gancho: String(plan.gancho || '').trim(),
+    historia: String(plan.historia || '').trim(),
+    ordenClips: Array.isArray(plan.ordenClips) ? plan.ordenClips : [],
+    guionResultante: String(plan.guionResultante || '').trim(),
+    revision: plan.revision
+      ? {
+          coherente: Boolean(plan.revision.coherente),
+          notas: Array.isArray(plan.revision.notas) ? plan.revision.notas : [],
+        }
+      : { coherente: true, notas: [] },
+    analysisMode: 'cloud',
+  };
 }
 
 /**
@@ -1415,6 +1576,7 @@ export function buildRenderJobManifest(input: {
 
   return {
     jobId: input.jobId || generatePcRenderJobId(),
+    kind: 'render',
     target: input.target || 'pc',
     createdAt: input.createdAt || new Date().toISOString(),
     status: 'pending',

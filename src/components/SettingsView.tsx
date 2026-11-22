@@ -8,6 +8,7 @@ import {
   ExternalLink,
   Folder,
   HardDrive,
+  Mic,
   RotateCcw,
   Save,
   ShieldCheck,
@@ -15,7 +16,13 @@ import {
   Zap,
 } from 'lucide-react';
 import type { User } from 'firebase/auth';
-import type { AppSettings, ExportQuality, GeminiModelId, WatchIntervalSec } from '../types';
+import type {
+  AppSettings,
+  ExportQuality,
+  GeminiModelId,
+  WatchIntervalSec,
+  WhisperModelId,
+} from '../types';
 import type { VideoCacheStats } from '../services/videoStorage';
 import {
   clearDebugLogs,
@@ -68,6 +75,7 @@ export function SettingsView({
 }: SettingsViewProps) {
   const [folderInput, setFolderInput] = useState(settings.folderId);
   const [model, setModel] = useState<GeminiModelId>(settings.model);
+  const [whisperModel, setWhisperModel] = useState<WhisperModelId>(settings.whisperModel);
   const [watchIntervalSec, setWatchIntervalSec] = useState<WatchIntervalSec>(
     settings.watchIntervalSec
   );
@@ -99,6 +107,7 @@ export function SettingsView({
   useEffect(() => {
     setFolderInput(settings.folderId);
     setModel(settings.model);
+    setWhisperModel(settings.whisperModel);
     setWatchIntervalSec(settings.watchIntervalSec);
     setAutoWatchEnabled(settings.autoWatchEnabled);
     setAutoUploadEnabled(settings.autoUploadEnabled);
@@ -131,6 +140,7 @@ export function SettingsView({
     onSaveSettings({
       folderId: parsedFolderId,
       model: cleanedModel,
+      whisperModel,
       watchIntervalSec,
       autoWatchEnabled,
       autoUploadEnabled,
@@ -272,6 +282,76 @@ export function SettingsView({
               <span className="font-mono text-[#fcee0a]">VITE_GEMINI_MODEL</span> /{' '}
               <span className="font-mono text-[#fcee0a]">GEMINI_MODEL</span>.
             </p>
+          </div>
+        </div>
+
+        {/* Section 2.2: Cloud Whisper Transcription Model */}
+        <div
+          data-testid="settings-whisper-section"
+          className="p-5 sm:p-6 space-y-4"
+        >
+          <div className="flex items-start gap-2.5">
+            <Mic className="h-4 w-4 text-[#00f0ff] shrink-0 mt-0.5" aria-hidden="true" />
+            <div>
+              <h2 className="font-display text-base font-semibold text-[#EEF5FF]">
+                Modelo de transcripción
+              </h2>
+              <p className="mt-1 text-xs text-[#94A8C4] leading-relaxed">
+                Usado por Whisper (<span className="font-mono text-[#00f0ff]">faster-whisper</span> en GitHub Actions) para transcribir el audio real y sincronizar cortes y subtítulos. Tiene prioridad sobre la variable <span className="font-mono text-[#fcee0a]">WHISPER_MODEL</span> del repositorio.
+              </p>
+            </div>
+          </div>
+
+          <div
+            role="radiogroup"
+            aria-label="Modelo de transcripción Whisper"
+            className="grid grid-cols-1 sm:grid-cols-2 gap-3"
+          >
+            {(
+              [
+                {
+                  id: 'small',
+                  title: 'small (recomendado)',
+                  specs: 'Rápido · ~3–5 min por 10 min de bruto',
+                  desc: 'Equilibrio óptimo entre velocidad y precisión en español para la mayoría de vlogs y vídeos grabados con móvil.',
+                },
+                {
+                  id: 'medium',
+                  title: 'medium (más preciso y más lento)',
+                  specs: 'Alta precisión · ~6–9 min por 10 min de bruto',
+                  desc: 'Mejor reconocimiento con ruido de fondo, música o varios hablantes. Las transcripciones se guardan en caché en Drive.',
+                },
+              ] as Array<{ id: WhisperModelId; title: string; specs: string; desc: string }>
+            ).map((option) => {
+              const selected = whisperModel === option.id;
+              return (
+                <button
+                  key={option.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={selected}
+                  data-testid={`settings-whisper-${option.id}`}
+                  onClick={() => setWhisperModel(option.id)}
+                  className={`min-h-[44px] rounded-md border p-4 text-left transition-all ${
+                    selected
+                      ? 'border-[#00f0ff] bg-[#00f0ff]/10 shadow-[0_0_16px_rgba(0,240,255,0.16)]'
+                      : 'border-[#00f0ff]/20 bg-[#05060a]/85 hover:border-[#00f0ff]/45'
+                  }`}
+                >
+                  <p
+                    className={`font-mono text-xs font-semibold ${
+                      selected ? 'text-[#00f0ff]' : 'text-[#EEF5FF]'
+                    }`}
+                  >
+                    {option.title}
+                  </p>
+                  <p className="mt-1 font-mono text-[11px] font-medium text-[#fcee0a]">
+                    {option.specs}
+                  </p>
+                  <p className="mt-1.5 text-xs text-[#94A8C4] leading-relaxed">{option.desc}</p>
+                </button>
+              );
+            })}
           </div>
         </div>
 
@@ -510,10 +590,10 @@ export function SettingsView({
               <Cloud className="h-5 w-5 text-[#00f0ff] shrink-0 mt-0.5" />
               <div className="space-y-1">
                 <h2 className="font-display text-base font-semibold text-[#EEF5FF]">
-                  Render en la nube
+                  Análisis y render en la nube
                 </h2>
                 <p className="text-xs text-[#94A8C4] leading-relaxed">
-                  Renderiza vídeos pesados y Multi-Clip con FFmpeg nativo en GitHub Actions (coste 0 €, sin tarjeta y sin dejar ningún PC encendido).
+                  Transcripción con Whisper, guion multimodal con Gemini y renderizado con FFmpeg nativo en GitHub Actions (coste 0 €, sin tarjeta y sin dejar ningún PC encendido).
                 </p>
               </div>
             </div>
@@ -531,8 +611,8 @@ export function SettingsView({
 
           <p className="rounded-sm border border-[#00f0ff]/15 bg-[#05060a] px-3 py-2 text-[11px] text-[#94A8C4] leading-relaxed">
             {cloudRenderConfigured
-              ? 'El servidor tiene los secretos de GitHub Actions listos. Puedes pulsar "Renderizar en la nube" directamente desde el Estudio de cortes.'
-              : 'Faltan las variables de servidor GITHUB_DISPATCH_TOKEN y GITHUB_REPO en Secrets. Sigue la guía paso a paso (10 min, una sola vez) para activarlo.'}
+              ? 'El servidor tiene los secretos de GitHub Actions listos. Puedes usar "Analizar en la nube" en la Cola y "Renderizar en la nube" desde el Estudio.'
+              : 'Faltan las variables de servidor GITHUB_DISPATCH_TOKEN y GITHUB_REPO en Secrets (y GEMINI_API_KEY en GitHub Secrets para el análisis). Sigue la guía paso a paso.'}
           </p>
 
           <a

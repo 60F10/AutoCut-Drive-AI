@@ -8,11 +8,13 @@ import type {
 import {
   DEFAULT_GEMINI_MODEL,
   DEFAULT_TIKTOK_OPTIONS,
+  DEFAULT_WHISPER_MODEL,
   detectDefaultExportQuality,
   extractDriveFolderId,
   normalizeExportQuality,
   normalizeStylePreset,
   normalizeTikTokOptions,
+  normalizeWhisperModel,
   sanitizeGeminiModelName,
 } from '../utils/videoPipeline';
 import {
@@ -38,6 +40,7 @@ export function createDefaultSettings(): AppSettings {
   return {
     folderId: '',
     model: resolveEnvDefaultGeminiModel(),
+    whisperModel: DEFAULT_WHISPER_MODEL,
     watchIntervalSec: 60,
     autoWatchEnabled: false,
     autoUploadEnabled: true,
@@ -65,6 +68,7 @@ function loadInitialSettings(): AppSettings {
     return {
       folderId: extractDriveFolderId(String(parsed.folderId ?? '')),
       model: validModel,
+      whisperModel: normalizeWhisperModel(parsed.whisperModel),
       watchIntervalSec: validInterval,
       autoWatchEnabled: Boolean(parsed.autoWatchEnabled),
       autoUploadEnabled: parsed.autoUploadEnabled !== false,
@@ -115,12 +119,14 @@ export function useAppSettings() {
     const sanitized: AppSettings = {
       ...next,
       model: sanitizeGeminiModelName(next.model, resolveEnvDefaultGeminiModel()),
+      whisperModel: normalizeWhisperModel(next.whisperModel),
       folderId: extractDriveFolderId(next.folderId),
       exportQuality: normalizeExportQuality(next.exportQuality),
     };
     setSettings(sanitized);
     logInfo('UI', 'Ajustes guardados', {
       modelo: sanitized.model,
+      whisper: sanitized.whisperModel,
       calidad: sanitized.exportQuality === 'mobile_fast' ? '720p' : '1080p',
       vigilancia: sanitized.autoWatchEnabled ? `${sanitized.watchIntervalSec}s` : 'off',
       carpeta: sanitized.folderId ? 'sí' : 'no',

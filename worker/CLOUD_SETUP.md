@@ -1,22 +1,46 @@
-# Guía de configuración — Render en la nube con GitHub Actions (0 €)
+# Guía de configuración — Análisis y render en la nube con GitHub Actions (0 €)
 
-Esta guía configura el **renderizado en la nube de AutoCut Drive AI** usando **GitHub Actions** y **FFmpeg nativo**, sin coste, sin tarjeta de crédito y sin tener que dejar ningún PC encendido. Se configura **una sola vez** (~10 minutos).
+Esta guía configura tanto el **análisis multimodal en la nube (Whisper + Gemini)** como el **renderizado en la nube con FFmpeg nativo** de AutoCut Drive AI usando **GitHub Actions**, sin coste, sin tarjeta de crédito y sin tener que dejar ningún PC encendido. Se configura **una sola vez** (~10 minutos).
 
 ---
 
-## Cómo funciona
+## Flujo completo: Analizar → Revisar → Renderizar
 
 ```text
-Móvil (PWA) ──► Sube job_<id>.json a Google Drive (_AutoCut_Jobs)
-            ──► Llama a POST /api/cloud-render/dispatch (tu servidor)
-                    │
-                    ▼
-             GitHub Actions (ubuntu-latest · FFmpeg nativo)
-                    ├─ Descarga los brutos por streaming a disco (sin límites de RAM)
-                    ├─ Renderiza 9:16 con libx264 (veryfast 1080p / ultrafast 720p)
-                    ├─ Sube el MP4 a _AutoCut_Output (bloques resumables de 8 MB)
-                    └─ Actualiza el progreso (%) y estado en job_<id>.json
+1. ANALIZAR (Móvil / PWA → GitHub Actions)
+   PWA ──► Sube analyze_<id>.json (kind: "analyze") a Google Drive (_AutoCut_Jobs)
+       ──► Llama a POST /api/cloud-render/dispatch (tu servidor)
+               │
+               ▼
+        GitHub Actions (ubuntu-latest · Python 3.11 + faster-whisper + Node + FFmpeg)
+               ├─ Descarga los brutos por streaming (ordenados cronológicamente)
+               ├─ Transcribe audio real palabra a palabra con faster-whisper (int8 CPU)
+               │  └─ Guarda/reutiliza caché en _AutoCut_Jobs/_cache/transcript_*.json
+               ├─ Genera proxy ligero (640p 2fps + audio 48k) → Gemini Files API (borrado en finally)
+               ├─ Fase A (registro por clip) → Fase B (guion global) → sub-cortes en silencios
+               ├─ Fase C (revisión de coherencia, máx. 1 reintento automático)
+               └─ Escribe el plan (cortes, texto real, words, guion) en analyze_<id>.json (status: "analyzed")
+
+2. REVISAR (Estudio de cortes en PWA)
+   PWA ──► Carga el plan automáticamente en el Estudio
+       ──► Ves título, gancho, historia, notas de revisión, función y texto hablado de cada corte
+       ──► Opcional: «Ver guion completo» o «Rehacer historia» (reutiliza caché Whisper sin re-transcribir)
+
+3. RENDERIZAR (Estudio → GitHub Actions)
+   PWA ──► Sube job_<id>.json (kind: "render") a _AutoCut_Jobs → POST /api/cloud-render/dispatch
+               │
+               ▼
+        GitHub Actions (FFmpeg nativo)
+               ├─ Sincronía exacta A/V, HDR→SDR BT.709, loudnorm -14 LUFS 2 pasadas
+               ├─ Subtítulos ASS generados desde timestamps reales palabra a palabra
+               └─ Sube MP4 final a _AutoCut_Output (bloques resumables de 8 MB)
 ```
+
+### Tiempos estimados (runner público 4 vCPU)
+- **~3–7 minutos** para ~10 minutos de bruto total usando Whisper `small` (por defecto) + Gemini `gemini-3.8-flash`.
+- **«Rehacer historia»**: ~30–60 segundos (reutiliza la transcripción cacheada en `_AutoCut_Jobs/_cache/` sin volver a ejecutar Whisper).
+- Con Whisper `medium` (selectable en **Ajustes → Modelo de transcripción**): más preciso con ruido/acentos, aproximadamente ~6–9 minutos por cada 10 minutos de bruto.
+- Si prefieres analizar al instante en el navegador sin esperar al runner (solo fotogramas, sin audio), siempre tienes disponible el botón secundario **«Análisis rápido (sin audio)»**.
 
 ---
 
@@ -27,11 +51,11 @@ Móvil (PWA) ──► Sube job_<id>.json a Google Drive (_AutoCut_Jobs)
 | **Minutos gratis de GitHub Actions** | **Ilimitados** (0 €) | **2.000 min/mes** (0 €) |
 | **Hardware del runner** | 4 vCPU / 16 GB RAM | 2 vCPU / 7 GB RAM |
 | **Privacidad de los logs** | Los logs de Actions son visibles públicamente | Solo visibles para ti |
-| **Qué hace el worker para proteger tu privacidad** | Enmascara todos los tokens (`::add-mask::`) y **nunca** imprime nombres de archivo, tokens, cabeceras ni IDs de carpetas — solo telemetría numérica (`jobId`, número de clips, MB, segundos, etapa y código HTTP). | Igual (misma protección de logs). |
+| **Qué hace el worker para proteger tu privacidad** | Enmascara todos los tokens y `GEMINI_API_KEY` (`::add-mask::`) y **nunca** imprime nombres de archivo, transcripciones, tokens, cabeceras ni IDs de carpetas — solo telemetría numérica (`jobId`, clips, cortes, MB, segundos, etapa y código HTTP). | Igual (misma protección de logs). |
 
 > **Recomendación**:
-> - Si vas a renderizar muchos vídeos al mes o en 1080p rápido, un **repositorio público** te da minutos ilimitados y 4 vCPU, con logs estrictamente saneados.
-> - Si prefieres máxima privacidad incluso en los registros de ejecución y renderizas menos de ~30 horas/mes, un **repositorio privado** entra de sobra en los 2.000 minutos gratuitos.
+> - Si vas a analizar y renderizar muchos vídeos al mes, un **repositorio público** te da minutos ilimitados y 4 vCPU (el doble de rápido con Whisper), con logs estrictamente saneados.
+> - Si prefieres máxima privacidad incluso en los registros de ejecución y consumes menos de ~30 horas/mes, un **repositorio privado** entra de sobra en los 2.000 minutos gratuitos.
 
 ---
 
@@ -54,7 +78,7 @@ Este token permite únicamente al backend de la PWA disparar el workflow `.githu
 
 ## Paso 2 — Crear cliente OAuth de Google Cloud para el worker
 
-El runner de GitHub Actions necesita un `refresh_token` de Google Drive para descargar los brutos de tu carpeta y subir el MP4 final.
+El runner de GitHub Actions necesita un `refresh_token` de Google Drive para descargar los brutos de tu carpeta, guardar el caché de transcripciones y subir el MP4 final.
 
 1. Abre [Google Cloud Console](https://console.cloud.google.com/) y selecciona el mismo proyecto de Google Cloud que usas con AutoCut (o crea uno nuevo).
 2. Ve a **APIs y servicios → Biblioteca**, busca **Google Drive API** y asegúrate de que está **Habilitada**.
@@ -96,19 +120,26 @@ El runner de GitHub Actions necesita un `refresh_token` de Google Drive para des
 
 ---
 
-## Paso 4 — Añadir los 4 secretos en GitHub Actions
+## Paso 4 — Añadir los 5 secretos (y variable opcional) en GitHub Actions
 
-1. En tu repositorio de GitHub, ve a **Settings → Secrets and variables → Actions → New repository secret**.
-2. Crea exactamente estos **4 secretos**:
+1. En tu repositorio de GitHub, ve a **Settings → Secrets and variables → Actions → Secrets → New repository secret**.
+2. Crea exactamente estos **5 secretos**:
 
-| Nombre del secreto | Valor |
-| --- | --- |
-| `GDRIVE_CLIENT_ID` | El ID de cliente OAuth creado en el Paso 2. |
-| `GDRIVE_CLIENT_SECRET` | El Secreto de cliente OAuth creado en el Paso 2. |
-| `GDRIVE_REFRESH_TOKEN` | El Refresh token obtenido en OAuth Playground (Paso 3). |
-| `AUTOCUT_ROOT_FOLDER_ID` | El ID de tu carpeta raíz de vídeos en Google Drive (el mismo que pegas en **Ajustes** de la PWA, p. ej. `1A2B3C4D5E...`). |
+| Nombre del secreto | Obligatorio | Valor |
+| --- | --- | --- |
+| `GDRIVE_CLIENT_ID` | Sí | El ID de cliente OAuth creado en el Paso 2. |
+| `GDRIVE_CLIENT_SECRET` | Sí | El Secreto de cliente OAuth creado en el Paso 2. |
+| `GDRIVE_REFRESH_TOKEN` | Sí | El Refresh token obtenido en OAuth Playground (Paso 3). |
+| `AUTOCUT_ROOT_FOLDER_ID` | Sí | El ID de tu carpeta raíz de vídeos en Google Drive (el mismo que pegas en **Ajustes** de la PWA, p. ej. `1A2B3C4D5E...`). |
+| `GEMINI_API_KEY` | Sí (para análisis) | Tu clave de API de Google Gemini (la misma que usas en el servidor). El workflow la enmascara automáticamente con `::add-mask::`. |
 
-> Asegúrate de que la pestaña **Actions** está habilitada en tu repositorio y que el archivo `.github/workflows/cloud-render.yml` está subido a la rama `main`.
+3. *(Opcional)* En **Settings → Secrets and variables → Actions → Variables → New repository variable**, puedes añadir:
+
+| Nombre de la variable | Valor por defecto | Descripción |
+| --- | --- | --- |
+| `WHISPER_MODEL` | `small` | Modelo por defecto de `faster-whisper` (`small` o `medium`) para precalentar la caché de Hugging Face. El selector **Modelo de transcripción** en **Ajustes** de la PWA tiene prioridad si eliges otro. |
+
+> Asegúrate de que la pestaña **Actions** está habilitada en tu repositorio y que `.github/workflows/cloud-render.yml`, `worker/transcribe.py` y `worker/analyze-core.mjs` están subidos a la rama `main`.
 
 ---
 
@@ -126,8 +157,9 @@ En el panel de **Settings → Secrets** (variables de entorno de servidor) de Go
 
 ### Cómo comprobar que está activo
 1. Abre la PWA y entra en **Ajustes**.
-2. En la tarjeta **Render en la nube**, el estado debe cambiar a **`CONFIGURADO`**.
-3. Entra en **Estudio de cortes** con cualquier vídeo analizado: el botón principal **«Renderizar en la nube (recomendado)»** aparecerá habilitado.
+2. En la tarjeta **Análisis y render en la nube**, el estado debe cambiar a **`CONFIGURADO`**.
+3. En la **Cola** (o en el modal **Multi-Clip**), el botón principal **«Analizar en la nube (recomendado)»** aparecerá habilitado.
+4. Cuando termine el análisis, el **Estudio de cortes** se abrirá automáticamente con el guion, los cortes y el texto hablado real listo para pulsar **«Renderizar en la nube (recomendado)»**.
 
 ---
 
@@ -135,16 +167,17 @@ En el panel de **Settings → Secrets** (variables de entorno de servidor) de Go
 
 1. **Restringir la `apiKey` web de Firebase por dominio (HTTP Referrers)**:
    Aunque `firebase-applet-config.json` solo contiene identificadores públicos de cliente web (es normal y esperado por Firebase), conviene entrar en **Google Cloud Console → APIs y servicios → Credenciales → Browser key (auto created by Firebase)** y restringirla a los dominios exactos donde corre tu PWA (`*.run.app`, `localhost:3000`, etc.) usando **Restricciones de aplicaciones → Sitios web (referentes HTTP)**.
-2. **Privacidad de `GITHUB_DISPATCH_TOKEN`**:
-   El token de GitHub vive únicamente en `server.ts` y solo acepta llamadas `POST /api/cloud-render/dispatch` validadas con IDs de archivo de Drive (`^[A-Za-z0-9_-]{10,128}$`) y limitadas a 10 peticiones por minuto.
-3. **Limpieza automática de clips locales (`_sources/`)**:
-   Si renderizas en la nube un vídeo subido desde la galería del móvil (que aún no estaba en Drive), la PWA lo sube primero en bloques de 8 MB a `_AutoCut_Jobs/_sources/` y lo borra automáticamente en cuanto el render termina. Tus vídeos originales en Google Drive **nunca** se modifican ni se eliminan.
+2. **Privacidad de `GITHUB_DISPATCH_TOKEN` y `GEMINI_API_KEY`**:
+   `GITHUB_DISPATCH_TOKEN` vive únicamente en `server.ts` y solo acepta llamadas `POST /api/cloud-render/dispatch` validadas con IDs de archivo de Drive (`^[A-Za-z0-9_-]{10,128}$`) y limitadas a 10 peticiones por minuto. `GEMINI_API_KEY` en GitHub Actions se enmascara con `::add-mask::`, y los proxies subidos a Gemini Files API se eliminan siempre en `finally`.
+3. **Limpieza automática de clips locales (`_sources/`) y caché de transcripciones (`_cache/`)**:
+   Si analizas o renderizas un vídeo local de la galería del móvil, la PWA lo sube una sola vez en bloques de 8 MB a `_AutoCut_Jobs/_sources/` y lo limpia al completar el render. Las transcripciones de Whisper se cachean en `_AutoCut_Jobs/_cache/transcript_<driveFileId>_<modifiedTime>.json` para que «Rehacer historia» sea casi instantáneo. Tus vídeos originales en Google Drive **nunca** se modifican ni se eliminan.
 
 ---
 
 ## Solución rápida de problemas
 
-- **El botón dice «Configura el render en la nube (ver Ajustes)»**: faltan `GITHUB_DISPATCH_TOKEN` o `GITHUB_REPO` en el servidor, o falta pulsar **Republish** tras añadirlos.
-- **Error `401 / 403` al pulsar Renderizar en la nube**: el `GITHUB_DISPATCH_TOKEN` caducó o no tiene el permiso `Actions: Read and write` sobre ese repositorio exacto.
+- **El botón «Analizar en la nube» está deshabilitado**: revisa que Drive esté conectado, el ID de carpeta guardado en **Ajustes** y que `GITHUB_DISPATCH_TOKEN` y `GITHUB_REPO` estén configurados en el servidor (recuerda pulsar **Republish**).
+- **Error `[Análisis IA] Falta el secreto GEMINI_API_KEY en GitHub Actions`**: añade el secreto `GEMINI_API_KEY` en **GitHub → Settings → Secrets and variables → Actions**.
+- **Error `401 / 403` al pulsar Analizar o Renderizar en la nube**: el `GITHUB_DISPATCH_TOKEN` caducó o no tiene el permiso `Actions: Read and write` sobre ese repositorio exacto.
 - **Error `[Drive] No se pudo renovar el token OAuth (invalid_grant)`**: el `GDRIVE_REFRESH_TOKEN` caducó (comprueba que la pantalla OAuth esté **En producción** en Google Cloud) o fue revocado; repite el Paso 3 y actualiza `GDRIVE_REFRESH_TOKEN` en GitHub Secrets.
-- **El trabajo se queda en «En cola nube» más de 3 minutos**: la PWA intenta relanzarlo automáticamente al abrirse, y también puedes pulsar **«Reintentar envío»** en el panel **Renders remotos** o revisar la pestaña **Actions** de GitHub.
+- **El trabajo se queda en «En cola nube» más de 3 minutos**: la PWA intenta relanzarlo automáticamente al abrirse, y también puedes pulsar **«Reintentar envío»** en la cola o revisar la pestaña **Actions** de GitHub.

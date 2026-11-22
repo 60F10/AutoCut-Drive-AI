@@ -5,6 +5,7 @@ import {
   Check,
   CheckCircle2,
   Clock,
+  Cloud,
   ExternalLink,
   Film,
   FolderOpen,
@@ -12,6 +13,7 @@ import {
   Loader2,
   Play,
   RefreshCw,
+  RotateCw,
   Search,
   Sparkles,
   Trash2,
@@ -31,6 +33,7 @@ import type {
 } from '../types';
 import {
   exceedsMobileRamThreshold,
+  formatAnalyzeStageLabel,
   formatBytes,
   formatPcJobStatusLabel,
   formatSeconds,
@@ -66,6 +69,7 @@ interface QueueViewProps {
   folderId: string;
   onScanFolder: () => void;
   onProcessItem: (itemId: string) => void;
+  onCloudAnalyzeItem: (itemId: string) => void;
   onProcessAllPending: () => void;
   onOpenStudio: (itemId: string) => void;
   onAddLocalFiles: (files: FileList) => void;
@@ -74,6 +78,13 @@ interface QueueViewProps {
   pcJobs: PcJobSyncEntry[];
   pcOutputs: DriveFileMeta[];
   cloudRenderConfigured: boolean;
+  sendingAnalyzeId: string | null;
+  cloudUploadProgress: {
+    clipIndex: number;
+    totalClips: number;
+    percent: number;
+    message: string;
+  } | null;
   isSyncingPcJobs: boolean;
   lastPcSyncTime: number | null;
   downloadingOutputId: string | null;
@@ -141,6 +152,7 @@ export function QueueView({
   folderId,
   onScanFolder,
   onProcessItem,
+  onCloudAnalyzeItem,
   onProcessAllPending,
   onOpenStudio,
   onAddLocalFiles,
@@ -149,6 +161,8 @@ export function QueueView({
   pcJobs,
   pcOutputs,
   cloudRenderConfigured,
+  sendingAnalyzeId,
+  cloudUploadProgress,
   isSyncingPcJobs,
   lastPcSyncTime,
   downloadingOutputId,
@@ -624,6 +638,45 @@ export function QueueView({
                         ) : null}
                       </div>
 
+                      {item.analyzeJobStatus && item.analyzeJobStatus !== 'analyzed' && (
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p
+                            data-testid={`queue-analyze-status-${item.id}`}
+                            className={`inline-flex items-center gap-1.5 rounded-sm border px-2 py-0.5 font-mono text-[11px] font-semibold ${
+                              item.analyzeJobStatus === 'error'
+                                ? 'border-[#ff2a85]/45 bg-[#ff2a85]/12 text-[#ff85b8]'
+                                : 'border-[#fcee0a]/45 bg-[#fcee0a]/10 text-[#fcee0a]'
+                            }`}
+                          >
+                            <Cloud className="h-3 w-3 shrink-0" />
+                            {formatAnalyzeStageLabel(
+                              item.analyzeJobStage,
+                              item.analyzeJobStatus,
+                              item.analyzeJobProgress
+                            )}
+                          </p>
+                          {item.analyzeJobFileId &&
+                            item.analyzeJobStatus === 'pending' &&
+                            failedDispatchJobFileIds[item.analyzeJobFileId] && (
+                              <button
+                                type="button"
+                                disabled={retryingDispatchJobFileId === item.analyzeJobFileId}
+                                onClick={() => onRetryCloudDispatch(item.analyzeJobFileId!)}
+                                className="inline-flex h-6 items-center gap-1 rounded-sm border border-[#ff2a85]/55 bg-[#ff2a85]/15 px-2 font-mono text-[10px] font-semibold text-[#ffd1e3] hover:bg-[#ff2a85]/25 disabled:opacity-45"
+                              >
+                                <RotateCw
+                                  className={`h-3 w-3 ${
+                                    retryingDispatchJobFileId === item.analyzeJobFileId
+                                      ? 'animate-spin'
+                                      : ''
+                                  }`}
+                                />
+                                Reintentar envío
+                              </button>
+                            )}
+                        </div>
+                      )}
+
                       {item.pcJobStatus && (
                         <p className="inline-flex items-center gap-1.5 rounded-sm border border-[#00f0ff]/30 bg-[#00f0ff]/10 px-2 py-0.5 font-mono text-[11px] font-semibold text-[#00f0ff]">
                           {item.pcJobTarget === 'cloud' ? 'Nube' : 'PC'}:{' '}
@@ -648,7 +701,7 @@ export function QueueView({
                   </div>
 
                   {/* Right: Monospace HUD Status + Primary Action + Remove Pending */}
-                  <div className="flex flex-wrap items-center gap-2.5 shrink-0 pl-8 lg:pl-0">
+                  <div className="flex flex-wrap items-center gap-2 shrink-0 pl-8 lg:pl-0">
                     <div className="flex items-center gap-2 font-mono text-xs font-medium mr-1">
                       {item.stage === 'completed' ? (
                         <CheckCircle2 className="h-4 w-4 text-[#00f0ff]" />
@@ -699,18 +752,48 @@ export function QueueView({
                       <>
                         <button
                           type="button"
-                          onClick={() => onProcessItem(item.id)}
-                          disabled={isProcessingAny}
-                          className="cyber-btn-primary inline-flex h-10 sm:h-9 items-center gap-1.5 px-3.5 text-xs disabled:opacity-50 whitespace-nowrap"
+                          data-testid={`queue-cloud-analyze-${item.id}`}
+                          onClick={() => onCloudAnalyzeItem(item.id)}
+                          disabled={
+                            !cloudRenderConfigured ||
+                            !isDriveConnected ||
+                            !folderId ||
+                            isProcessingAny ||
+                            Boolean(sendingAnalyzeId)
+                          }
+                          title={
+                            !cloudRenderConfigured
+                              ? 'Configura GitHub Actions y GEMINI_API_KEY (ver Ajustes)'
+                              : !isDriveConnected || !folderId
+                              ? 'Conecta Google Drive y configura tu carpeta en Ajustes'
+                              : 'Transcripción real con Whisper + Gemini viendo vídeo y audio en GitHub Actions'
+                          }
+                          className="cyber-btn-primary inline-flex h-10 sm:h-9 items-center gap-1.5 px-3 text-xs disabled:opacity-45 whitespace-nowrap"
                         >
-                          <Play className="h-3.5 w-3.5 fill-current" />
-                          {item.stage === 'error' ? 'Reintentar' : 'Procesar'}
+                          {sendingAnalyzeId === item.id ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <Cloud className="h-3.5 w-3.5" />
+                          )}
+                          Analizar en la nube (recomendado)
+                        </button>
+
+                        <button
+                          type="button"
+                          data-testid={`queue-fast-analyze-${item.id}`}
+                          onClick={() => onProcessItem(item.id)}
+                          disabled={isProcessingAny || Boolean(sendingAnalyzeId)}
+                          title="Análisis local rápido por fotogramas sin transcripción de audio"
+                          className="inline-flex h-10 sm:h-9 items-center gap-1.5 rounded-md border border-[#00f0ff]/30 bg-[#05060a]/90 px-3 text-xs font-medium text-[#C8D7EC] hover:border-[#00f0ff]/65 hover:text-[#00f0ff] disabled:opacity-45 transition-colors whitespace-nowrap"
+                        >
+                          <Zap className="h-3.5 w-3.5 text-[#fcee0a]" />
+                          Análisis rápido (sin audio)
                         </button>
 
                         <button
                           type="button"
                           onClick={() => onRemoveItem(item.id)}
-                          disabled={isProcessingAny}
+                          disabled={isProcessingAny || Boolean(sendingAnalyzeId)}
                           aria-label={`Quitar ${item.originalName} de la cola`}
                           title="Quitar de la cola"
                           className="inline-flex h-10 w-10 sm:h-9 sm:w-9 items-center justify-center rounded-md border border-[#00f0ff]/20 bg-[#05060a] text-[#8EA2BD] hover:border-[#ff2a85]/55 hover:bg-[#ff2a85]/15 hover:text-[#ff85b8] disabled:opacity-40 transition-colors"
@@ -775,16 +858,28 @@ export function QueueView({
                     <>
                       <div className="flex items-center justify-between gap-3 pt-1">
                         <p className="text-xs text-[#C8D7EC] truncate">
-                          {item.stageDetail || STAGE_LABELS[item.stage]}
+                          {sendingAnalyzeId === item.id && cloudUploadProgress
+                            ? cloudUploadProgress.message
+                            : item.stageDetail || STAGE_LABELS[item.stage]}
                         </p>
                         <span className="font-mono text-xs font-semibold tabular-nums text-[#fcee0a] shrink-0">
-                          {item.progress}%
+                          {sendingAnalyzeId === item.id && cloudUploadProgress
+                            ? cloudUploadProgress.percent
+                            : item.progress}
+                          %
                         </span>
                       </div>
                       <div className="h-2 w-full overflow-hidden rounded-sm border border-[#00f0ff]/25 bg-[#05060a]">
                         <div
                           className="h-full cyber-energy-bar transition-transform duration-150 origin-left"
-                          style={{ transform: `scaleX(${Math.max(0.03, item.progress / 100)})` }}
+                          style={{
+                            transform: `scaleX(${Math.max(
+                              0.03,
+                              (sendingAnalyzeId === item.id && cloudUploadProgress
+                                ? cloudUploadProgress.percent
+                                : item.progress) / 100
+                            )})`,
+                          }}
                         />
                       </div>
                     </>

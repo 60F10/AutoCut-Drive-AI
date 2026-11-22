@@ -1,5 +1,14 @@
 import { useEffect, useState } from 'react';
-import { AlertTriangle, ArrowDown, ArrowUp, Check, Layers, Sparkles, X, Zap } from 'lucide-react';
+import {
+  AlertTriangle,
+  ArrowDown,
+  ArrowUp,
+  Check,
+  Cloud,
+  Layers,
+  X,
+  Zap,
+} from 'lucide-react';
 import type {
   EditStylePreset,
   ExportQuality,
@@ -33,6 +42,14 @@ interface MultiClipComposerModalProps {
     stylePreset: EditStylePreset,
     customInstruction: string
   ) => void;
+  onStartCloudAnalyze: (
+    orderedIds: string[],
+    projectName: string,
+    stylePreset: EditStylePreset,
+    customInstruction: string
+  ) => void;
+  cloudRenderConfigured: boolean;
+  canUseCloud: boolean;
   isProcessing: boolean;
 }
 
@@ -49,6 +66,9 @@ export function MultiClipComposerModal({
   onChangeExportQuality,
   onClose,
   onStartCombine,
+  onStartCloudAnalyze,
+  cloudRenderConfigured,
+  canUseCloud,
   isProcessing,
 }: MultiClipComposerModalProps) {
   const [orderedIds, setOrderedIds] = useState<string[]>([]);
@@ -99,6 +119,17 @@ export function MultiClipComposerModal({
     });
   };
 
+  const launchCloudAnalyze = () => {
+    if (orderedClips.length < 2) return;
+    setConfirmMobile1080p(false);
+    onStartCloudAnalyze(
+      orderedClips.map((c) => c.id),
+      projectName.trim(),
+      stylePreset,
+      customInstruction.trim()
+    );
+  };
+
   const launchCombine = () => {
     if (orderedClips.length < 2) return;
     setConfirmMobile1080p(false);
@@ -112,6 +143,19 @@ export function MultiClipComposerModal({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (orderedClips.length < 2) return;
+    if (cloudRenderConfigured && canUseCloud) {
+      launchCloudAnalyze();
+      return;
+    }
+    if (mobileRamGuard.shouldWarn && !confirmMobile1080p) {
+      setConfirmMobile1080p(true);
+      return;
+    }
+    launchCombine();
+  };
+
+  const handleFastAnalyzeClick = () => {
     if (orderedClips.length < 2) return;
     if (mobileRamGuard.shouldWarn && !confirmMobile1080p) {
       setConfirmMobile1080p(true);
@@ -148,9 +192,9 @@ export function MultiClipComposerModal({
                 Combinar en 1 vídeo (Modo Multi-Clip)
               </h2>
               <p className="text-xs text-[#94A3B8]">
-                Gemini mezclará los mejores momentos de los{' '}
+                En la nube, Whisper transcribe los{' '}
                 <span className="font-mono font-semibold text-[#00f0ff]">{orderedClips.length}</span>{' '}
-                clips en una sola historia vertical.
+                clips y Gemini monta un guion global con principio, nudo y final.
               </p>
             </div>
           </div>
@@ -350,23 +394,47 @@ export function MultiClipComposerModal({
               </button>
             </div>
           ) : (
-            <div className="flex items-center justify-end gap-2.5">
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-end gap-2">
               <button
                 type="button"
                 onClick={onClose}
                 disabled={isProcessing}
-                className="h-11 rounded-md border border-[#00f0ff]/25 px-4 text-xs font-medium text-[#CFE2FF] hover:border-[#00f0ff]/60 hover:bg-[#00f0ff]/10 transition-colors whitespace-nowrap"
+                className="h-11 rounded-md border border-[#00f0ff]/25 px-3.5 text-xs font-medium text-[#CFE2FF] hover:border-[#00f0ff]/60 hover:bg-[#00f0ff]/10 transition-colors whitespace-nowrap"
               >
                 Cancelar
               </button>
               <button
-                type="submit"
+                type="button"
                 data-testid="modal-start-combine-btn"
+                onClick={handleFastAnalyzeClick}
                 disabled={isProcessing || orderedClips.length < 2}
-                className="inline-flex h-11 items-center gap-2 cyber-btn-magenta px-5 text-xs disabled:opacity-45 whitespace-nowrap"
+                title="Análisis rápido en el navegador solo con fotogramas (sin audio)"
+                className="inline-flex h-11 items-center justify-center gap-1.5 rounded-md border border-[#fcee0a]/35 bg-[#fcee0a]/[0.08] px-3.5 text-xs font-medium text-[#FEF08A] hover:border-[#fcee0a]/65 hover:bg-[#fcee0a]/15 disabled:opacity-45 transition-colors whitespace-nowrap"
               >
-                <Sparkles className="h-3.5 w-3.5" />
-                Combinar y editar ({orderedClips.length})
+                <Zap className="h-3.5 w-3.5" />
+                Análisis rápido (sin audio)
+              </button>
+              <button
+                type="button"
+                data-testid="modal-start-cloud-analyze-btn"
+                onClick={launchCloudAnalyze}
+                disabled={
+                  !cloudRenderConfigured ||
+                  !canUseCloud ||
+                  isProcessing ||
+                  orderedClips.length < 2
+                }
+                title={
+                  !cloudRenderConfigured
+                    ? 'Configura GitHub Actions y GEMINI_API_KEY (ver Ajustes)'
+                    : !canUseCloud
+                    ? 'Conecta Google Drive y configura tu carpeta en Ajustes'
+                    : 'Whisper + Gemini multimodal viendo vídeo y audio en GitHub Actions'
+                }
+                className="inline-flex h-11 items-center justify-center gap-2 cyber-btn-primary px-4 text-xs font-semibold disabled:opacity-45 whitespace-nowrap"
+              >
+                <Cloud className="h-3.5 w-3.5" />
+                Analizar en la nube ({orderedClips.length})
               </button>
             </div>
           )}

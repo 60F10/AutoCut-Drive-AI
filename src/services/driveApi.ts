@@ -314,6 +314,57 @@ export async function uploadRenderJobManifest(
 }
 
 /**
+ * Uploads `analyze_<jobId>.json` (`kind: "analyze"`) into `_AutoCut_Jobs` inside the configured Drive folder.
+ */
+export async function uploadAnalyzeJobManifest(
+  rootFolderId: string,
+  manifest: import('../types').AnalyzeJobManifest,
+  accessToken: string
+): Promise<DriveUploadResult> {
+  const t0 = performance.now();
+  const { jobsFolderId } = await ensurePcRenderFolders(rootFolderId, accessToken);
+  const fileName = `analyze_${manifest.jobId}.json`;
+  const jsonContent = JSON.stringify(manifest, null, 2);
+
+  const boundary = `autocut_analyze_${Date.now()}`;
+  const metadata = {
+    name: fileName,
+    parents: [jobsFolderId],
+    mimeType: 'application/json',
+  };
+
+  const multipartBody =
+    `--${boundary}\r\n` +
+    'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
+    `${JSON.stringify(metadata)}\r\n` +
+    `--${boundary}\r\n` +
+    'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
+    `${jsonContent}\r\n` +
+    `--${boundary}--`;
+
+  const url = `${DRIVE_UPLOAD_BASE}/files?uploadType=multipart&fields=id,name,webViewLink,size`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': `multipart/related; boundary=${boundary}`,
+    },
+    body: multipartBody,
+  });
+
+  await assertDriveOk(res, 'Subir manifiesto de análisis en la nube');
+  const result = (await res.json()) as DriveUploadResult;
+  logInfo('Nube', 'Manifiesto de análisis subido a _AutoCut_Jobs', {
+    jobId: manifest.jobId,
+    archivo: fileName,
+    clips: manifest.sourceFiles.length,
+    whisperModel: manifest.options.whisperModel || 'small',
+    ms: Math.round(performance.now() - t0),
+  });
+  return result;
+}
+
+/**
  * Ensures `_AutoCut_Jobs/_sources/` exists for temporary uploads of local clips before cloud rendering.
  */
 export async function ensureCloudSourcesSubfolder(
@@ -463,13 +514,15 @@ export async function dispatchCloudRenderJob(jobFileId: string): Promise<{ ok: t
 
 export interface PcRenderDriveSnapshot {
   jobs: import('../types').PcJobSyncEntry[];
+  analyzeJobs: import('../types').AnalyzeJobSyncEntry[];
   outputs: DriveFileMeta[];
   jobsFolderId: string | null;
   outputFolderId: string | null;
 }
 
 /**
- * Reads `job_*.json` statuses from `_AutoCut_Jobs` and lists rendered `.mp4` files in `_AutoCut_Output`.
+ * Reads `job_*.json` and `analyze_*.json` statuses from `_AutoCut_Jobs`
+ * and lists rendered `.mp4` files in `_AutoCut_Output`.
  */
 export async function listPcRenderJobsAndOutputs(
   rootFolderId: string,
@@ -482,7 +535,7 @@ export async function listPcRenderJobsAndOutputs(
   ]);
 
   if (!jobsFolderId && !outputFolderId) {
-    return { jobs: [], outputs: [], jobsFolderId: null, outputFolderId: null };
+    return { jobs: [], analyzeJobs: [], outputs: [], jobsFolderId: null, outputFolderId: null };
   }
 
   const [jobFiles, outputFiles] = await Promise.all([
@@ -496,13 +549,19 @@ export async function listPcRenderJobsAndOutputs(
     outputByLowerName.set(out.name.toLowerCase(), out);
   }
 
-  const manifestFiles = jobFiles
+  const renderManifestFiles = jobFiles
     .filter((f) => /^job_.*\.json$/i.test(f.name))
     .slice(0, 25);
 
+  const analyzeManifestFiles = jobFiles
+    .filter((f) => /^analyze_.*\.json$/i.test(f.name))
+    .slice(0, 25);
+
   const jobs: import('../types').PcJobSyncEntry[] = [];
-  await Promise.all(
-    manifestFiles.map(async (file) => {
+  const analyzeJobs: import('../types').AnalyzeJobSyncEntry[] = [];
+
+  await Promise.all([
+    ...renderManifestFiles.map(async (file) => {
       try {
         const res = await fetch(
           `${DRIVE_API_BASE}/files/${encodeURIComponent(file.id)}?alt=media`,
@@ -515,6 +574,7 @@ export async function listPcRenderJobsAndOutputs(
         if (!res.ok) return;
         const parsed = (await res.json()) as import('../types').RenderJobManifest;
         if (!parsed || typeof parsed !== 'object' || !parsed.jobId || !parsed.status) return;
+        if ((parsed as { kind?: string }).kind === 'analyze') return;
 
         const matchedOutput =
           (parsed.outputFileName
@@ -538,8 +598,40 @@ export async function listPcRenderJobsAndOutputs(
       } catch {
         // Ignore temporarily half-synced or unreadable JSON files
       }
-    })
-  );
+    }),
+    ...analyzeManifestFiles.map(async (file) => {
+      try {
+        const res = await fetch(
+          `${DRIVE_API_BASE}/files/${encodeURIComponent(file.id)}?alt=media`,
+          {
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+            },
+          }
+        );
+        if (!res.ok) return;
+        const parsed = (await res.json()) as import('../types').AnalyzeJobManifest;
+        if (
+          !parsed ||
+          typeof parsed !== 'object' ||
+          parsed.kind !== 'analyze' ||
+          !parsed.jobId ||
+          !parsed.status
+        ) {
+          return;
+        }
+
+        analyzeJobs.push({
+          manifest: parsed,
+          jobFileId: file.id,
+          jobFileName: file.name,
+          modifiedTime: file.modifiedTime,
+        });
+      } catch {
+        // Ignore temporarily half-synced or unreadable JSON files
+      }
+    }),
+  ]);
 
   jobs.sort((a, b) => {
     const aMs = Date.parse(a.manifest.updatedAt || a.manifest.createdAt || a.modifiedTime || '') || 0;
@@ -547,12 +639,19 @@ export async function listPcRenderJobsAndOutputs(
     return bMs - aMs;
   });
 
-  logInfo('Drive', 'Estado de trabajos PC sincronizado', {
-    trabajos: jobs.length,
+  analyzeJobs.sort((a, b) => {
+    const aMs = Date.parse(a.manifest.updatedAt || a.manifest.createdAt || a.modifiedTime || '') || 0;
+    const bMs = Date.parse(b.manifest.updatedAt || b.manifest.createdAt || b.modifiedTime || '') || 0;
+    return bMs - aMs;
+  });
+
+  logInfo('Drive', 'Estado de trabajos remotos sincronizado', {
+    renders: jobs.length,
+    analisis: analyzeJobs.length,
     completados: jobs.filter((j) => j.manifest.status === 'completed').length,
     outputsMp4: outputs.length,
     ms: Math.round(performance.now() - t0),
   });
 
-  return { jobs, outputs, jobsFolderId, outputFolderId };
+  return { jobs, analyzeJobs, outputs, jobsFolderId, outputFolderId };
 }
