@@ -11,9 +11,55 @@ const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.webm']);
 const EDITED_MARKER = '_EDITADO';
 
 export const MOBILE_RAM_WARNING_BYTES = 200 * 1024 * 1024; // 200 MB
+export const HEAVY_VIDEO_DURATION_SEC = 360; // 6 minutes
+export const ULTRA_HD_MIN_LONG_EDGE = 3840; // 4K UHD
 
 export function exceedsMobileRamThreshold(totalBytes: number): boolean {
   return totalBytes > MOBILE_RAM_WARNING_BYTES;
+}
+
+export interface HeavyVideoAssessment {
+  isHeavy: boolean;
+  reasons: string[];
+  message: string | null;
+}
+
+/**
+ * Evaluates whether a raw video file is likely to stress mobile browser RAM
+ * (e.g. > 200 MB, 4K resolution, or > 6 minutes long) and returns a friendly warning.
+ */
+export function evaluateHeavyVideoWarning(input: {
+  sizeBytes?: number;
+  durationSec?: number;
+  width?: number;
+  height?: number;
+}): HeavyVideoAssessment {
+  const sizeBytes = Math.max(0, Number(input.sizeBytes) || 0);
+  const durationSec = Math.max(0, Number(input.durationSec) || 0);
+  const width = Math.max(0, Number(input.width) || 0);
+  const height = Math.max(0, Number(input.height) || 0);
+  const longEdge = Math.max(width, height);
+
+  const reasons: string[] = [];
+  if (sizeBytes > MOBILE_RAM_WARNING_BYTES) {
+    reasons.push(`pesa ${formatBytes(sizeBytes)} (> 200 MB)`);
+  }
+  if (longEdge >= ULTRA_HD_MIN_LONG_EDGE) {
+    reasons.push(`resolución 4K (${width}×${height})`);
+  }
+  if (durationSec > HEAVY_VIDEO_DURATION_SEC) {
+    reasons.push(`dura ${formatDurationHuman(durationSec)} (> 6 min)`);
+  }
+
+  if (reasons.length === 0) {
+    return { isHeavy: false, reasons: [], message: null };
+  }
+
+  return {
+    isHeavy: true,
+    reasons,
+    message: `Vídeo bruto pesado detectado (${reasons.join(', ')}). En móvil te recomendamos usar "720p móvil" y cerrar otras pestañas para no saturar la RAM del navegador.`,
+  };
 }
 
 export interface StylePresetMeta {
@@ -114,6 +160,9 @@ export interface ExportQualityProfile {
   fps: number;
   preset: 'ultrafast' | 'veryfast';
   crf: string;
+  maxrate: string;
+  bufsize: string;
+  h264Profile: 'main' | 'high';
   audioBitrate: '128k' | '192k';
 }
 
@@ -122,24 +171,30 @@ export const EXPORT_QUALITY_PROFILES: Record<ExportQuality, ExportQualityProfile
     id: 'mobile_fast',
     label: 'Rápido móvil — 720p',
     shortLabel: '720p móvil',
-    description: '720×1280 · 30 fps · ultrafast · CRF 26 · AAC 128k (menos RAM en iPhone/móvil)',
+    description: '720×1280 · 30 fps · ultrafast · CRF 26 · max 3M · AAC 128k (menos RAM en móvil)',
     width: 720,
     height: 1280,
     fps: 30,
     preset: 'ultrafast',
     crf: '26',
+    maxrate: '3M',
+    bufsize: '6M',
+    h264Profile: 'main',
     audioBitrate: '128k',
   },
   high_1080p: {
     id: 'high_1080p',
     label: 'Máxima calidad — 1080p',
     shortLabel: '1080p HD',
-    description: '1080×1920 · 30 fps · veryfast · CRF 21 · AAC 192k (ideal para PC)',
+    description: '1080×1920 · 30 fps · veryfast · CRF 21 · max 6M TikTok · AAC 192k',
     width: 1080,
     height: 1920,
     fps: 30,
     preset: 'veryfast',
     crf: '21',
+    maxrate: '6M',
+    bufsize: '12M',
+    h264Profile: 'high',
     audioBitrate: '192k',
   },
 };
@@ -499,10 +554,18 @@ export function buildFfmpegFilterComplex(
     ...(hasAudio ? ['-map', '[outa]'] : ['-an']),
     '-c:v',
     'libx264',
+    '-profile:v',
+    profile.h264Profile,
+    '-level',
+    '4.1',
     '-preset',
     profile.preset,
     '-crf',
     profile.crf,
+    '-maxrate',
+    profile.maxrate,
+    '-bufsize',
+    profile.bufsize,
     '-pix_fmt',
     'yuv420p',
     '-r',
@@ -592,10 +655,18 @@ export function buildMultiClipFfmpegFilterComplex(
     ...(includeAudio ? ['-map', '[outa]'] : ['-an']),
     '-c:v',
     'libx264',
+    '-profile:v',
+    profile.h264Profile,
+    '-level',
+    '4.1',
     '-preset',
     profile.preset,
     '-crf',
     profile.crf,
+    '-maxrate',
+    profile.maxrate,
+    '-bufsize',
+    profile.bufsize,
     '-pix_fmt',
     'yuv420p',
     '-r',

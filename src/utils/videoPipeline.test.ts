@@ -12,6 +12,7 @@ import {
   computeQueueAnalytics,
   detectDefaultExportQuality,
   detectPendingVideos,
+  evaluateHeavyVideoWarning,
   exceedsMobileRamThreshold,
   extractDriveFolderId,
   formatBytes,
@@ -106,6 +107,8 @@ test('buildFfmpegFilterComplex supports 720p mobile_fast ultrafast and 1080p hig
   assert.ok(mobileBuilt.filterComplex.endsWith('[v0][a0][v1][a1]concat=n=2:v=1:a=1[outv][outa]'));
   assert.equal(mobileBuilt.args[mobileBuilt.args.indexOf('-preset') + 1], 'ultrafast');
   assert.equal(mobileBuilt.args[mobileBuilt.args.indexOf('-crf') + 1], '26');
+  assert.equal(mobileBuilt.args[mobileBuilt.args.indexOf('-maxrate') + 1], '3M');
+  assert.equal(mobileBuilt.args[mobileBuilt.args.indexOf('-bufsize') + 1], '6M');
   assert.equal(mobileBuilt.args[mobileBuilt.args.indexOf('-b:a') + 1], '128k');
 
   const hdBuilt = buildFfmpegFilterComplex(cuts, 'raw.mov', 'out.mp4', true, 'high_1080p');
@@ -114,6 +117,9 @@ test('buildFfmpegFilterComplex supports 720p mobile_fast ultrafast and 1080p hig
   assert.ok(hdBuilt.filterComplex.includes('pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,fps=30,format=yuv420p,setsar=1[v0]'));
   assert.equal(hdBuilt.args[hdBuilt.args.indexOf('-preset') + 1], 'veryfast');
   assert.equal(hdBuilt.args[hdBuilt.args.indexOf('-crf') + 1], '21');
+  assert.equal(hdBuilt.args[hdBuilt.args.indexOf('-maxrate') + 1], '6M');
+  assert.equal(hdBuilt.args[hdBuilt.args.indexOf('-bufsize') + 1], '12M');
+  assert.equal(hdBuilt.args[hdBuilt.args.indexOf('-profile:v') + 1], 'high');
   assert.equal(hdBuilt.args[hdBuilt.args.indexOf('-b:a') + 1], '192k');
 });
 
@@ -266,6 +272,28 @@ test('computeQueueAnalytics groups videos by day, computes saved footage time, a
 test('exceedsMobileRamThreshold triggers strictly above 200 MB', () => {
   assert.equal(exceedsMobileRamThreshold(MOBILE_RAM_WARNING_BYTES), false);
   assert.equal(exceedsMobileRamThreshold(MOBILE_RAM_WARNING_BYTES + 1), true);
+});
+
+test('evaluateHeavyVideoWarning detects heavy size, 4K resolution, and long duration', () => {
+  const light = evaluateHeavyVideoWarning({
+    sizeBytes: 35 * 1024 * 1024,
+    durationSec: 90,
+    width: 1080,
+    height: 1920,
+  });
+  assert.equal(light.isHeavy, false);
+  assert.equal(light.message, null);
+
+  const heavy4k = evaluateHeavyVideoWarning({
+    sizeBytes: 260 * 1024 * 1024,
+    durationSec: 420,
+    width: 2160,
+    height: 3840,
+  });
+  assert.equal(heavy4k.isHeavy, true);
+  assert.equal(heavy4k.reasons.length, 3);
+  assert.ok(heavy4k.message?.includes('4K'));
+  assert.ok(heavy4k.message?.includes('720p móvil'));
 });
 
 test('formatSeconds, formatDurationHuman, and formatBytes produce clean deterministic labels', () => {

@@ -1,7 +1,12 @@
 node_modules/
 build/
 dist/
+dev-dist/
 coverage/
+.vite/
+.playwright-cli/
+*.tsbuildinfo
+server.js
 .DS_Store
 *.log
 .env*

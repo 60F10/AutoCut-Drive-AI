@@ -14,6 +14,8 @@ const FFMPEG_CORE_CDNS = [
   'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd',
 ];
 
+const FFMPEG_TEMP_EXTENSIONS = ['.mp4', '.mov', '.webm', '.m4a', '.aac', '.tmp', '.txt'];
+
 let ffmpegInstance: FFmpeg | null = null;
 let loadPromise: Promise<FFmpeg> | null = null;
 
@@ -49,7 +51,38 @@ async function getLoadedFfmpeg(onStatus?: (msg: string) => void): Promise<FFmpeg
   return loadPromise;
 }
 
-export async function readVideoDuration(blob: Blob): Promise<number> {
+/**
+ * Strictly purges tracked files AND sweeps any leftover media/temp artifacts
+ * in the FFmpeg.wasm virtual root filesystem to keep mobile browser RAM low.
+ */
+async function purgeFfmpegVirtualFs(ffmpeg: FFmpeg, trackedFiles: string[] = []): Promise<void> {
+  const candidates = new Set<string>(trackedFiles.filter(Boolean));
+
+  try {
+    const entries = await ffmpeg.listDir('/');
+    for (const entry of entries) {
+      if (entry.isDir) continue;
+      const lower = entry.name.toLowerCase();
+      if (FFMPEG_TEMP_EXTENSIONS.some((ext) => lower.endsWith(ext))) {
+        candidates.add(entry.name);
+      }
+    }
+  } catch {
+    // Fallback to deleting tracked files directly if listDir is unavailable
+  }
+
+  await Promise.allSettled(
+    Array.from(candidates).map((fileName) => ffmpeg.deleteFile(fileName))
+  );
+}
+
+export interface VideoMetadataInfo {
+  durationSec: number;
+  width: number;
+  height: number;
+}
+
+export async function inspectVideoMetadata(blob: Blob): Promise<VideoMetadataInfo> {
   return new Promise((resolve) => {
     const url = URL.createObjectURL(blob);
     const video = document.createElement('video');
@@ -63,18 +96,25 @@ export async function readVideoDuration(blob: Blob): Promise<number> {
     };
 
     video.onloadedmetadata = () => {
-      const duration = Number.isFinite(video.duration) ? video.duration : 0;
+      const durationSec = Number.isFinite(video.duration) ? video.duration : 0;
+      const width = Number.isFinite(video.videoWidth) ? video.videoWidth : 0;
+      const height = Number.isFinite(video.videoHeight) ? video.videoHeight : 0;
       cleanup();
-      resolve(duration);
+      resolve({ durationSec, width, height });
     };
 
     video.onerror = () => {
       cleanup();
-      resolve(0);
+      resolve({ durationSec: 0, width: 0, height: 0 });
     };
 
     video.src = url;
   });
+}
+
+export async function readVideoDuration(blob: Blob): Promise<number> {
+  const meta = await inspectVideoMetadata(blob);
+  return meta.durationSec;
 }
 
 export interface RenderProgress {
@@ -83,7 +123,8 @@ export interface RenderProgress {
 }
 
 /**
- * Renders single-clip selected cuts into a clean H.264 + AAC MP4 preserving 9:16 vertical orientation.
+ * Renders single-clip selected cuts into a clean H.264 + AAC MP4 preserving 9:16 vertical orientation,
+ * balanced TikTok/Reels bitrate caps, and strict virtual FS cleanup in `finally`.
  */
 export async function renderCutsWithFfmpeg(
   sourceBlob: Blob,
@@ -95,9 +136,10 @@ export async function renderCutsWithFfmpeg(
   const ffmpeg = await getLoadedFfmpeg((msg) => onProgress?.({ percent: 5, message: msg }));
   const profile = EXPORT_QUALITY_PROFILES[exportQuality];
 
+  const jobId = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
   const ext = getExtension(originalFileName) || '.mp4';
-  const inputName = `input${ext}`;
-  const outputName = 'output.mp4';
+  const inputName = `in_${jobId}${ext}`;
+  const outputName = `out_${jobId}.mp4`;
 
   const progressHandler = ({ progress }: { progress: number }) => {
     const pct = Math.max(10, Math.min(98, Math.round(progress * 100)));
@@ -110,6 +152,9 @@ export async function renderCutsWithFfmpeg(
   ffmpeg.on('progress', progressHandler);
 
   try {
+    // Clear any residual artifacts from previous aborted renders before allocating memory
+    await purgeFfmpegVirtualFs(ffmpeg);
+
     onProgress?.({ percent: 8, message: 'Preparando vídeo en memoria de FFmpeg...' });
     await ffmpeg.writeFile(inputName, await fetchFile(sourceBlob));
 
@@ -124,7 +169,7 @@ export async function renderCutsWithFfmpeg(
       );
       onProgress?.({
         percent: 12,
-        message: `Uniendo ${activeCount} cortes (${profile.shortLabel} · ${profile.preset})...`,
+        message: `Uniendo ${activeCount} cortes (${profile.shortLabel} · ${profile.maxrate})...`,
       });
       exitCode = await ffmpeg.exec(args);
     } catch {
@@ -132,6 +177,7 @@ export async function renderCutsWithFfmpeg(
     }
 
     if (exitCode !== 0) {
+      await ffmpeg.deleteFile(outputName).catch(() => {});
       const { args, activeCount } = buildFfmpegFilterComplex(
         cuts,
         inputName,
@@ -146,7 +192,7 @@ export async function renderCutsWithFfmpeg(
       const fallbackCode = await ffmpeg.exec(args);
       if (fallbackCode !== 0) {
         throw new Error(
-          'FFmpeg.wasm no pudo renderizar los cortes. Comprueba que el códec del vídeo sea compatible (H.264 / MP4 / WebM).'
+          'FFmpeg.wasm no pudo renderizar los cortes. Comprueba que el códec sea compatible o prueba el modo "720p móvil" para ahorrar RAM.'
         );
       }
     }
@@ -159,8 +205,7 @@ export async function renderCutsWithFfmpeg(
     return new Blob([bytes.buffer], { type: 'video/mp4' });
   } finally {
     ffmpeg.off('progress', progressHandler);
-    await ffmpeg.deleteFile(inputName).catch(() => {});
-    await ffmpeg.deleteFile(outputName).catch(() => {});
+    await purgeFfmpegVirtualFs(ffmpeg, [inputName, outputName]);
   }
 }
 
@@ -171,7 +216,8 @@ export interface MultiClipFfmpegSource {
 
 /**
  * Renders multi-clip cuts referencing each input by clip_index, normalizing every clip
- * to 1080x1920 vertical, 30fps, yuv420p before concat.
+ * to 1080x1920 (or 720x1280 mobile_fast) vertical 9:16, 30fps, yuv420p with balanced bitrate caps,
+ * and purging all virtual FS inputs/outputs inside `finally`.
  */
 export async function renderMultiClipCutsWithFfmpeg(
   sources: MultiClipFfmpegSource[],
@@ -182,8 +228,9 @@ export async function renderMultiClipCutsWithFfmpeg(
   const ffmpeg = await getLoadedFfmpeg((msg) => onProgress?.({ percent: 4, message: msg }));
   const profile = EXPORT_QUALITY_PROFILES[exportQuality];
 
+  const jobId = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
   const inputNames: string[] = [];
-  const outputName = 'combined_output.mp4';
+  const outputName = `combined_${jobId}.mp4`;
 
   const progressHandler = ({ progress }: { progress: number }) => {
     const pct = Math.max(15, Math.min(98, Math.round(progress * 100)));
@@ -196,9 +243,11 @@ export async function renderMultiClipCutsWithFfmpeg(
   ffmpeg.on('progress', progressHandler);
 
   try {
+    await purgeFfmpegVirtualFs(ffmpeg);
+
     for (let i = 0; i < sources.length; i += 1) {
       const ext = getExtension(sources[i].originalFileName) || '.mp4';
-      const fileName = `input_${i}${ext}`;
+      const fileName = `mc_${jobId}_${i}${ext}`;
       inputNames.push(fileName);
       onProgress?.({
         percent: Math.round(6 + ((i + 1) / sources.length) * 8),
@@ -218,7 +267,7 @@ export async function renderMultiClipCutsWithFfmpeg(
       );
       onProgress?.({
         percent: 16,
-        message: `Renderizando ${activeCount} cortes de ${sources.length} clips (${profile.width}×${profile.height} · ${profile.preset})...`,
+        message: `Renderizando ${activeCount} cortes de ${sources.length} clips (${profile.width}×${profile.height} · ${profile.maxrate})...`,
       });
       exitCode = await ffmpeg.exec(args);
     } catch {
@@ -226,6 +275,7 @@ export async function renderMultiClipCutsWithFfmpeg(
     }
 
     if (exitCode !== 0) {
+      await ffmpeg.deleteFile(outputName).catch(() => {});
       const { args, activeCount } = buildMultiClipFfmpegFilterComplex(
         cuts,
         inputNames,
@@ -253,9 +303,6 @@ export async function renderMultiClipCutsWithFfmpeg(
     return new Blob([bytes.buffer], { type: 'video/mp4' });
   } finally {
     ffmpeg.off('progress', progressHandler);
-    await Promise.allSettled([
-      ...inputNames.map((name) => ffmpeg.deleteFile(name)),
-      ffmpeg.deleteFile(outputName),
-    ]);
+    await purgeFfmpegVirtualFs(ffmpeg, [...inputNames, outputName]);
   }
 }
