@@ -7,6 +7,7 @@ import type {
 } from '../types';
 import {
   calculateSelectedDuration,
+  formatPhaseError,
   toLocalDateKey,
 } from '../utils/videoPipeline';
 import {
@@ -279,8 +280,11 @@ export function useStudioEditor({
           maybePromptDriveUpload(itemId, fileName, editedBlob.size);
         }
       } catch (err) {
-        const message =
-          err instanceof Error ? err.message : 'Error al renderizar los cortes.';
+        const message = formatPhaseError(
+          'FFmpeg',
+          err instanceof Error ? err.message : 'Error al renderizar los cortes.'
+        );
+        console.error('[FFmpeg] Error durante el renderizado en Studio:', err);
         onError(message);
         updateQueueItem(itemId, {
           stage: target.completedAt ? 'completed' : 'review',

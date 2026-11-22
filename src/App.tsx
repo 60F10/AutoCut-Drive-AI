@@ -33,27 +33,34 @@ export default function App() {
       return;
     }
 
+    const extractPhasePrefix = (text: string): { prefix: string; body: string } => {
+      const m = text.trim().match(/^(\[(?:Drive|Extracción frames|Análisis IA|FFmpeg)\])\s*(.*)$/i);
+      return m ? { prefix: m[1], body: m[2] } : { prefix: '', body: text };
+    };
+
     if (typeof error === 'string') {
-      const parsed = parseHumanReadableApiError(error);
+      const { prefix, body } = extractPhasePrefix(error);
+      const parsed = parseHumanReadableApiError(body);
       if (parsed.technicalDetail) {
         console.error('[AutoCut Drive AI] Error técnico:', parsed.technicalDetail);
       }
       setBannerError({
-        message: parsed.userMessage,
+        message: prefix ? `${prefix} ${parsed.userMessage}` : parsed.userMessage,
         technicalDetail: parsed.technicalDetail,
         actionHint: parsed.actionHint,
       });
       return;
     }
 
-    const parsed = parseHumanReadableApiError(error.message);
+    const { prefix, body } = extractPhasePrefix(error.message);
+    const parsed = parseHumanReadableApiError(body);
     const technicalDetail = error.technicalDetail || parsed.technicalDetail;
     const actionHint = error.actionHint || parsed.actionHint;
     if (technicalDetail) {
       console.error('[AutoCut Drive AI] Error técnico:', technicalDetail);
     }
     setBannerError({
-      message: parsed.userMessage,
+      message: prefix ? `${prefix} ${parsed.userMessage}` : parsed.userMessage,
       technicalDetail,
       actionHint,
     });

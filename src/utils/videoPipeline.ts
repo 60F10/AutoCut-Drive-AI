@@ -1332,8 +1332,22 @@ export function parseHumanReadableApiError(rawError: unknown): ParsedApiError {
     };
   }
 
-  // 6. Network connectivity errors
+  // 6. Network / timeout / Safari "Load failed" connectivity errors
   if (
+    diagnostic.includes('aborterror') ||
+    diagnostic.includes('timed out') ||
+    diagnostic.includes('tiempo de espera') ||
+    diagnostic.includes('timeout')
+  ) {
+    return {
+      userMessage:
+        'Tiempo de espera agotado al contactar con el servidor. Comprueba tu conexión e inténtalo de nuevo.',
+      technicalDetail: trimmed,
+    };
+  }
+
+  if (
+    diagnostic.includes('load failed') ||
     diagnostic.includes('failed to fetch') ||
     diagnostic.includes('networkerror') ||
     diagnostic.includes('econnrefused') ||
@@ -1341,7 +1355,7 @@ export function parseHumanReadableApiError(rawError: unknown): ParsedApiError {
   ) {
     return {
       userMessage:
-        'No se pudo conectar con el servidor. Comprueba tu conexión a internet e inténtalo de nuevo.',
+        'Conexión interrumpida con el servidor (Safari/red). Comprueba tu conexión a internet e inténtalo de nuevo.',
       technicalDetail: trimmed,
     };
   }
@@ -1361,3 +1375,271 @@ export function parseHumanReadableApiError(rawError: unknown): ParsedApiError {
     userMessage: trimmed,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Lightweight Client-Side Frame Sampling & < 2 MB Payload Budget Helpers
+// ---------------------------------------------------------------------------
+
+export const AI_FRAME_MIN_COUNT = 12;
+export const AI_FRAME_MAX_COUNT = 16;
+export const AI_FRAME_TARGET_WIDTH = 480;
+export const AI_FRAME_JPEG_QUALITY = 0.55;
+export const AI_MAX_JSON_PAYLOAD_BYTES = 2 * 1024 * 1024; // 2 MB hard ceiling
+
+export type ErrorPhase = 'Drive' | 'Extracción frames' | 'Análisis IA' | 'FFmpeg';
+
+const EXISTING_PHASE_PREFIX = /^\[(Drive|Extracción frames|Análisis IA|FFmpeg)\]\s*/i;
+
+/**
+ * Prefixes an error message with the exact pipeline phase ([Drive], [Extracción frames],
+ * [Análisis IA], [FFmpeg]) without duplicating an existing phase tag.
+ */
+export function formatPhaseError(phase: ErrorPhase, detail: string): string {
+  const clean = (detail || '').trim();
+  if (!clean) {
+    return `[${phase}] Error inesperado.`;
+  }
+  if (EXISTING_PHASE_PREFIX.test(clean)) {
+    return clean;
+  }
+  return `[${phase}] ${clean}`;
+}
+
+export interface ExtractedVideoFrame {
+  timestampSec: number;
+  dataBase64: string;
+  mimeType: 'image/jpeg';
+  width: number;
+  height: number;
+}
+
+/**
+ * Computes evenly distributed seek timestamps across a video timeline.
+ * Always produces between 12 and 16 timestamps (capped strictly at AI_FRAME_MAX_COUNT = 16),
+ * or fewer only when duration is 0 / unknown.
+ */
+export function computeFrameTimestamps(
+  durationSec: number,
+  targetFrames?: number
+): number[] {
+  const safeDuration = Number.isFinite(durationSec) && durationSec > 0 ? durationSec : 0;
+  if (safeDuration <= 0.1) {
+    return [0];
+  }
+
+  const autoCount =
+    safeDuration < 20 ? AI_FRAME_MIN_COUNT : safeDuration < 90 ? 14 : AI_FRAME_MAX_COUNT;
+  const count = Math.max(
+    1,
+    Math.min(AI_FRAME_MAX_COUNT, Math.round(targetFrames ?? autoCount))
+  );
+
+  if (count === 1) {
+    return [Number((safeDuration * 0.5).toFixed(2))];
+  }
+
+  // Slight inset from start & end so iOS Safari does not seek past EOF into a black frame
+  const startOffset = Math.min(0.15, safeDuration * 0.02);
+  const endLimit = Math.max(startOffset, safeDuration - Math.min(0.25, safeDuration * 0.03));
+  const span = Math.max(0, endLimit - startOffset);
+
+  const timestamps: number[] = [];
+  for (let i = 0; i < count; i += 1) {
+    const ratio = i / (count - 1);
+    const t = Number((startOffset + span * ratio).toFixed(2));
+    timestamps.push(t);
+  }
+  return timestamps;
+}
+
+/**
+ * Computes resized canvas dimensions capped to targetWidth (480px by default),
+ * preserving aspect ratio and ensuring even dimensions.
+ */
+export function computeScaledDimensions(
+  srcWidth: number,
+  srcHeight: number,
+  targetWidth: number = AI_FRAME_TARGET_WIDTH
+): { width: number; height: number } {
+  const safeSrcW = Number.isFinite(srcWidth) && srcWidth > 0 ? srcWidth : targetWidth;
+  const safeSrcH = Number.isFinite(srcHeight) && srcHeight > 0 ? srcHeight : Math.round(targetWidth * (16 / 9));
+  const maxW = Math.max(64, Math.round(targetWidth));
+
+  const scale = safeSrcW > maxW ? maxW / safeSrcW : 1;
+  const width = Math.max(2, Math.round((safeSrcW * scale) / 2) * 2);
+  const height = Math.max(2, Math.round((safeSrcH * scale) / 2) * 2);
+  return { width, height };
+}
+
+function downsampleEvenly<T>(items: T[], targetCount: number): T[] {
+  if (items.length <= targetCount) return items;
+  if (targetCount <= 1) return items.slice(0, 1);
+
+  const result: T[] = [];
+  for (let i = 0; i < targetCount; i += 1) {
+    const idx = Math.round((i * (items.length - 1)) / (targetCount - 1));
+    result.push(items[idx]);
+  }
+  return result;
+}
+
+export interface BudgetedAiPayload<T extends { frames: ExtractedVideoFrame[] }> {
+  payload: T;
+  serializedJson: string;
+  byteLength: number;
+  trimmedFrames: number;
+}
+
+/**
+ * Enforces strict frame count (<= 16) and JSON payload byte ceiling (< 2 MB)
+ * so the browser NEVER sends heavy buffers or triggers HTTP 413 on Cloud Run / proxies.
+ */
+export function enforceAiPayloadBudget<T extends { frames: ExtractedVideoFrame[] }>(
+  inputPayload: T,
+  maxBytes: number = AI_MAX_JSON_PAYLOAD_BYTES,
+  maxFrames: number = AI_FRAME_MAX_COUNT
+): BudgetedAiPayload<T> {
+  const originalCount = inputPayload.frames.length;
+  if (originalCount === 0) {
+    throw new Error(
+      formatPhaseError('Extracción frames', 'No se pudo extraer ningún fotograma del vídeo.')
+    );
+  }
+
+  const encoder = new TextEncoder();
+  let currentFrames = downsampleEvenly(inputPayload.frames, Math.max(1, Math.min(AI_FRAME_MAX_COUNT, maxFrames)));
+  let payload: T = { ...inputPayload, frames: currentFrames };
+  let serializedJson = JSON.stringify(payload);
+  let byteLength = encoder.encode(serializedJson).length;
+
+  while (byteLength > maxBytes && currentFrames.length > 1) {
+    const nextCount = Math.max(1, currentFrames.length - 1);
+    currentFrames = downsampleEvenly(currentFrames, nextCount);
+    payload = { ...inputPayload, frames: currentFrames };
+    serializedJson = JSON.stringify(payload);
+    byteLength = encoder.encode(serializedJson).length;
+  }
+
+  if (byteLength > maxBytes) {
+    throw new Error(
+      formatPhaseError(
+        'Extracción frames',
+        `El paquete de fotogramas (${formatBytes(byteLength)}) supera el límite seguro de ${formatBytes(maxBytes)}.`
+      )
+    );
+  }
+
+  return {
+    payload,
+    serializedJson,
+    byteLength,
+    trimmedFrames: Math.max(0, originalCount - currentFrames.length),
+  };
+}
+
+export interface PerClipEditPlanResult {
+  clipIndex: number;
+  fileName: string;
+  durationSec: number;
+  plan: GeminiEditPlan;
+}
+
+/**
+ * Merges individual per-clip Gemini edit plans into one coherent Multi-Clip plan,
+ * guaranteeing each clip was analyzed separately under the 2 MB payload limit.
+ */
+export function mergeMultiClipEditPlans(
+  perClipResults: PerClipEditPlanResult[],
+  options?: { projectName?: string; maxCombinedDurationSec?: number }
+): GeminiEditPlan {
+  const valid = perClipResults.filter((entry) => entry.plan && entry.plan.cortes.length > 0);
+  if (valid.length === 0) {
+    throw new Error(
+      formatPhaseError('Análisis IA', 'Ninguno de los clips devolvió cortes válidos para combinar.')
+    );
+  }
+
+  const maxCombinedDuration = options?.maxCombinedDurationSec ?? 60;
+  const tagFrequency = new Map<string, number>();
+
+  const taggedCuts: VideoCut[] = [];
+  const taggedSubtitles: SubtitleBlock[] = [];
+
+  for (const entry of valid) {
+    const tag = sanitizeEtiqueta(entry.plan.etiqueta);
+    tagFrequency.set(tag, (tagFrequency.get(tag) ?? 0) + 1);
+
+    entry.plan.cortes.forEach((cut, idx) => {
+      taggedCuts.push({
+        ...cut,
+        id: `mc-clip${entry.clipIndex}-cut${idx + 1}`,
+        clip_index: entry.clipIndex,
+        enabled: true,
+      });
+    });
+
+    if (entry.plan.subtitulos?.length) {
+      entry.plan.subtitulos.forEach((sub, idx) => {
+        taggedSubtitles.push({
+          ...sub,
+          id: `mc-clip${entry.clipIndex}-sub${idx + 1}`,
+          clip_index: entry.clipIndex,
+        });
+      });
+    }
+  }
+
+  // Keep highest-interest cuts per clip first, preserving natural clip flow when within budget
+  let selectedCuts = [...taggedCuts];
+  if (calculateSelectedDuration(selectedCuts) > maxCombinedDuration && selectedCuts.length > valid.length) {
+    // Score each cut so we keep at least the top cut from every clip, then fill remaining seconds
+    const mustKeepIds = new Set<string>();
+    for (const entry of valid) {
+      const fromClip = selectedCuts
+        .filter((c) => c.clip_index === entry.clipIndex)
+        .sort((a, b) => (b.puntuacion_interes ?? 7) - (a.puntuacion_interes ?? 7));
+      if (fromClip[0]) mustKeepIds.add(fromClip[0].id);
+    }
+
+    const prioritized = [...selectedCuts].sort((a, b) => {
+      const aMust = mustKeepIds.has(a.id) ? 1 : 0;
+      const bMust = mustKeepIds.has(b.id) ? 1 : 0;
+      if (aMust !== bMust) return bMust - aMust;
+      return (b.puntuacion_interes ?? 7) - (a.puntuacion_interes ?? 7);
+    });
+
+    const keptIds = new Set<string>();
+    let accSec = 0;
+    for (const cut of prioritized) {
+      const dur = Math.max(0, cut.end_sec - cut.start_sec);
+      if (mustKeepIds.has(cut.id) || accSec + dur <= maxCombinedDuration) {
+        keptIds.add(cut.id);
+        accSec += dur;
+      }
+    }
+
+    selectedCuts = selectedCuts.filter((cut) => keptIds.has(cut.id));
+  }
+
+  const bestTag =
+    Array.from(tagFrequency.entries()).sort((a, b) => b[1] - a[1])[0]?.[0] || 'COMBINADO';
+
+  const combinedTitle = options?.projectName?.trim()
+    ? `${options.projectName.trim()} — ${valid.map((v) => v.plan.titulo_interno).slice(0, 2).join(' · ')}`
+    : valid
+        .map((v) => v.plan.titulo_interno)
+        .filter(Boolean)
+        .slice(0, 2)
+        .join(' + ') || `Resumen combinado (${valid.length} clips)`;
+
+  const finalDuration = Math.max(1, Math.round(calculateSelectedDuration(selectedCuts)));
+
+  return {
+    etiqueta: sanitizeEtiqueta(bestTag),
+    titulo_interno: combinedTitle.slice(0, 140),
+    duracion_objetivo_seg: finalDuration,
+    cortes: selectedCuts,
+    ...(taggedSubtitles.length > 0 ? { subtitulos: taggedSubtitles } : {}),
+  };
+}
+

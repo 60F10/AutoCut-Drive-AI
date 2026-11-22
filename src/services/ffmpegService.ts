@@ -1,5 +1,5 @@
 import { FFmpeg } from '@ffmpeg/ffmpeg';
-import { fetchFile, toBlobURL } from '@ffmpeg/util';
+import { fetchFile } from '@ffmpeg/util';
 import type { ExportQuality, SubtitleBlock, TikTokEditOptions, VideoCut } from '../types';
 import {
   EXPORT_QUALITY_PROFILES,
@@ -7,17 +7,21 @@ import {
   buildFfmpegFilterComplex,
   buildMultiClipFfmpegFilterComplex,
   filterEditedCuts,
+  formatPhaseError,
   getExtension,
   normalizeTikTokOptions,
   remapSubtitlesToFinalTimeline,
   type FfmpegPipelineOptions,
 } from '../utils/videoPipeline';
 
-// Single-threaded @ffmpeg/core CDNs (does NOT require SharedArrayBuffer or COOP/COEP headers)
+// Single-threaded @ffmpeg/core UMD CDNs (compatible with iOS Safari without SharedArrayBuffer or COOP/COEP headers)
 const FFMPEG_CORE_CDNS = [
   'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd',
   'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd',
 ];
+
+const FFMPEG_ASSET_TIMEOUT_MS = 35_000;
+const METADATA_READ_TIMEOUT_MS = 6_000;
 
 const FFMPEG_TEMP_EXTENSIONS = [
   '.mp4',
@@ -34,32 +38,98 @@ const FFMPEG_TEMP_EXTENSIONS = [
 let ffmpegInstance: FFmpeg | null = null;
 let loadPromise: Promise<FFmpeg> | null = null;
 
+async function fetchFfmpegAssetAsBlobUrl(
+  url: string,
+  mimeType: string,
+  assetLabel: 'ffmpeg-core.js' | 'ffmpeg-core.wasm'
+): Promise<string> {
+  const controller = new AbortController();
+  const timerId = window.setTimeout(() => controller.abort(), FFMPEG_ASSET_TIMEOUT_MS);
+
+  try {
+    console.info(`[FFmpeg] Descargando ${assetLabel} desde ${url}`);
+    const response = await fetch(url, {
+      mode: 'cors',
+      credentials: 'omit',
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status} al descargar ${assetLabel} (${url})`);
+    }
+
+    const buf = await response.arrayBuffer();
+    if (buf.byteLength === 0) {
+      throw new Error(`${assetLabel} se descargó vacío (0 bytes) desde ${url}`);
+    }
+
+    console.info(
+      `[FFmpeg] ${assetLabel} cargado correctamente (${(buf.byteLength / (1024 * 1024)).toFixed(2)} MB)`
+    );
+    return URL.createObjectURL(new Blob([buf], { type: mimeType }));
+  } catch (err) {
+    const isAbort =
+      err instanceof DOMException
+        ? err.name === 'AbortError'
+        : err instanceof Error && err.name === 'AbortError';
+    const reason = isAbort
+      ? `Tiempo de espera agotado (${Math.round(FFMPEG_ASSET_TIMEOUT_MS / 1000)}s) cargando ${assetLabel}`
+      : err instanceof Error
+      ? err.message
+      : String(err);
+    console.error(`[FFmpeg] Error cargando ${assetLabel} desde ${url}:`, err);
+    throw new Error(`Fallo al cargar ${assetLabel}: ${reason}`);
+  } finally {
+    window.clearTimeout(timerId);
+  }
+}
+
 async function getLoadedFfmpeg(onStatus?: (msg: string) => void): Promise<FFmpeg> {
   if (ffmpegInstance?.loaded) return ffmpegInstance;
   if (loadPromise) return loadPromise;
 
   loadPromise = (async () => {
     const instance = new FFmpeg();
-    let lastError: unknown = null;
+    const attemptErrors: string[] = [];
 
     for (const baseURL of FFMPEG_CORE_CDNS) {
+      let coreURL: string | null = null;
+      let wasmURL: string | null = null;
       try {
-        onStatus?.('Cargando motor FFmpeg.wasm (single-thread)...');
-        const coreURL = await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript');
-        const wasmURL = await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm');
+        onStatus?.('Cargando motor FFmpeg.wasm single-thread (ffmpeg-core.js)...');
+        coreURL = await fetchFfmpegAssetAsBlobUrl(
+          `${baseURL}/ffmpeg-core.js`,
+          'text/javascript',
+          'ffmpeg-core.js'
+        );
+
+        onStatus?.('Cargando núcleo binario FFmpeg.wasm (ffmpeg-core.wasm)...');
+        wasmURL = await fetchFfmpegAssetAsBlobUrl(
+          `${baseURL}/ffmpeg-core.wasm`,
+          'application/wasm',
+          'ffmpeg-core.wasm'
+        );
+
+        onStatus?.('Inicializando FFmpeg single-thread en el navegador...');
         await instance.load({ coreURL, wasmURL });
+        console.info(`[FFmpeg] Motor single-thread inicializado correctamente desde ${baseURL}`);
         ffmpegInstance = instance;
         return instance;
       } catch (err) {
-        lastError = err;
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`[FFmpeg] Falló CDN ${baseURL}: ${msg}`);
+        attemptErrors.push(`${baseURL}: ${msg}`);
+        if (coreURL) URL.revokeObjectURL(coreURL);
+        if (wasmURL) URL.revokeObjectURL(wasmURL);
       }
     }
 
     loadPromise = null;
     throw new Error(
-      `No se pudo cargar @ffmpeg/core single-thread: ${
-        lastError instanceof Error ? lastError.message : 'Error de red'
-      }`
+      formatPhaseError(
+        'FFmpeg',
+        `No se pudo cargar el núcleo single-thread (ffmpeg-core.js / ffmpeg-core.wasm). ${attemptErrors[attemptErrors.length - 1] ?? 'Comprueba tu conexión a internet.'}`
+      )
     );
   })();
 
@@ -103,27 +173,42 @@ export async function inspectVideoMetadata(blob: Blob): Promise<VideoMetadataInf
     const video = document.createElement('video');
     video.preload = 'metadata';
     video.muted = true;
+    video.playsInline = true;
+    video.setAttribute('playsinline', 'true');
+    video.setAttribute('webkit-playsinline', 'true');
 
+    let settled = false;
     const cleanup = () => {
+      window.clearTimeout(timerId);
       URL.revokeObjectURL(url);
       video.removeAttribute('src');
       video.load();
     };
 
+    const finish = (info: VideoMetadataInfo) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(info);
+    };
+
+    const timerId = window.setTimeout(() => {
+      finish({ durationSec: 0, width: 0, height: 0 });
+    }, METADATA_READ_TIMEOUT_MS);
+
     video.onloadedmetadata = () => {
       const durationSec = Number.isFinite(video.duration) ? video.duration : 0;
       const width = Number.isFinite(video.videoWidth) ? video.videoWidth : 0;
       const height = Number.isFinite(video.videoHeight) ? video.videoHeight : 0;
-      cleanup();
-      resolve({ durationSec, width, height });
+      finish({ durationSec, width, height });
     };
 
     video.onerror = () => {
-      cleanup();
-      resolve({ durationSec: 0, width: 0, height: 0 });
+      finish({ durationSec: 0, width: 0, height: 0 });
     };
 
     video.src = url;
+    video.load();
   });
 }
 

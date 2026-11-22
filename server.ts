@@ -1,13 +1,13 @@
 import 'dotenv/config';
 import express from 'express';
-import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
-import multer from 'multer';
-import { GoogleGenAI, Type, createPartFromUri } from '@google/genai';
+import { GoogleGenAI, Type } from '@google/genai';
 import {
+  AI_FRAME_MAX_COUNT,
+  AI_MAX_JSON_PAYLOAD_BYTES,
   DEFAULT_GEMINI_MODEL,
   buildGeminiSystemPrompt,
+  formatPhaseError,
   normalizeStylePreset,
   parseHumanReadableApiError,
   sanitizeGeminiModelName,
@@ -18,23 +18,6 @@ const DEFAULT_SERVER_GEMINI_MODEL = sanitizeGeminiModelName(
   process.env.GEMINI_MODEL || process.env.VITE_GEMINI_MODEL,
   DEFAULT_GEMINI_MODEL
 );
-
-const uploadDir = path.join(os.tmpdir(), 'autocut-drive-ai-uploads');
-fs.mkdirSync(uploadDir, { recursive: true });
-
-const upload = multer({
-  storage: multer.diskStorage({
-    destination: (_req, _file, cb) => cb(null, uploadDir),
-    filename: (_req, file, cb) => {
-      const safeExt = path.extname(file.originalname || '.mp4').replace(/[^a-zA-Z0-9.]/g, '') || '.mp4';
-      cb(null, `raw-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${safeExt}`);
-    },
-  }),
-  limits: {
-    fileSize: 600 * 1024 * 1024, // 600 MB per file
-    files: 12,
-  },
-});
 
 function createGeminiClient(): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -51,39 +34,6 @@ function createGeminiClient(): GoogleGenAI {
       },
     },
   });
-}
-
-function writeNdjson(res: express.Response, payload: Record<string, unknown>) {
-  res.write(`${JSON.stringify(payload)}\n`);
-}
-
-async function sleep(ms: number) {
-  await new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function waitForGeminiFileActive(
-  ai: GoogleGenAI,
-  fileName: string,
-  onPoll?: (secondsElapsed: number) => void
-) {
-  let fileInfo = await ai.files.get({ name: fileName });
-  const maxAttempts = 80;
-  let attempts = 0;
-
-  while (fileInfo.state === 'PROCESSING' && attempts < maxAttempts) {
-    attempts += 1;
-    await sleep(2500);
-    fileInfo = await ai.files.get({ name: fileName });
-    onPoll?.(attempts * 2.5);
-  }
-
-  if (fileInfo.state !== 'ACTIVE' || !fileInfo.uri) {
-    throw new Error(
-      `El archivo en Gemini Files API no alcanzó el estado ACTIVE (estado actual: ${fileInfo.state ?? 'desconocido'}).`
-    );
-  }
-
-  return fileInfo;
 }
 
 function buildCutResponseSchema(includeSubtitles: boolean) {
@@ -139,7 +89,7 @@ function buildCutResponseSchema(includeSubtitles: boolean) {
     properties.subtitulos = {
       type: Type.ARRAY,
       description:
-        'Bloques breves de subtítulos (2-5 palabras) sincronizados con el habla dentro de los cortes seleccionados.',
+        'Bloques breves de subtítulos (2-5 palabras) sincronizados con los cortes seleccionados.',
       items: {
         type: Type.OBJECT,
         properties: {
@@ -149,11 +99,11 @@ function buildCutResponseSchema(includeSubtitles: boolean) {
           },
           start_sec: {
             type: Type.NUMBER,
-            description: 'Segundo de inicio exacto de la frase en el vídeo bruto.',
+            description: 'Segundo de inicio de la frase en el vídeo bruto.',
           },
           end_sec: {
             type: Type.NUMBER,
-            description: 'Segundo de fin exacto de la frase en el vídeo bruto.',
+            description: 'Segundo de fin de la frase en el vídeo bruto.',
           },
           text: {
             type: Type.STRING,
@@ -173,310 +123,148 @@ function buildCutResponseSchema(includeSubtitles: boolean) {
   };
 }
 
+interface IncomingFramePayload {
+  timestampSec?: unknown;
+  dataBase64?: unknown;
+  mimeType?: unknown;
+}
+
 async function startServer() {
   const app = express();
+
+  // Lightweight JSON body parser (raw videos are NEVER sent to the server)
+  app.use(express.json({ limit: '15mb' }));
 
   app.get('/api/health', (_req, res) => {
     res.json({
       status: 'ok',
       geminiConfigured: Boolean(process.env.GEMINI_API_KEY),
       defaultModel: DEFAULT_SERVER_GEMINI_MODEL,
+      maxFrames: AI_FRAME_MAX_COUNT,
+      maxPayloadBytes: AI_MAX_JSON_PAYLOAD_BYTES,
     });
   });
 
-  // Single-clip Gemini analysis
-  app.post('/api/gemini/analyze-video', upload.single('video'), async (req, res) => {
-    const tempFile = req.file;
-    if (!tempFile) {
-      res.status(400).json({ error: 'No se recibió ningún archivo de vídeo.' });
-      return;
-    }
-
-    const model = sanitizeGeminiModelName(req.body?.model, DEFAULT_SERVER_GEMINI_MODEL);
-    const stylePreset = normalizeStylePreset(req.body?.stylePreset);
-    const customInstruction =
-      typeof req.body?.customInstruction === 'string'
-        ? req.body.customInstruction.trim().slice(0, 400)
-        : '';
-    const subtitlesEnabled = req.body?.subtitlesEnabled === 'true';
-    const silenceTrimEnabled = req.body?.silenceTrimEnabled !== 'false';
-    const durationSec = Number(req.body?.durationSec) || 0;
-    const originalName = typeof req.body?.fileName === 'string' ? req.body.fileName : tempFile.originalname;
-    const mimeType =
-      tempFile.mimetype && tempFile.mimetype.startsWith('video/')
-        ? tempFile.mimetype
-        : 'video/mp4';
-
-    res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-
-    let uploadedGeminiFileName: string | null = null;
-    let ai: GoogleGenAI | null = null;
-
+  // Lightweight storyboard frame analysis endpoint (never receives raw .MOV/.MP4 video files)
+  app.post('/api/gemini/analyze-video', async (req, res) => {
     try {
-      ai = createGeminiClient();
+      const body = (req.body ?? {}) as {
+        fileName?: unknown;
+        durationSec?: unknown;
+        model?: unknown;
+        stylePreset?: unknown;
+        customInstruction?: unknown;
+        subtitlesEnabled?: unknown;
+        silenceTrimEnabled?: unknown;
+        clipIndex?: unknown;
+        frames?: unknown;
+      };
 
-      writeNdjson(res, {
-        type: 'progress',
-        phase: 'uploading',
-        message: 'Subiendo vídeo a Gemini Files API (resumable upload)...',
-      });
-
-      const uploaded = await ai.files.upload({
-        file: tempFile.path,
-        config: {
-          mimeType,
-          displayName: originalName.slice(0, 120),
-        },
-      });
-
-      if (!uploaded.name) {
-        throw new Error('La Gemini Files API no devolvió un identificador de archivo.');
-      }
-      uploadedGeminiFileName = uploaded.name;
-
-      writeNdjson(res, {
-        type: 'progress',
-        phase: 'polling',
-        message: 'Esperando a que Gemini procese el vídeo (estado ACTIVE)...',
-      });
-
-      const fileInfo = await waitForGeminiFileActive(ai, uploadedGeminiFileName, (elapsed) => {
-        writeNdjson(res, {
-          type: 'progress',
-          phase: 'polling',
-          message: `Procesando vídeo en Gemini (${elapsed}s)...`,
+      const rawFrames = Array.isArray(body.frames) ? (body.frames as IncomingFramePayload[]) : [];
+      if (rawFrames.length === 0) {
+        res.status(400).json({
+          error: formatPhaseError(
+            'Extracción frames',
+            'No se recibieron fotogramas para analizar el vídeo.'
+          ),
         });
-      });
+        return;
+      }
 
-      writeNdjson(res, {
-        type: 'progress',
-        phase: 'analyzing',
-        message: `Analizando ritmo, pausas y momentos cómicos con ${model}...`,
-      });
+      if (rawFrames.length > AI_FRAME_MAX_COUNT) {
+        res.status(400).json({
+          error: formatPhaseError(
+            'Extracción frames',
+            `Se recibieron demasiados fotogramas (${rawFrames.length}). El máximo permitido es ${AI_FRAME_MAX_COUNT}.`
+          ),
+        });
+        return;
+      }
+
+      const validFrames = rawFrames
+        .map((frame) => {
+          const ts = Number(frame?.timestampSec);
+          const rawB64 = typeof frame?.dataBase64 === 'string' ? frame.dataBase64.trim() : '';
+          const dataBase64 = rawB64.replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/i, '');
+          const mimeType =
+            typeof frame?.mimeType === 'string' && frame.mimeType.startsWith('image/')
+              ? frame.mimeType
+              : 'image/jpeg';
+          return {
+            timestampSec: Number.isFinite(ts) && ts >= 0 ? Number(ts.toFixed(2)) : 0,
+            dataBase64,
+            mimeType,
+          };
+        })
+        .filter((f) => f.dataBase64.length > 32);
+
+      if (validFrames.length === 0) {
+        res.status(400).json({
+          error: formatPhaseError(
+            'Extracción frames',
+            'Los fotogramas enviados están vacíos o dañados.'
+          ),
+        });
+        return;
+      }
+
+      const model = sanitizeGeminiModelName(body.model, DEFAULT_SERVER_GEMINI_MODEL);
+      const stylePreset = normalizeStylePreset(body.stylePreset);
+      const customInstruction =
+        typeof body.customInstruction === 'string'
+          ? body.customInstruction.trim().slice(0, 400)
+          : '';
+      const subtitlesEnabled = body.subtitlesEnabled === true || body.subtitlesEnabled === 'true';
+      const silenceTrimEnabled =
+        body.silenceTrimEnabled !== false && body.silenceTrimEnabled !== 'false';
+      const durationSec = Math.max(0, Number(body.durationSec) || 0);
+      const clipIndex = Math.max(0, Math.floor(Number(body.clipIndex) || 0));
+      const originalName =
+        typeof body.fileName === 'string' && body.fileName.trim()
+          ? body.fileName.trim().slice(0, 140)
+          : 'video.mp4';
+
+      const ai = createGeminiClient();
+
+      const contentsParts: Array<string | { inlineData: { mimeType: string; data: string } }> = [];
+      const frameTimelineSummary: string[] = [];
+
+      for (const frame of validFrames) {
+        const label = `Fotograma en t=${frame.timestampSec.toFixed(2)}s`;
+        frameTimelineSummary.push(`${frame.timestampSec.toFixed(2)}s`);
+        contentsParts.push(label);
+        contentsParts.push({
+          inlineData: {
+            mimeType: frame.mimeType,
+            data: frame.dataBase64,
+          },
+        });
+      }
 
       const durationHint =
         durationSec > 0
-          ? `La duración total aproximada del vídeo bruto es de ${durationSec.toFixed(1)} segundos.`
-          : 'Analiza la duración real del vídeo adjunto.';
+          ? `La duración total real del vídeo bruto es de ${durationSec.toFixed(2)} segundos (de 0.00s a ${durationSec.toFixed(2)}s).`
+          : 'Estima la duración según las marcas de tiempo de los fotogramas adjuntos.';
 
       const instructionNote = customInstruction
         ? `\nInstrucción rápida adicional del usuario: "${customInstruction}".`
         : '';
 
-      const userPrompt = `Analiza este vídeo bruto (Clip 0: "${originalName}"). ${durationHint}
-Usa siempre "clip_index": 0 en cada corte.
-Selecciona los mejores momentos siguiendo el estilo indicado en las instrucciones del sistema y respetando estrictamente el esquema JSON.${instructionNote}`;
+      const subtitleNote = subtitlesEnabled
+        ? '\nComo los subtítulos están activados, propone bloques cortos de subtítulos visuales/narrativos (2-5 palabras) sincronizados con los momentos clave de cada corte.'
+        : '';
+
+      const userPrompt = `Analiza esta secuencia de ${validFrames.length} fotogramas extraídos del vídeo bruto (Clip ${clipIndex}: "${originalName}").
+${durationHint}
+Marcas de tiempo muestreadas: ${frameTimelineSummary.join(', ')}.
+Usa siempre "clip_index": ${clipIndex} en cada corte.
+Propón entre 2 y 7 cortes concretos (con "start_sec" y "end_sec" estrictamente dentro de [0, ${
+        durationSec > 0 ? durationSec.toFixed(2) : validFrames[validFrames.length - 1].timestampSec.toFixed(2)
+      }]) que capturen las escenas más dinámicas, expresivas o interesantes siguiendo el estilo del sistema y respetando estrictamente el esquema JSON.${subtitleNote}${instructionNote}`;
+
+      contentsParts.push(userPrompt);
 
       const systemInstruction = buildGeminiSystemPrompt('single', stylePreset, customInstruction, {
-        subtitlesEnabled,
-        silenceTrimEnabled,
-      });
-
-      const response = await ai.models.generateContent({
-        model,
-        contents: [
-          createPartFromUri(fileInfo.uri!, fileInfo.mimeType || mimeType),
-          userPrompt,
-        ],
-        config: {
-          systemInstruction,
-          responseMimeType: 'application/json',
-          responseSchema: buildCutResponseSchema(subtitlesEnabled),
-        },
-      });
-
-      const rawText = response.text?.trim();
-      if (!rawText) {
-        throw new Error('Gemini devolvió una respuesta vacía al analizar el vídeo.');
-      }
-
-      const parsed = JSON.parse(rawText);
-
-      writeNdjson(res, {
-        type: 'progress',
-        phase: 'cleaning',
-        message: 'Limpiando archivo temporal de Gemini Files API...',
-      });
-
-      let cleaned = false;
-      if (uploadedGeminiFileName && ai) {
-        try {
-          await ai.files.delete({ name: uploadedGeminiFileName });
-          uploadedGeminiFileName = null;
-          cleaned = true;
-        } catch (cleanupErr) {
-          console.warn('No se pudo eliminar el archivo temporal de Gemini:', cleanupErr);
-        }
-      }
-
-      writeNdjson(res, {
-        type: 'result',
-        analysis: parsed,
-        geminiFileCleaned: cleaned,
-      });
-      res.end();
-    } catch (error: unknown) {
-      const parsedError = parseHumanReadableApiError(error);
-      console.error('[Gemini Analyze Error]:', error);
-
-      if (uploadedGeminiFileName && ai) {
-        try {
-          await ai.files.delete({ name: uploadedGeminiFileName });
-        } catch {
-          // Best-effort cleanup
-        }
-      }
-
-      writeNdjson(res, {
-        type: 'error',
-        error: parsedError.userMessage,
-        technicalDetail: parsedError.technicalDetail,
-        actionHint: parsedError.actionHint,
-      });
-      res.end();
-    } finally {
-      if (tempFile?.path) {
-        fs.promises.unlink(tempFile.path).catch(() => {});
-      }
-    }
-  });
-
-  // Multi-clip Gemini analysis (combines multiple raw videos into one jump-cut story)
-  app.post('/api/gemini/analyze-multi', upload.array('videos', 12), async (req, res) => {
-    const tempFiles = (req.files as Express.Multer.File[] | undefined) ?? [];
-    if (tempFiles.length === 0) {
-      res.status(400).json({ error: 'No se recibieron archivos de vídeo para combinar.' });
-      return;
-    }
-
-    const model = sanitizeGeminiModelName(req.body?.model, DEFAULT_SERVER_GEMINI_MODEL);
-    const stylePreset = normalizeStylePreset(req.body?.stylePreset);
-    const customInstruction =
-      typeof req.body?.customInstruction === 'string'
-        ? req.body.customInstruction.trim().slice(0, 400)
-        : '';
-    const subtitlesEnabled = req.body?.subtitlesEnabled === 'true';
-    const silenceTrimEnabled = req.body?.silenceTrimEnabled !== 'false';
-    const projectName = typeof req.body?.projectName === 'string' ? req.body.projectName.trim() : '';
-
-    let clipMetadata: Array<{ name?: string; durationSec?: number }> = [];
-    try {
-      if (typeof req.body?.clipsMeta === 'string') {
-        clipMetadata = JSON.parse(req.body.clipsMeta);
-      }
-    } catch {
-      clipMetadata = [];
-    }
-
-    res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-
-    const uploadedGeminiFileNames: string[] = [];
-    let ai: GoogleGenAI | null = null;
-
-    try {
-      ai = createGeminiClient();
-
-      // 1. Upload every clip via Gemini Files API (resumable upload)
-      const uploadedMeta: Array<{
-        index: number;
-        geminiName: string;
-        displayName: string;
-        mimeType: string;
-        durationSec: number;
-      }> = [];
-
-      for (let idx = 0; idx < tempFiles.length; idx += 1) {
-        const file = tempFiles[idx];
-        const displayName = clipMetadata[idx]?.name || file.originalname || `clip_${idx}.mp4`;
-        const durationSec = Number(clipMetadata[idx]?.durationSec) || 0;
-        const mimeType =
-          file.mimetype && file.mimetype.startsWith('video/') ? file.mimetype : 'video/mp4';
-
-        writeNdjson(res, {
-          type: 'progress',
-          phase: 'uploading',
-          message: `Subiendo Clip ${idx + 1}/${tempFiles.length} (${displayName}) a Gemini Files API...`,
-          percent: Math.round(10 + ((idx + 0.5) / tempFiles.length) * 30),
-        });
-
-        const uploaded = await ai.files.upload({
-          file: file.path,
-          config: {
-            mimeType,
-            displayName: displayName.slice(0, 120),
-          },
-        });
-
-        if (!uploaded.name) {
-          throw new Error(`Gemini Files API no devolvió identificador para Clip ${idx}.`);
-        }
-
-        uploadedGeminiFileNames.push(uploaded.name);
-        uploadedMeta.push({
-          index: idx,
-          geminiName: uploaded.name,
-          displayName,
-          mimeType,
-          durationSec,
-        });
-      }
-
-      // 2. Poll until EVERY uploaded file is ACTIVE
-      const activeParts: Array<{ uri: string; mimeType: string; index: number; displayName: string; durationSec: number }> = [];
-      for (let idx = 0; idx < uploadedMeta.length; idx += 1) {
-        const meta = uploadedMeta[idx];
-        writeNdjson(res, {
-          type: 'progress',
-          phase: 'polling',
-          message: `Esperando estado ACTIVE para Clip ${idx + 1}/${uploadedMeta.length} (${meta.displayName})...`,
-          percent: Math.round(42 + ((idx + 1) / uploadedMeta.length) * 24),
-        });
-
-        const activeInfo = await waitForGeminiFileActive(ai, meta.geminiName);
-        activeParts.push({
-          uri: activeInfo.uri!,
-          mimeType: activeInfo.mimeType || meta.mimeType,
-          index: meta.index,
-          displayName: meta.displayName,
-          durationSec: meta.durationSec,
-        });
-      }
-
-      // 3. Build multi-clip prompt and contents array with explicit Clip 0, Clip 1... markers
-      writeNdjson(res, {
-        type: 'progress',
-        phase: 'analyzing',
-        message: `Construyendo historia combinada de ${activeParts.length} clips con ${model}...`,
-        percent: 78,
-      });
-
-      const contentsParts: Array<ReturnType<typeof createPartFromUri> | string> = [];
-      const clipIndexSummary: string[] = [];
-
-      for (const clip of activeParts) {
-        const durLabel = clip.durationSec > 0 ? ` (~${clip.durationSec.toFixed(1)}s)` : '';
-        const header = `Clip ${clip.index}: ${clip.displayName}${durLabel}`;
-        clipIndexSummary.push(`- ${header}`);
-        contentsParts.push(header);
-        contentsParts.push(createPartFromUri(clip.uri, clip.mimeType));
-      }
-
-      const projectContext = projectName ? `Nombre del proyecto: "${projectName}".\n` : '';
-      const instructionNote = customInstruction
-        ? `\nInstrucción rápida adicional del usuario: "${customInstruction}".`
-        : '';
-
-      contentsParts.push(
-        `${projectContext}Aquí tienes ${activeParts.length} vídeos brutos:\n${clipIndexSummary.join('\n')}\n\n` +
-          `Combina y ordena los mejores fragmentos de todos los clips siguiendo el estilo indicado en las instrucciones del sistema. ` +
-          `Recuerda devolver "clip_index" (0 a ${activeParts.length - 1}), "start_sec", "end_sec" y "motivo" en cada corte.${instructionNote}`
-      );
-
-      const systemInstruction = buildGeminiSystemPrompt('multi', stylePreset, customInstruction, {
         subtitlesEnabled,
         silenceTrimEnabled,
       });
@@ -493,59 +281,49 @@ Selecciona los mejores momentos siguiendo el estilo indicado en las instruccione
 
       const rawText = response.text?.trim();
       if (!rawText) {
-        throw new Error('Gemini devolvió una respuesta vacía en el análisis Multi-Clip.');
+        throw new Error('Gemini devolvió una respuesta vacía al analizar los fotogramas.');
       }
 
       const parsed = JSON.parse(rawText);
 
-      // 4. Clean up ALL temporary files from Gemini Files API
-      writeNdjson(res, {
-        type: 'progress',
-        phase: 'cleaning',
-        message: `Eliminando ${uploadedGeminiFileNames.length} archivos temporales de Gemini Files API...`,
-        percent: 94,
-      });
-
-      let cleanedCount = 0;
-      for (const fileName of uploadedGeminiFileNames) {
-        try {
-          await ai.files.delete({ name: fileName });
-          cleanedCount += 1;
-        } catch (cleanupErr) {
-          console.warn(`No se pudo borrar ${fileName} de Gemini Files API:`, cleanupErr);
-        }
-      }
-      uploadedGeminiFileNames.length = 0;
-
-      writeNdjson(res, {
-        type: 'result',
+      res.json({
         analysis: parsed,
-        geminiFileCleaned: cleanedCount === activeParts.length,
+        geminiFileCleaned: true,
+        framesAnalyzed: validFrames.length,
+        model,
       });
-      res.end();
     } catch (error: unknown) {
       const parsedError = parseHumanReadableApiError(error);
-      console.error('[Gemini Multi-Clip Error]:', error);
-
-      if (ai && uploadedGeminiFileNames.length > 0) {
-        await Promise.allSettled(
-          uploadedGeminiFileNames.map((name) => ai!.files.delete({ name }))
-        );
-      }
-
-      writeNdjson(res, {
-        type: 'error',
-        error: parsedError.userMessage,
+      console.error('[Análisis IA] Error en /api/gemini/analyze-video:', error);
+      res.status(500).json({
+        error: formatPhaseError('Análisis IA', parsedError.userMessage),
         technicalDetail: parsedError.technicalDetail,
         actionHint: parsedError.actionHint,
       });
-      res.end();
-    } finally {
-      await Promise.allSettled(
-        tempFiles.map((f) => fs.promises.unlink(f.path).catch(() => {}))
-      );
     }
   });
+
+  // Explicit handler for oversized JSON requests so we always return clean JSON instead of HTML
+  app.use(
+    (
+      err: { status?: number; type?: string; message?: string },
+      _req: express.Request,
+      res: express.Response,
+      next: express.NextFunction
+    ) => {
+      if (err?.type === 'entity.too.large' || err?.status === 413) {
+        res.status(413).json({
+          error: formatPhaseError(
+            'Extracción frames',
+            'El paquete de fotogramas superó el límite del servidor. Reintenta con menos fotogramas.'
+          ),
+          technicalDetail: err.message,
+        });
+        return;
+      }
+      next(err);
+    }
+  );
 
   if (process.env.NODE_ENV === 'production') {
     const distPath = path.resolve(process.cwd(), 'dist');

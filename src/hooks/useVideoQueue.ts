@@ -15,8 +15,10 @@ import {
   buildEditedFilename,
   detectPendingVideos,
   evaluateHeavyVideoWarning,
+  formatPhaseError,
   isSupportedVideoFile,
   parseHumanReadableApiError,
+  type ErrorPhase,
 } from '../utils/videoPipeline';
 import { createDemoAnalyticsRecords, createDemoQueueItems } from '../utils/demoData';
 import { getCachedDriveToken } from '../services/googleAuth';
@@ -311,9 +313,12 @@ export function useVideoQueue({
           clearAuthSession();
         }
         onError(
-          err instanceof Error
-            ? err.message
-            : 'No se pudo recuperar el vídeo desde Google Drive.'
+          formatPhaseError(
+            'Drive',
+            err instanceof Error
+              ? err.message
+              : 'No se pudo recuperar el vídeo desde Google Drive.'
+          )
         );
       } finally {
         setRestoringDriveId(null);
@@ -326,11 +331,11 @@ export function useVideoQueue({
     onError(null);
     const token = accessToken || getCachedDriveToken();
     if (!token) {
-      onError('Inicia sesión con Google Drive antes de escanear una carpeta.');
+      onError(formatPhaseError('Drive', 'Inicia sesión con Google Drive antes de escanear una carpeta.'));
       return;
     }
     if (!settings.folderId) {
-      onError('Configura el ID de tu carpeta de Google Drive en Ajustes.');
+      onError(formatPhaseError('Drive', 'Configura el ID de tu carpeta de Google Drive en Ajustes.'));
       onNavigateView('settings');
       return;
     }
@@ -368,7 +373,10 @@ export function useVideoQueue({
         clearAuthSession();
       }
       onError(
-        err instanceof Error ? err.message : 'No se pudo escanear la carpeta de Google Drive.'
+        formatPhaseError(
+          'Drive',
+          err instanceof Error ? err.message : 'No se pudo escanear la carpeta de Google Drive.'
+        )
       );
     } finally {
       setIsScanning(false);
@@ -554,6 +562,7 @@ export function useVideoQueue({
 
       onError(null);
       setIsProcessingAny(true);
+      let currentPhase: ErrorPhase = target.source === 'drive' && !target.rawBlob ? 'Drive' : 'Extracción frames';
 
       try {
         let rawBlob = target.rawBlob;
@@ -561,6 +570,7 @@ export function useVideoQueue({
 
         // Stage 1: Download from Google Drive if needed
         if (!rawBlob && target.source === 'drive' && target.driveFileId) {
+          currentPhase = 'Drive';
           const token = accessToken || getCachedDriveToken();
           if (!token) {
             throw new DriveAuthExpiredError(
@@ -596,6 +606,7 @@ export function useVideoQueue({
           throw new Error('No se encontró el archivo de vídeo para procesar.');
         }
 
+        currentPhase = 'Extracción frames';
         const meta = await inspectVideoMetadata(rawBlob);
         const durationSec = meta.durationSec;
         if (durationSec > 0) {
@@ -612,13 +623,14 @@ export function useVideoQueue({
           setHeavyVideoWarning(`${target.originalName}: ${heavyCheck.message}`);
         }
 
-        // Stage 2: Analyze with Gemini via server-side Gemini Files API resumable upload
+        // Stage 2: Extract lightweight frames in browser (< 2 MB) & analyze with Gemini
         updateQueueItem(itemId, {
           stage: 'analyzing',
-          stageDetail: 'Subiendo a Gemini Files API...',
+          stageDetail: 'Extrayendo fotogramas ligeros en el navegador...',
           progress: 10,
         });
 
+        currentPhase = 'Análisis IA';
         const { plan, geminiFileCleaned } = await analyzeVideoWithGemini(
           rawBlob,
           target.originalName,
@@ -662,18 +674,19 @@ export function useVideoQueue({
       } catch (err) {
         if (err instanceof DriveAuthExpiredError) {
           clearAuthSession();
+          currentPhase = 'Drive';
         }
         const structured: AppErrorBanner =
           err instanceof GeminiClientError
             ? {
-                message: err.message,
+                message: formatPhaseError(err.phase, err.message),
                 technicalDetail: err.technicalDetail,
                 actionHint: err.actionHint,
               }
             : (() => {
                 const parsed = parseHumanReadableApiError(err);
                 return {
-                  message: parsed.userMessage,
+                  message: formatPhaseError(currentPhase, parsed.userMessage),
                   technicalDetail: parsed.technicalDetail,
                   actionHint: parsed.actionHint,
                 };
@@ -773,6 +786,7 @@ export function useVideoQueue({
 
       setItems((prev) => [combinedItem, ...prev]);
 
+      let currentPhase: ErrorPhase = 'Drive';
       try {
         const resolvedClips: SourceClipRef[] = [];
 
@@ -783,6 +797,7 @@ export function useVideoQueue({
           let rawUrl = clip.rawUrl;
 
           if (!blob && clip.source === 'drive' && clip.driveFileId) {
+            currentPhase = 'Drive';
             const token = accessToken || getCachedDriveToken();
             if (!token) {
               throw new DriveAuthExpiredError(
@@ -816,6 +831,7 @@ export function useVideoQueue({
             throw new Error(`Falta el archivo binario para el Clip ${i + 1} (${clip.originalName}).`);
           }
 
+          currentPhase = 'Extracción frames';
           const meta = await inspectVideoMetadata(blob);
           const durationSec = clip.durationSec || meta.durationSec;
           resolvedClips.push({
@@ -843,11 +859,12 @@ export function useVideoQueue({
           sourceClips: resolvedClips,
           durationSec: totalRawDurationSec,
           stage: 'analyzing',
-          stageDetail: `Subiendo ${resolvedClips.length} clips a Gemini Files API...`,
+          stageDetail: `Extrayendo fotogramas ligeros de ${resolvedClips.length} clips (por separado)...`,
           progress: 8,
         });
 
-        // 2. Analyze all clips together via server-side /api/gemini/analyze-multi
+        // 2. Analyze each clip separately via lightweight frames (< 2 MB each) and merge results
+        currentPhase = 'Análisis IA';
         const { plan, geminiFileCleaned } = await analyzeMultiClipWithGemini(
           resolvedClips.map((c) => ({
             blob: c.rawBlob!,
@@ -889,18 +906,19 @@ export function useVideoQueue({
       } catch (err) {
         if (err instanceof DriveAuthExpiredError) {
           clearAuthSession();
+          currentPhase = 'Drive';
         }
         const structured: AppErrorBanner =
           err instanceof GeminiClientError
             ? {
-                message: err.message,
+                message: formatPhaseError(err.phase, err.message),
                 technicalDetail: err.technicalDetail,
                 actionHint: err.actionHint,
               }
             : (() => {
                 const parsed = parseHumanReadableApiError(err);
                 return {
-                  message: parsed.userMessage,
+                  message: formatPhaseError(currentPhase, parsed.userMessage),
                   technicalDetail: parsed.technicalDetail,
                   actionHint: parsed.actionHint,
                 };
@@ -1042,8 +1060,10 @@ export function useVideoQueue({
       if (err instanceof DriveAuthExpiredError) {
         clearAuthSession();
       }
-      const message =
-        err instanceof Error ? err.message : 'Error al subir el archivo a Google Drive.';
+      const message = formatPhaseError(
+        'Drive',
+        err instanceof Error ? err.message : 'Error al subir el archivo a Google Drive.'
+      );
       updateQueueItem(target.id, {
         stage: 'error',
         errorMessage: message,

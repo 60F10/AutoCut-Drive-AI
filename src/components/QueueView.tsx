@@ -736,7 +736,25 @@ export function QueueView({
                   )}
 
                   {item.stage === 'error' && item.errorMessage && (
-                    <p className="font-mono text-xs text-[#ff6ca9] pt-1">{item.errorMessage}</p>
+                    <p
+                      data-testid="queue-item-error"
+                      className="font-mono text-xs text-[#ff6ca9] pt-1 leading-relaxed break-words"
+                    >
+                      {(() => {
+                        const match = item.errorMessage.match(
+                          /^(\[(?:Drive|Extracción frames|Análisis IA|FFmpeg)\])\s*(.*)$/i
+                        );
+                        if (!match) return item.errorMessage;
+                        return (
+                          <>
+                            <span className="mr-1.5 inline-block rounded-sm border border-[#ff2a85]/55 bg-[#ff2a85]/18 px-1.5 py-0.5 text-[10px] font-semibold text-[#ffd4e5]">
+                              {match[1]}
+                            </span>
+                            <span>{match[2]}</span>
+                          </>
+                        );
+                      })()}
+                    </p>
                   )}
                 </div>
               </div>

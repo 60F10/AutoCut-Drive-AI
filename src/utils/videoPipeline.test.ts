@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  AI_FRAME_JPEG_QUALITY,
+  AI_FRAME_MAX_COUNT,
+  AI_FRAME_MIN_COUNT,
+  AI_FRAME_TARGET_WIDTH,
+  AI_MAX_JSON_PAYLOAD_BYTES,
   DEFAULT_GEMINI_MODEL,
   DEFAULT_TIKTOK_OPTIONS,
   EDIT_STYLE_PRESETS,
@@ -14,16 +19,21 @@ import {
   buildMultiClipFfmpegFilterComplex,
   buildSrtSubtitles,
   calculateSelectedDuration,
+  computeFrameTimestamps,
   computeQueueAnalytics,
+  computeScaledDimensions,
   detectDefaultExportQuality,
   detectPendingVideos,
+  enforceAiPayloadBudget,
   evaluateHeavyVideoWarning,
   exceedsMobileRamThreshold,
   extractDriveFolderId,
   filterEditedCuts,
   formatBytes,
   formatDurationHuman,
+  formatPhaseError,
   formatSeconds,
+  mergeMultiClipEditPlans,
   normalizeStylePreset,
   normalizeTikTokOptions,
   parseGeminiEditPlan,
@@ -32,6 +42,7 @@ import {
   sanitizeEtiqueta,
   sanitizeGeminiModelName,
   toLocalDateKey,
+  type ExtractedVideoFrame,
 } from './videoPipeline';
 import type { AnalyticsRecord, DriveFileMeta, SubtitleBlock, VideoCut } from '../types';
 
@@ -504,5 +515,147 @@ test('parseHumanReadableApiError converts raw Gemini JSON/HTTP errors into clear
   const parsedHuman = parseHumanReadableApiError('Selecciona archivos de vídeo válidos.');
   assert.equal(parsedHuman.userMessage, 'Selecciona archivos de vídeo válidos.');
   assert.equal(parsedHuman.technicalDetail, undefined);
+
+  // Safari "Load failed" and AbortError timeout handling
+  const parsedSafari = parseHumanReadableApiError('Load failed');
+  assert.ok(parsedSafari.userMessage.includes('Conexión interrumpida'));
+  assert.equal(parsedSafari.technicalDetail, 'Load failed');
+
+  const parsedTimeout = parseHumanReadableApiError('AbortError: The operation timed out');
+  assert.ok(parsedTimeout.userMessage.includes('Tiempo de espera agotado'));
 });
+
+test('Lightweight frame extraction sampling caps at 12-16 frames and 480px width for any video length', () => {
+  assert.equal(AI_FRAME_MIN_COUNT, 12);
+  assert.equal(AI_FRAME_MAX_COUNT, 16);
+  assert.equal(AI_FRAME_TARGET_WIDTH, 480);
+  assert.equal(AI_FRAME_JPEG_QUALITY, 0.55);
+  assert.equal(AI_MAX_JSON_PAYLOAD_BYTES, 2 * 1024 * 1024);
+
+  // Short 10s video (like the 11.9 MB iOS clip)
+  const shortTs = computeFrameTimestamps(10);
+  assert.ok(shortTs.length >= 12 && shortTs.length <= 16);
+  assert.ok(shortTs[0] >= 0 && shortTs[shortTs.length - 1] < 10);
+
+  // Long 4:30 video (like the 301 MB iOS clip)
+  const longTs = computeFrameTimestamps(270);
+  assert.equal(longTs.length, 16);
+  assert.ok(longTs[0] >= 0 && longTs[longTs.length - 1] < 270);
+
+  // Even if caller requests 50 frames, hard-capped at 16
+  assert.equal(computeFrameTimestamps(600, 50).length, 16);
+
+  // 4K portrait video scales proportionally down to 480px wide
+  const scaled4k = computeScaledDimensions(2160, 3840);
+  assert.equal(scaled4k.width, 480);
+  assert.equal(scaled4k.height, 854);
+
+  // Already-small video does not upscale beyond original width
+  const small = computeScaledDimensions(320, 568);
+  assert.equal(small.width, 320);
+});
+
+test('enforceAiPayloadBudget guarantees <= 16 frames and strictly < 2 MB JSON payload', () => {
+  // Simulate 24 oversized frames (~180 KB base64 each = > 4.3 MB total)
+  const bigBase64 = 'A'.repeat(180_000);
+  const oversizedFrames: ExtractedVideoFrame[] = Array.from({ length: 24 }, (_, i) => ({
+    timestampSec: Number((i * 10).toFixed(2)),
+    dataBase64: bigBase64,
+    mimeType: 'image/jpeg',
+    width: 480,
+    height: 854,
+  }));
+
+  const budgeted = enforceAiPayloadBudget({
+    fileName: 'IMG_301MB_4K.MOV',
+    durationSec: 270,
+    model: 'gemini-3.8-flash',
+    frames: oversizedFrames,
+  });
+
+  assert.ok(budgeted.payload.frames.length <= AI_FRAME_MAX_COUNT);
+  assert.ok(budgeted.byteLength <= AI_MAX_JSON_PAYLOAD_BYTES);
+  assert.ok(budgeted.trimmedFrames > 0);
+
+  // Typical 16 lightweight JPEG frames (~35 KB each = ~560 KB) pass untouched well below 2 MB
+  const normalFrames: ExtractedVideoFrame[] = Array.from({ length: 16 }, (_, i) => ({
+    timestampSec: i * 5,
+    dataBase64: 'B'.repeat(35_000),
+    mimeType: 'image/jpeg',
+    width: 480,
+    height: 854,
+  }));
+  const normalBudgeted = enforceAiPayloadBudget({
+    fileName: 'clip_corto.mp4',
+    durationSec: 10,
+    frames: normalFrames,
+  });
+  assert.equal(normalBudgeted.payload.frames.length, 16);
+  assert.equal(normalBudgeted.trimmedFrames, 0);
+  assert.ok(normalBudgeted.byteLength < 700_000);
+
+  // Single impossibly huge frame (> 2 MB alone) throws a [Extracción frames] error
+  assert.throws(
+    () =>
+      enforceAiPayloadBudget({
+        fileName: 'broken.mp4',
+        frames: [
+          {
+            timestampSec: 0,
+            dataBase64: 'C'.repeat(AI_MAX_JSON_PAYLOAD_BYTES + 10_000),
+            mimeType: 'image/jpeg',
+            width: 480,
+            height: 854,
+          },
+        ],
+      }),
+    /\[Extracción frames\]/
+  );
+});
+
+test('mergeMultiClipEditPlans combines per-clip analyses preserving clip_index and formatPhaseError avoids duplicates', () => {
+  const merged = mergeMultiClipEditPlans(
+    [
+      {
+        clipIndex: 0,
+        fileName: 'clip_a.mov',
+        durationSec: 40,
+        plan: {
+          etiqueta: 'VIAJE',
+          titulo_interno: 'Salida desde casa',
+          duracion_objetivo_seg: 15,
+          cortes: [
+            { id: 'a1', clip_index: 0, start_sec: 1, end_sec: 7, motivo: 'Gancho', puntuacion_interes: 9, enabled: true },
+          ],
+        },
+      },
+      {
+        clipIndex: 1,
+        fileName: 'clip_b.mov',
+        durationSec: 50,
+        plan: {
+          etiqueta: 'VIAJE',
+          titulo_interno: 'Llegada a la playa',
+          duracion_objetivo_seg: 18,
+          cortes: [
+            { id: 'b1', clip_index: 0, start_sec: 3, end_sec: 11, motivo: 'Remate', puntuacion_interes: 10, enabled: true },
+          ],
+        },
+      },
+    ],
+    { projectName: 'Escapada' }
+  );
+
+  assert.equal(merged.etiqueta, 'VIAJE');
+  assert.equal(merged.cortes.length, 2);
+  assert.equal(merged.cortes[0].clip_index, 0);
+  assert.equal(merged.cortes[1].clip_index, 1);
+  assert.ok(merged.titulo_interno.includes('Escapada'));
+
+  assert.equal(formatPhaseError('Drive', 'Token expirado'), '[Drive] Token expirado');
+  assert.equal(formatPhaseError('FFmpeg', '[FFmpeg] Error WASM'), '[FFmpeg] Error WASM');
+  assert.equal(formatPhaseError('Análisis IA', 'Timeout'), '[Análisis IA] Timeout');
+  assert.equal(formatPhaseError('Extracción frames', 'Códec no soportado'), '[Extracción frames] Códec no soportado');
+});
+
 

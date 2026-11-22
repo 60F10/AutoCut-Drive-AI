@@ -154,7 +154,7 @@ export function SettingsView({
               Modelo de análisis Gemini
             </h2>
             <p className="mt-1 text-xs text-[#94A8C4]">
-              El vídeo se sube mediante Gemini Files API (resumable upload) y se elimina automáticamente al terminar el análisis.
+              Tu vídeo bruto nunca sale del dispositivo: el navegador extrae entre 12 y 16 fotogramas ligeros (480px JPEG, &lt; 2 MB) para analizarlos con Gemini sin errores 413.
             </p>
           </div>
 
