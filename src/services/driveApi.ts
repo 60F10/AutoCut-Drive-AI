@@ -181,3 +181,219 @@ export async function uploadEditedVideoMultipart(
   });
   return result;
 }
+
+const DRIVE_FOLDER_MIME = 'application/vnd.google-apps.folder';
+export const PC_JOBS_SUBFOLDER = '_AutoCut_Jobs';
+export const PC_OUTPUT_SUBFOLDER = '_AutoCut_Output';
+
+function escapeDriveQueryValue(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
+/**
+ * Finds a direct subfolder by exact name inside `parentFolderId`, returning its ID or null.
+ */
+export async function findDriveSubfolder(
+  parentFolderId: string,
+  folderName: string,
+  accessToken: string
+): Promise<string | null> {
+  const safeParent = escapeDriveQueryValue(parentFolderId);
+  const safeName = escapeDriveQueryValue(folderName);
+  const query = encodeURIComponent(
+    `'${safeParent}' in parents and name = '${safeName}' and mimeType = '${DRIVE_FOLDER_MIME}' and trashed = false`
+  );
+  const url = `${DRIVE_API_BASE}/files?q=${query}&fields=files(id,name)&pageSize=5`;
+
+  const res = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+  await assertDriveOk(res, `Buscar subcarpeta ${folderName}`);
+  const data = (await res.json()) as { files?: Array<{ id: string; name: string }> };
+  return data.files?.[0]?.id ?? null;
+}
+
+/**
+ * Finds or creates a direct subfolder inside `parentFolderId`.
+ */
+export async function ensureDriveSubfolder(
+  parentFolderId: string,
+  folderName: string,
+  accessToken: string
+): Promise<string> {
+  const existingId = await findDriveSubfolder(parentFolderId, folderName, accessToken);
+  if (existingId) return existingId;
+
+  const res = await fetch(`${DRIVE_API_BASE}/files?fields=id,name`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json; charset=UTF-8',
+    },
+    body: JSON.stringify({
+      name: folderName,
+      mimeType: DRIVE_FOLDER_MIME,
+      parents: [parentFolderId],
+    }),
+  });
+  await assertDriveOk(res, `Crear subcarpeta ${folderName}`);
+  const created = (await res.json()) as { id: string; name: string };
+  logInfo('Drive', `Subcarpeta ${folderName} creada en Drive`, { carpeta: folderName });
+  return created.id;
+}
+
+/**
+ * Ensures both `_AutoCut_Jobs` and `_AutoCut_Output` subfolders exist inside the configured Drive folder.
+ */
+export async function ensurePcRenderFolders(
+  rootFolderId: string,
+  accessToken: string
+): Promise<{ jobsFolderId: string; outputFolderId: string }> {
+  const [jobsFolderId, outputFolderId] = await Promise.all([
+    ensureDriveSubfolder(rootFolderId, PC_JOBS_SUBFOLDER, accessToken),
+    ensureDriveSubfolder(rootFolderId, PC_OUTPUT_SUBFOLDER, accessToken),
+  ]);
+  return { jobsFolderId, outputFolderId };
+}
+
+/**
+ * Uploads `job_<jobId>.json` into `_AutoCut_Jobs` inside the configured Google Drive folder.
+ */
+export async function uploadRenderJobManifest(
+  rootFolderId: string,
+  manifest: import('../types').RenderJobManifest,
+  accessToken: string
+): Promise<DriveUploadResult> {
+  const t0 = performance.now();
+  const { jobsFolderId } = await ensurePcRenderFolders(rootFolderId, accessToken);
+  const fileName = `job_${manifest.jobId}.json`;
+  const jsonContent = JSON.stringify(manifest, null, 2);
+
+  const boundary = `autocut_job_${Date.now()}`;
+  const metadata = {
+    name: fileName,
+    parents: [jobsFolderId],
+    mimeType: 'application/json',
+  };
+
+  const multipartBody =
+    `--${boundary}\r\n` +
+    'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
+    `${JSON.stringify(metadata)}\r\n` +
+    `--${boundary}\r\n` +
+    'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
+    `${jsonContent}\r\n` +
+    `--${boundary}--`;
+
+  const url = `${DRIVE_UPLOAD_BASE}/files?uploadType=multipart&fields=id,name,webViewLink,size`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': `multipart/related; boundary=${boundary}`,
+    },
+    body: multipartBody,
+  });
+
+  await assertDriveOk(res, 'Subir manifiesto de trabajo PC');
+  const result = (await res.json()) as DriveUploadResult;
+  logInfo('Drive', 'Trabajo de render enviado a PC (_AutoCut_Jobs)', {
+    jobId: manifest.jobId,
+    archivo: fileName,
+    clips: manifest.sourceFiles.length,
+    cortes: manifest.cuts.length,
+    calidad: manifest.options.quality,
+    ms: Math.round(performance.now() - t0),
+  });
+  return result;
+}
+
+export interface PcRenderDriveSnapshot {
+  jobs: import('../types').PcJobSyncEntry[];
+  outputs: DriveFileMeta[];
+  jobsFolderId: string | null;
+  outputFolderId: string | null;
+}
+
+/**
+ * Reads `job_*.json` statuses from `_AutoCut_Jobs` and lists rendered `.mp4` files in `_AutoCut_Output`.
+ */
+export async function listPcRenderJobsAndOutputs(
+  rootFolderId: string,
+  accessToken: string
+): Promise<PcRenderDriveSnapshot> {
+  const t0 = performance.now();
+  const [jobsFolderId, outputFolderId] = await Promise.all([
+    findDriveSubfolder(rootFolderId, PC_JOBS_SUBFOLDER, accessToken),
+    findDriveSubfolder(rootFolderId, PC_OUTPUT_SUBFOLDER, accessToken),
+  ]);
+
+  if (!jobsFolderId && !outputFolderId) {
+    return { jobs: [], outputs: [], jobsFolderId: null, outputFolderId: null };
+  }
+
+  const [jobFiles, outputFiles] = await Promise.all([
+    jobsFolderId ? listDriveFolderFiles(jobsFolderId, accessToken) : Promise.resolve([]),
+    outputFolderId ? listDriveFolderFiles(outputFolderId, accessToken) : Promise.resolve([]),
+  ]);
+
+  const outputs = outputFiles.filter((f) => f.name.toLowerCase().endsWith('.mp4'));
+  const outputByLowerName = new Map<string, DriveFileMeta>();
+  for (const out of outputs) {
+    outputByLowerName.set(out.name.toLowerCase(), out);
+  }
+
+  const manifestFiles = jobFiles
+    .filter((f) => /^job_.*\.json$/i.test(f.name))
+    .slice(0, 25);
+
+  const jobs: import('../types').PcJobSyncEntry[] = [];
+  await Promise.all(
+    manifestFiles.map(async (file) => {
+      try {
+        const res = await fetch(
+          `${DRIVE_API_BASE}/files/${encodeURIComponent(file.id)}?alt=media`,
+          {
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+            },
+          }
+        );
+        if (!res.ok) return;
+        const parsed = (await res.json()) as import('../types').RenderJobManifest;
+        if (!parsed || typeof parsed !== 'object' || !parsed.jobId || !parsed.status) return;
+
+        const matchedOutput = parsed.outputFileName
+          ? outputByLowerName.get(parsed.outputFileName.toLowerCase())
+          : undefined;
+
+        jobs.push({
+          manifest: parsed,
+          jobFileId: file.id,
+          jobFileName: file.name,
+          modifiedTime: file.modifiedTime,
+          outputFile: matchedOutput,
+        });
+      } catch {
+        // Ignore temporarily half-synced or unreadable JSON files
+      }
+    })
+  );
+
+  jobs.sort((a, b) => {
+    const aMs = Date.parse(a.manifest.updatedAt || a.manifest.createdAt || a.modifiedTime || '') || 0;
+    const bMs = Date.parse(b.manifest.updatedAt || b.manifest.createdAt || b.modifiedTime || '') || 0;
+    return bMs - aMs;
+  });
+
+  logInfo('Drive', 'Estado de trabajos PC sincronizado', {
+    trabajos: jobs.length,
+    completados: jobs.filter((j) => j.manifest.status === 'completed').length,
+    outputsMp4: outputs.length,
+    ms: Math.round(performance.now() - t0),
+  });
+
+  return { jobs, outputs, jobsFolderId, outputFolderId };
+}

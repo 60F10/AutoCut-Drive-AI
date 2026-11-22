@@ -11,6 +11,7 @@ import {
   EDIT_STYLE_PRESETS,
   MOBILE_MULTICLIP_SAFE_CLIP_LIMIT,
   MOBILE_RAM_WARNING_BYTES,
+  PC_RENDER_RECOMMENDED_BYTES,
   RECOMMENDED_GEMINI_MODELS,
   buildAssSubtitles,
   buildCombinedEditedFilename,
@@ -20,6 +21,7 @@ import {
   buildFfmpegFilterComplex,
   buildGeminiSystemPrompt,
   buildMultiClipFfmpegFilterComplex,
+  buildRenderJobManifest,
   buildSingleSegmentFfmpegArgs,
   buildSrtSubtitles,
   calculateSelectedDuration,
@@ -36,6 +38,7 @@ import {
   filterEditedCuts,
   formatBytes,
   formatDurationHuman,
+  formatPcJobStatusLabel,
   formatPhaseError,
   formatSeconds,
   isMobileViewportOrUserAgent,
@@ -48,6 +51,7 @@ import {
   remapSubtitlesToFinalTimeline,
   sanitizeEtiqueta,
   sanitizeGeminiModelName,
+  shouldRecommendPcRender,
   toLocalDateKey,
   type ExtractedVideoFrame,
 } from './videoPipeline';
@@ -970,7 +974,106 @@ test('evaluateMultiClipMobileRamProtection warns on mobile 1080p when clips > 3 
   assert.equal(desktop1080p.shouldWarn, false);
 });
 
+test('Hybrid PC render contract: buildRenderJobManifest, shouldRecommendPcRender, and formatPcJobStatusLabel', () => {
+  assert.equal(PC_RENDER_RECOMMENDED_BYTES, 100 * 1024 * 1024);
+  assert.equal(shouldRecommendPcRender({ sizeBytes: 50 * 1024 * 1024, isMultiClip: false }), false);
+  assert.equal(shouldRecommendPcRender({ sizeBytes: 120 * 1024 * 1024, isMultiClip: false }), true);
+  assert.equal(shouldRecommendPcRender({ sizeBytes: 25 * 1024 * 1024, isMultiClip: true }), true);
 
+  assert.equal(formatPcJobStatusLabel('pending', 0), 'En cola PC');
+  assert.equal(formatPcJobStatusLabel('processing', 45), 'Renderizando en PC (45%)');
+  assert.equal(formatPcJobStatusLabel('completed', 100), 'Completado');
+  assert.equal(formatPcJobStatusLabel('error', 30), 'Error');
 
+  // Multi-Clip manifest with subtitles ON and blur_pad -> blur_bg
+  const multiManifest = buildRenderJobManifest({
+    jobId: 'testjob1',
+    createdAt: '2026-11-22T10:00:00.000Z',
+    exportQuality: 'high_1080p',
+    tiktokOptions: {
+      subtitlesEnabled: true,
+      silenceTrimEnabled: true,
+      audioNormalizeEnabled: true,
+      framingMode: 'blur_pad',
+    },
+    item: {
+      id: 'mc-1',
+      originalName: 'Viaje_Combinado',
+      projectName: 'Viaje',
+      isMultiClip: true,
+      sourceClips: [
+        { id: 's0', source: 'drive', driveFileId: 'drv-0', originalName: 'clip_a.mov', mimeType: 'video/quicktime', sizeBytes: 180_000_000 },
+        { id: 's1', source: 'drive', driveFileId: 'drv-1', originalName: 'clip_b.mp4', mimeType: 'video/mp4', sizeBytes: 210_000_000 },
+      ],
+      analysis: {
+        etiqueta: 'VIAJE',
+        titulo_interno: 'Escapada express',
+        duracion_objetivo_seg: 12,
+        cortes: [
+          { id: 'c1', clip_index: 1, start_sec: 5, end_sec: 10, motivo: 'Gancho', enabled: true },
+          { id: 'c2', clip_index: 0, start_sec: 2, end_sec: 4, motivo: 'Omitido', enabled: false },
+          { id: 'c3', clip_index: 0, start_sec: 12, end_sec: 18, motivo: 'Remate', enabled: true },
+        ],
+        subtitulos: [
+          { id: 'sub1', clip_index: 1, start_sec: 5.5, end_sec: 7.5, text: '¡Arrancamos!' },
+          { id: 'sub2', clip_index: 0, start_sec: 13, end_sec: 15, text: 'Final épico' },
+        ],
+      },
+    },
+  });
 
+  assert.equal(multiManifest.jobId, 'testjob1');
+  assert.equal(multiManifest.status, 'pending');
+  assert.equal(multiManifest.progress, 0);
+  assert.equal(multiManifest.sourceFiles.length, 2);
+  assert.deepEqual(multiManifest.sourceFiles[0], { name: 'clip_a.mov', driveFileId: 'drv-0' });
+  assert.deepEqual(multiManifest.cuts, [
+    { clipIndex: 1, start: 5, end: 10 },
+    { clipIndex: 0, start: 12, end: 18 },
+  ]);
+  assert.equal(multiManifest.options.quality, '1080p');
+  assert.equal(multiManifest.options.framing, 'blur_bg');
+  assert.equal(multiManifest.options.removeSilences, true);
+  assert.equal(multiManifest.options.normalizeAudio, true);
+  assert.equal(multiManifest.options.subtitlesEnabled, true);
+  assert.deepEqual(multiManifest.options.subtitlesData, [
+    { start: 0.5, end: 2.5, text: '¡Arrancamos!' },
+    { start: 6, end: 8, text: 'Final épico' },
+  ]);
+  assert.ok(multiManifest.outputFileName.endsWith('.mp4'));
 
+  // Single-clip manifest with subtitles OFF omits subtitlesData completely & maps mobile_fast -> 720p
+  const singleManifest = buildRenderJobManifest({
+    jobId: 'testjob2',
+    exportQuality: 'mobile_fast',
+    tiktokOptions: {
+      subtitlesEnabled: false,
+      silenceTrimEnabled: false,
+      audioNormalizeEnabled: false,
+      framingMode: 'center_crop',
+    },
+    item: {
+      id: 'sc-1',
+      originalName: 'IMG_4021.MOV',
+      driveFileId: 'drv-single',
+      isMultiClip: false,
+      analysis: {
+        etiqueta: 'VLOG',
+        titulo_interno: 'Café rápido',
+        duracion_objetivo_seg: 8,
+        cortes: [
+          { id: 'c1', clip_index: 0, start_sec: 1, end_sec: 9, motivo: 'Único corte', enabled: true },
+        ],
+        subtitulos: [{ id: 's1', clip_index: 0, start_sec: 2, end_sec: 4, text: 'No incluir' }],
+      },
+    },
+  });
+
+  assert.equal(singleManifest.options.quality, '720p');
+  assert.equal(singleManifest.options.framing, 'center_crop');
+  assert.equal(singleManifest.options.subtitlesEnabled, false);
+  assert.equal(singleManifest.options.subtitlesData, undefined);
+  assert.deepEqual(singleManifest.sourceFiles, [
+    { name: 'IMG_4021.MOV', driveFileId: 'drv-single' },
+  ]);
+});

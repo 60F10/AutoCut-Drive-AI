@@ -21,8 +21,10 @@ import {
 } from 'lucide-react';
 import type {
   AnalyticsRecord,
+  DriveFileMeta,
   EditStylePreset,
   ExportQuality,
+  PcJobSyncEntry,
   QueueItem,
   QueueStage,
   TikTokEditOptions,
@@ -30,10 +32,12 @@ import type {
 import {
   exceedsMobileRamThreshold,
   formatBytes,
+  formatPcJobStatusLabel,
   formatSeconds,
 } from '../utils/videoPipeline';
 import { QueueAnalyticsPanel } from './QueueAnalyticsPanel';
 import { EditStyleControls } from './EditStyleControls';
+import { PcJobsPanel } from './PcJobsPanel';
 
 type StatusFilter = 'all' | 'pending' | 'active' | 'completed';
 
@@ -67,6 +71,14 @@ interface QueueViewProps {
   onAddLocalFiles: (files: FileList) => void;
   onLoadDemo: () => void;
   onGoToSettings: () => void;
+  pcJobs: PcJobSyncEntry[];
+  pcOutputs: DriveFileMeta[];
+  isSyncingPcJobs: boolean;
+  lastPcSyncTime: number | null;
+  downloadingOutputId: string | null;
+  pcOutputPreviewUrls: Record<string, string>;
+  onSyncPcJobs: () => void;
+  onDownloadPcOutput: (outputFile: DriveFileMeta, triggerSave?: boolean) => void;
 }
 
 const STAGE_ORDER: QueueStage[] = [
@@ -130,6 +142,14 @@ export function QueueView({
   onAddLocalFiles,
   onLoadDemo,
   onGoToSettings,
+  pcJobs,
+  pcOutputs,
+  isSyncingPcJobs,
+  lastPcSyncTime,
+  downloadingOutputId,
+  pcOutputPreviewUrls,
+  onSyncPcJobs,
+  onDownloadPcOutput,
 }: QueueViewProps) {
   const [filter, setFilter] = useState<StatusFilter>('all');
   const [query, setQuery] = useState('');
@@ -285,6 +305,22 @@ export function QueueView({
 
       {/* Analytics Dashboard (Recharts daily videos, total saved footage, Gemini tags breakdown) */}
       <QueueAnalyticsPanel records={analyticsRecords} />
+
+      {/* Hybrid PC Render Jobs Panel (_AutoCut_Jobs & _AutoCut_Output) */}
+      <PcJobsPanel
+        mode="queue"
+        pcJobs={pcJobs}
+        pcOutputs={pcOutputs}
+        isDriveConnected={isDriveConnected}
+        folderId={folderId}
+        isSyncing={isSyncingPcJobs}
+        lastSyncTime={lastPcSyncTime}
+        downloadingOutputId={downloadingOutputId}
+        previewUrls={pcOutputPreviewUrls}
+        onSync={onSyncPcJobs}
+        onDownloadOutput={onDownloadPcOutput}
+        onGoToSettings={onGoToSettings}
+      />
 
       {/* Discreet non-blocking > 200 MB RAM warning for mobile FFmpeg.wasm */}
       {showMobileRamNotice && (
@@ -575,6 +611,12 @@ export function QueueView({
                           </>
                         ) : null}
                       </div>
+
+                      {item.pcJobStatus && (
+                        <p className="inline-flex items-center gap-1.5 rounded-sm border border-[#00f0ff]/30 bg-[#00f0ff]/10 px-2 py-0.5 font-mono text-[11px] font-semibold text-[#00f0ff]">
+                          PC: {formatPcJobStatusLabel(item.pcJobStatus, item.pcJobProgress)}
+                        </p>
+                      )}
 
                       {item.outputFileName && (
                         <p className="font-mono text-xs text-[#00f0ff]/90 truncate">

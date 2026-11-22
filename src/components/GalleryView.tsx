@@ -13,7 +13,7 @@ import {
   Search,
   Sparkles,
 } from 'lucide-react';
-import type { QueueItem } from '../types';
+import type { DriveFileMeta, PcJobSyncEntry, QueueItem } from '../types';
 import {
   buildCombinedEditedFilename,
   buildEditedFilename,
@@ -22,27 +22,48 @@ import {
   formatDurationHuman,
   formatSeconds,
 } from '../utils/videoPipeline';
+import { PcJobsPanel } from './PcJobsPanel';
 
 interface GalleryViewProps {
   items: QueueItem[];
   isDriveConnected: boolean;
+  folderId: string;
   restoringDriveId: string | null;
   onOpenStudio: (itemId: string) => void;
   onRequestDriveUpload: (itemId: string) => void;
   onDownloadFromDrive: (itemId: string) => void;
   onLoadDemo: () => void;
   onGoToQueue: () => void;
+  onGoToSettings: () => void;
+  pcJobs: PcJobSyncEntry[];
+  pcOutputs: DriveFileMeta[];
+  isSyncingPcJobs: boolean;
+  lastPcSyncTime: number | null;
+  downloadingOutputId: string | null;
+  pcOutputPreviewUrls: Record<string, string>;
+  onSyncPcJobs: () => void;
+  onDownloadPcOutput: (outputFile: DriveFileMeta, triggerSave?: boolean) => void;
 }
 
 export function GalleryView({
   items,
   isDriveConnected,
+  folderId,
   restoringDriveId,
   onOpenStudio,
   onRequestDriveUpload,
   onDownloadFromDrive,
   onLoadDemo,
   onGoToQueue,
+  onGoToSettings,
+  pcJobs,
+  pcOutputs,
+  isSyncingPcJobs,
+  lastPcSyncTime,
+  downloadingOutputId,
+  pcOutputPreviewUrls,
+  onSyncPcJobs,
+  onDownloadPcOutput,
 }: GalleryViewProps) {
   const [selectedTag, setSelectedTag] = useState<string>('ALL');
   const [query, setQuery] = useState('');
@@ -89,32 +110,49 @@ export function GalleryView({
 
   if (completedItems.length === 0) {
     return (
-      <div className="cyber-panel rounded-md px-6 py-16 text-center">
-        <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-md border border-[#00f0ff]/30 bg-[#05060a] text-[#00f0ff]">
-          <Film className="h-5 w-5" />
-        </div>
-        <h2 className="mt-4 font-display text-lg font-semibold text-[#EEF5FF]">
-          Aún no tienes resultados en la galería
-        </h2>
-        <p className="mx-auto mt-2 max-w-md text-sm text-[#94A8C4] leading-relaxed">
-          Cuando Gemini y FFmpeg.wasm terminen de editar tus clips individuales o combinados, se guardarán en la caché local (IndexedDB) y aparecerán aquí listos para reproducir, descargar o subir a Drive.
-        </p>
-        <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
-          <button
-            type="button"
-            onClick={onGoToQueue}
-            className="cyber-btn-primary inline-flex h-11 items-center gap-2 px-5 text-sm whitespace-nowrap"
-          >
-            Ir a la cola de vídeos
-          </button>
-          <button
-            type="button"
-            onClick={onLoadDemo}
-            className="inline-flex h-11 items-center gap-2 rounded-md border border-[#ff2a85]/40 bg-[#ff2a85]/10 px-4 text-sm font-medium text-[#EEF5FF] hover:bg-[#ff2a85]/20 transition-colors whitespace-nowrap"
-          >
-            <Sparkles className="h-4 w-4 text-[#ff2a85]" />
-            Cargar sesión de ejemplo
-          </button>
+      <div className="space-y-6">
+        <PcJobsPanel
+          mode="gallery"
+          pcJobs={pcJobs}
+          pcOutputs={pcOutputs}
+          isDriveConnected={isDriveConnected}
+          folderId={folderId}
+          isSyncing={isSyncingPcJobs}
+          lastSyncTime={lastPcSyncTime}
+          downloadingOutputId={downloadingOutputId}
+          previewUrls={pcOutputPreviewUrls}
+          onSync={onSyncPcJobs}
+          onDownloadOutput={onDownloadPcOutput}
+          onGoToSettings={onGoToSettings}
+        />
+
+        <div className="cyber-panel rounded-md px-6 py-14 text-center">
+          <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-md border border-[#00f0ff]/30 bg-[#05060a] text-[#00f0ff]">
+            <Film className="h-5 w-5" />
+          </div>
+          <h2 className="mt-4 font-display text-lg font-semibold text-[#EEF5FF]">
+            Aún no tienes resultados locales en la galería
+          </h2>
+          <p className="mx-auto mt-2 max-w-md text-sm text-[#94A8C4] leading-relaxed">
+            Cuando Gemini y FFmpeg.wasm terminen de editar tus clips individuales o combinados, se guardarán en la caché local (IndexedDB) y aparecerán aquí listos para reproducir, descargar o subir a Drive.
+          </p>
+          <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
+            <button
+              type="button"
+              onClick={onGoToQueue}
+              className="cyber-btn-primary inline-flex h-11 items-center gap-2 px-5 text-sm whitespace-nowrap"
+            >
+              Ir a la cola de vídeos
+            </button>
+            <button
+              type="button"
+              onClick={onLoadDemo}
+              className="inline-flex h-11 items-center gap-2 rounded-md border border-[#ff2a85]/40 bg-[#ff2a85]/10 px-4 text-sm font-medium text-[#EEF5FF] hover:bg-[#ff2a85]/20 transition-colors whitespace-nowrap"
+            >
+              <Sparkles className="h-4 w-4 text-[#ff2a85]" />
+              Cargar sesión de ejemplo
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -122,6 +160,20 @@ export function GalleryView({
 
   return (
     <div className="space-y-6">
+      <PcJobsPanel
+        mode="gallery"
+        pcJobs={pcJobs}
+        pcOutputs={pcOutputs}
+        isDriveConnected={isDriveConnected}
+        folderId={folderId}
+        isSyncing={isSyncingPcJobs}
+        lastSyncTime={lastPcSyncTime}
+        downloadingOutputId={downloadingOutputId}
+        previewUrls={pcOutputPreviewUrls}
+        onSync={onSyncPcJobs}
+        onDownloadOutput={onDownloadPcOutput}
+        onGoToSettings={onGoToSettings}
+      />
       {/* Toolbar: Tag Filters + Search */}
       <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <div

@@ -4,11 +4,13 @@ import {
   ArrowDown,
   ArrowUp,
   Captions,
+  CheckCircle2,
   CheckSquare,
   CloudUpload,
   Download,
   Film,
   Loader2,
+  Monitor,
   Pause,
   Play,
   RefreshCw,
@@ -27,10 +29,12 @@ import {
   evaluateMultiClipMobileRamProtection,
   filterEditedCuts,
   formatBytes,
+  formatPcJobStatusLabel,
   formatSeconds,
   getBaseName,
   isMobileViewportOrUserAgent,
   remapSubtitlesToFinalTimeline,
+  shouldRecommendPcRender,
 } from '../utils/videoPipeline';
 
 interface StudioViewProps {
@@ -46,6 +50,9 @@ interface StudioViewProps {
     patch: { start_sec?: number; end_sec?: number }
   ) => void;
   onRerenderItem: (itemId: string, qualityOverride?: ExportQuality) => void;
+  onSendToPc: (itemId: string) => void;
+  isSendingToPc: boolean;
+  lastSentPcJob: { itemId: string; jobId: string; outputFileName: string } | null;
   onRequestDriveUpload: (itemId: string) => void;
   exportQuality: ExportQuality;
   onChangeExportQuality: (quality: ExportQuality) => void;
@@ -55,6 +62,7 @@ interface StudioViewProps {
   renderProgress: { percent: number; message: string } | null;
   canUploadToDrive: boolean;
   onBackToQueue: () => void;
+  onGoToGallery: () => void;
 }
 
 export function StudioView({
@@ -66,6 +74,9 @@ export function StudioView({
   onReorderCut,
   onUpdateCutTiming,
   onRerenderItem,
+  onSendToPc,
+  isSendingToPc,
+  lastSentPcJob,
   onRequestDriveUpload,
   exportQuality,
   onChangeExportQuality,
@@ -75,6 +86,7 @@ export function StudioView({
   renderProgress,
   canUploadToDrive,
   onBackToQueue,
+  onGoToGallery,
 }: StudioViewProps) {
   const analyzedItems = useMemo(() => items.filter((i) => Boolean(i.analysis)), [items]);
   const currentItem = useMemo(
@@ -210,6 +222,14 @@ export function StudioView({
       })
     : { shouldWarn: false, clipCount: 1, totalBytes: currentItem.sizeBytes || 0, reason: null };
   const isPendingFinalRender = currentItem.stage === 'review' || !currentItem.editedUrl;
+  const isPcRenderRecommended = shouldRecommendPcRender({
+    sizeBytes: currentItem.sizeBytes,
+    isMultiClip: currentItem.isMultiClip,
+  });
+  const activePcJobId =
+    (lastSentPcJob?.itemId === currentItem.id ? lastSentPcJob.jobId : undefined) ||
+    currentItem.pcJobId;
+  const activePcStatus = currentItem.pcJobStatus || (activePcJobId ? 'pending' : undefined);
   const hasGeneratedSubtitles = Boolean(plan.subtitulos && plan.subtitulos.length > 0);
   const activeDemoCut =
     enabledCuts.find((c) => c.id === activeCutId) ?? enabledCuts[demoCutIndex] ?? plan.cortes[0];
@@ -623,6 +643,94 @@ export function StudioView({
               </div>
             )}
 
+            {/* Hybrid PC Render CTA (Google Drive _AutoCut_Jobs, zero mobile RAM usage) */}
+            <div
+              className={`rounded-md border p-2.5 space-y-2 ${
+                isPcRenderRecommended
+                  ? 'border-[#fcee0a]/55 bg-[#fcee0a]/[0.07]'
+                  : 'border-[#00f0ff]/35 bg-[#00f0ff]/[0.05]'
+              }`}
+            >
+              <div className="flex flex-wrap items-center justify-between gap-1.5">
+                <span className="inline-flex items-center gap-1.5 font-mono text-[10px] font-semibold uppercase tracking-wider text-[#00f0ff]">
+                  <Monitor className="h-3.5 w-3.5" />
+                  Render híbrido PC · 0 €
+                </span>
+                <span
+                  data-testid="studio-pc-recommended-tag"
+                  className={`font-mono text-[10px] font-semibold px-1.5 py-0.5 rounded-sm border ${
+                    isPcRenderRecommended
+                      ? 'border-[#fcee0a]/60 bg-[#fcee0a]/15 text-[#fcee0a]'
+                      : 'border-[#00f0ff]/30 bg-[#05060a] text-[#94A8C4]'
+                  }`}
+                >
+                  Recomendado para &gt;100 MB / Multi-Clip
+                </span>
+              </div>
+
+              <button
+                type="button"
+                data-testid="studio-send-to-pc-btn"
+                onClick={() => onSendToPc(currentItem.id)}
+                disabled={isSendingToPc || enabledCuts.length === 0 || !canUploadToDrive}
+                title={
+                  !canUploadToDrive
+                    ? 'Conecta Google Drive y configura tu carpeta en Ajustes para enviar el manifiesto a _AutoCut_Jobs'
+                    : 'Sube únicamente el JSON de cortes a _AutoCut_Jobs sin descargar el vídeo bruto en el móvil'
+                }
+                className="flex min-h-[44px] w-full items-center justify-center gap-2 rounded-md border border-[#00f0ff]/70 bg-[#00f0ff]/16 px-3.5 py-2 text-xs sm:text-sm font-semibold text-[#EEF5FF] hover:bg-[#00f0ff]/26 hover:border-[#00f0ff] disabled:opacity-45 transition-colors"
+              >
+                {isSendingToPc ? (
+                  <>
+                    <Loader2 className="h-4 w-4 animate-spin text-[#00f0ff] shrink-0" />
+                    Enviando trabajo a Drive...
+                  </>
+                ) : (
+                  <>
+                    <Monitor className="h-4 w-4 text-[#00f0ff] shrink-0" />
+                    Enviar render a PC ({enabledCuts.length} cortes)
+                  </>
+                )}
+              </button>
+
+              {activePcJobId && activePcStatus && (
+                <div
+                  role="status"
+                  data-testid="studio-pc-sent-banner"
+                  className="rounded-sm border border-[#00f0ff]/35 bg-[#05060a]/90 px-3 py-2 text-[11px] space-y-1.5"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="inline-flex items-center gap-1.5 font-mono font-semibold text-[#00f0ff]">
+                      <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                      Enviado a _AutoCut_Jobs
+                    </span>
+                    <span className="font-mono text-[#fcee0a]">
+                      {formatPcJobStatusLabel(activePcStatus, currentItem.pcJobProgress)}
+                    </span>
+                  </div>
+                  <p className="font-mono text-[10px] text-[#8EA2BD] truncate">
+                    job_{activePcJobId}.json → {targetOutputName}
+                  </p>
+                  <div className="flex flex-wrap gap-2 pt-0.5">
+                    <button
+                      type="button"
+                      onClick={onBackToQueue}
+                      className="font-mono text-[10px] font-semibold text-[#00f0ff] hover:underline"
+                    >
+                      Ver progreso en Cola →
+                    </button>
+                    <button
+                      type="button"
+                      onClick={onGoToGallery}
+                      className="font-mono text-[10px] font-semibold text-[#fcee0a] hover:underline"
+                    >
+                      Ver en Galería →
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
             <button
               type="button"
               data-testid="studio-render-final-btn"
@@ -677,7 +785,7 @@ export function StudioView({
 
             {!canUploadToDrive && (
               <p className="text-[11px] text-[#8EA2BD] text-center">
-                Conecta Google Drive y define un ID de carpeta en Ajustes para subir el MP4 final.
+                Conecta Google Drive y define un ID de carpeta en Ajustes para enviar renders al PC o subir el MP4 final.
               </p>
             )}
           </div>

@@ -5,6 +5,9 @@ import type {
   ExportQuality,
   FramingMode,
   GeminiEditPlan,
+  QueueItem,
+  RenderJobManifest,
+  RenderJobStatus,
   SubtitleBlock,
   TikTokEditOptions,
   VideoCut,
@@ -14,6 +17,9 @@ const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.webm']);
 const EDITED_MARKER = '_EDITADO';
 
 export const MOBILE_RAM_WARNING_BYTES = 200 * 1024 * 1024; // 200 MB
+export const PC_RENDER_RECOMMENDED_BYTES = 100 * 1024 * 1024; // 100 MB
+export const AUTOCUT_JOBS_FOLDER_NAME = '_AutoCut_Jobs';
+export const AUTOCUT_OUTPUT_FOLDER_NAME = '_AutoCut_Output';
 export const MOBILE_MULTICLIP_SAFE_CLIP_LIMIT = 3;
 export const HEAVY_VIDEO_DURATION_SEC = 360; // 6 minutes
 export const ULTRA_HD_MIN_LONG_EDGE = 3840; // 4K UHD
@@ -1265,6 +1271,134 @@ export function buildConcatCopyFfmpegArgs(
     '+faststart',
     outputFileName,
   ];
+}
+
+/**
+ * Recommends offloading render to the PC worker for Multi-Clip projects or videos > 100 MB.
+ */
+export function shouldRecommendPcRender(input: {
+  sizeBytes?: number;
+  isMultiClip?: boolean;
+}): boolean {
+  return Boolean(input.isMultiClip || (Number(input.sizeBytes) || 0) > PC_RENDER_RECOMMENDED_BYTES);
+}
+
+export function formatPcJobStatusLabel(status: RenderJobStatus, progress = 0): string {
+  const pct = Math.max(0, Math.min(100, Math.round(Number(progress) || 0)));
+  switch (status) {
+    case 'pending':
+      return 'En cola PC';
+    case 'processing':
+      return `Renderizando en PC (${pct}%)`;
+    case 'completed':
+      return 'Completado';
+    case 'error':
+      return 'Error';
+    default:
+      return 'En cola PC';
+  }
+}
+
+export function generatePcRenderJobId(nowMs = Date.now()): string {
+  const stamp = nowMs.toString(36);
+  const rand = Math.random().toString(36).slice(2, 7);
+  return `${stamp}_${rand}`;
+}
+
+/**
+ * Builds the canonical `job_<jobId>.json` manifest consumed by `worker/pc-worker.mjs`
+ * via Google Drive (`_AutoCut_Jobs` -> `_AutoCut_Output`).
+ */
+export function buildRenderJobManifest(input: {
+  item: Pick<
+    QueueItem,
+    | 'id'
+    | 'originalName'
+    | 'driveFileId'
+    | 'outputFileName'
+    | 'isMultiClip'
+    | 'projectName'
+    | 'sourceClips'
+    | 'analysis'
+  >;
+  exportQuality: ExportQuality;
+  tiktokOptions: TikTokEditOptions;
+  jobId?: string;
+  createdAt?: string;
+}): RenderJobManifest {
+  const { item, exportQuality, tiktokOptions } = input;
+  const plan = item.analysis;
+  if (!plan) {
+    throw new Error('Este vídeo todavía no tiene un plan de cortes analizado por Gemini.');
+  }
+
+  const activeCuts = filterEditedCuts(plan.cortes, true);
+  if (activeCuts.length === 0) {
+    throw new Error('Activa al menos un corte antes de enviar el trabajo al PC.');
+  }
+
+  const normalizedOpts = normalizeTikTokOptions(tiktokOptions);
+  const isMulti = Boolean(item.isMultiClip && item.sourceClips && item.sourceClips.length > 0);
+  const sourceFiles = isMulti
+    ? item.sourceClips!.map((clip) => ({
+        name: clip.originalName,
+        ...(clip.driveFileId ? { driveFileId: clip.driveFileId } : {}),
+      }))
+    : [
+        {
+          name: item.originalName,
+          ...(item.driveFileId ? { driveFileId: item.driveFileId } : {}),
+        },
+      ];
+
+  const rawOutputName =
+    item.outputFileName?.trim() ||
+    (isMulti
+      ? buildCombinedEditedFilename(item.projectName || item.originalName, plan.etiqueta)
+      : buildEditedFilename(item.originalName, plan.etiqueta));
+  const outputFileName = rawOutputName.toLowerCase().endsWith('.mp4')
+    ? rawOutputName
+    : `${rawOutputName}.mp4`;
+
+  const cuts = activeCuts.map((cut) => ({
+    clipIndex: Math.max(0, Math.min(sourceFiles.length - 1, cut.clip_index ?? 0)),
+    start: Number(Math.max(0, cut.start_sec).toFixed(3)),
+    end: Number(Math.max(cut.start_sec + 0.15, cut.end_sec).toFixed(3)),
+  }));
+
+  let subtitlesData: RenderJobManifest['options']['subtitlesData'];
+  if (normalizedOpts.subtitlesEnabled && plan.subtitulos && plan.subtitulos.length > 0) {
+    const remapped = remapSubtitlesToFinalTimeline(plan.subtitulos, activeCuts);
+    if (remapped.length > 0) {
+      subtitlesData = remapped.map((block) => ({
+        start: Number(block.start_sec.toFixed(2)),
+        end: Number(block.end_sec.toFixed(2)),
+        text: block.text,
+      }));
+    }
+  }
+
+  return {
+    jobId: input.jobId || generatePcRenderJobId(),
+    createdAt: input.createdAt || new Date().toISOString(),
+    status: 'pending',
+    progress: 0,
+    outputFileName,
+    sourceFiles,
+    cuts,
+    options: {
+      quality: normalizeExportQuality(exportQuality) === 'mobile_fast' ? '720p' : '1080p',
+      framing: normalizedOpts.framingMode === 'blur_pad' ? 'blur_bg' : 'center_crop',
+      removeSilences: normalizedOpts.silenceTrimEnabled,
+      normalizeAudio: normalizedOpts.audioNormalizeEnabled,
+      subtitlesEnabled: normalizedOpts.subtitlesEnabled,
+      ...(subtitlesData ? { subtitlesData } : {}),
+    },
+    queueItemId: item.id,
+    title: plan.titulo_interno,
+    etiqueta: plan.etiqueta,
+    isMultiClip: isMulti,
+  };
 }
 
 export interface DailyAnalyticsPoint {

@@ -21,6 +21,7 @@ import { useAppSettings } from './hooks/useAppSettings';
 import { useGoogleDriveAuth } from './hooks/useGoogleDriveAuth';
 import { useVideoQueue } from './hooks/useVideoQueue';
 import { useStudioEditor } from './hooks/useStudioEditor';
+import { usePcRenderJobs } from './hooks/usePcRenderJobs';
 import { Sidebar } from './components/Sidebar';
 import { MobileBottomNav } from './components/MobileBottomNav';
 import { QueueView } from './components/QueueView';
@@ -145,6 +146,18 @@ export default function App() {
   });
 
   selectStudioRef.current = studio.setSelectedStudioId;
+
+  const pcRender = usePcRenderJobs({
+    folderId: settings.folderId,
+    accessToken,
+    isDriveConnected,
+    exportQuality: settings.exportQuality,
+    tiktokOptions,
+    itemsRef: queue.itemsRef,
+    updateQueueItem: queue.updateQueueItem,
+    clearAuthSession,
+    onError: reportError,
+  });
 
   const openItemInStudio = useCallback(
     (itemId: string) => {
@@ -402,6 +415,16 @@ export default function App() {
               onAddLocalFiles={queue.handleAddLocalFiles}
               onLoadDemo={queue.handleLoadDemo}
               onGoToSettings={() => setActiveView('settings')}
+              pcJobs={pcRender.pcJobs}
+              pcOutputs={pcRender.pcOutputs}
+              isSyncingPcJobs={pcRender.isSyncingPcJobs}
+              lastPcSyncTime={pcRender.lastPcSyncTime}
+              downloadingOutputId={pcRender.downloadingOutputId}
+              pcOutputPreviewUrls={pcRender.pcOutputPreviewUrls}
+              onSyncPcJobs={() => void pcRender.syncPcJobs(false)}
+              onDownloadPcOutput={(file, triggerSave) =>
+                void pcRender.downloadPcOutputVideo(file, triggerSave)
+              }
             />
           )}
 
@@ -409,12 +432,24 @@ export default function App() {
             <GalleryView
               items={queue.items}
               isDriveConnected={isDriveConnected}
+              folderId={settings.folderId}
               restoringDriveId={queue.restoringDriveId}
               onOpenStudio={openItemInStudio}
               onRequestDriveUpload={queue.handleRequestDriveUpload}
               onDownloadFromDrive={queue.handleDownloadFromDrive}
               onLoadDemo={queue.handleLoadDemo}
               onGoToQueue={() => setActiveView('queue')}
+              onGoToSettings={() => setActiveView('settings')}
+              pcJobs={pcRender.pcJobs}
+              pcOutputs={pcRender.pcOutputs}
+              isSyncingPcJobs={pcRender.isSyncingPcJobs}
+              lastPcSyncTime={pcRender.lastPcSyncTime}
+              downloadingOutputId={pcRender.downloadingOutputId}
+              pcOutputPreviewUrls={pcRender.pcOutputPreviewUrls}
+              onSyncPcJobs={() => void pcRender.syncPcJobs(false)}
+              onDownloadPcOutput={(file, triggerSave) =>
+                void pcRender.downloadPcOutputVideo(file, triggerSave)
+              }
             />
           )}
 
@@ -428,6 +463,9 @@ export default function App() {
               onReorderCut={studio.handleReorderCut}
               onUpdateCutTiming={studio.handleUpdateCutTiming}
               onRerenderItem={studio.handleRerenderItem}
+              onSendToPc={(itemId) => void pcRender.sendItemToPc(itemId)}
+              isSendingToPc={Boolean(pcRender.sendingToPcId)}
+              lastSentPcJob={pcRender.lastSentPcJob}
               onRequestDriveUpload={queue.handleRequestDriveUpload}
               exportQuality={settings.exportQuality}
               onChangeExportQuality={handleChangeExportQuality}
@@ -437,6 +475,7 @@ export default function App() {
               renderProgress={studio.studioRenderProgress}
               canUploadToDrive={Boolean(isDriveConnected && settings.folderId)}
               onBackToQueue={() => setActiveView('queue')}
+              onGoToGallery={() => setActiveView('gallery')}
             />
           )}
 

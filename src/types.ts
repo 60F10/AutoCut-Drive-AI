@@ -121,6 +121,12 @@ export interface QueueItem {
   isMultiClip?: boolean;
   projectName?: string;
   sourceClips?: SourceClipRef[];
+  pcJobId?: string;
+  pcJobStatus?: RenderJobStatus;
+  pcJobProgress?: number;
+  pcJobError?: string;
+  pcOutputDriveId?: string;
+  pcOutputWebViewLink?: string;
   completedAt?: number;
   lastUpdated: number;
 }
@@ -141,4 +147,58 @@ export interface AnalyticsRecord {
   editedDurationSec: number;
   isMultiClip?: boolean;
   clipCount?: number;
+}
+
+export type RenderJobStatus = 'pending' | 'processing' | 'completed' | 'error';
+
+export interface RenderJobSourceFile {
+  name: string;
+  driveFileId?: string;
+}
+
+export interface RenderJobCut {
+  clipIndex: number;
+  start: number;
+  end: number;
+}
+
+export interface RenderJobSubtitleBlock {
+  start: number;
+  end: number;
+  text: string;
+}
+
+export interface RenderJobOptions {
+  quality: '720p' | '1080p';
+  framing: 'center_crop' | 'blur_bg';
+  removeSilences: boolean;
+  normalizeAudio: boolean;
+  subtitlesEnabled: boolean;
+  subtitlesData?: RenderJobSubtitleBlock[];
+}
+
+export interface RenderJobManifest {
+  jobId: string;
+  createdAt: string;
+  updatedAt?: string;
+  status: RenderJobStatus;
+  progress: number;
+  outputFileName: string;
+  errorMessage?: string;
+  sourceFiles: RenderJobSourceFile[];
+  cuts: RenderJobCut[];
+  options: RenderJobOptions;
+  queueItemId?: string;
+  title?: string;
+  etiqueta?: string;
+  isMultiClip?: boolean;
+  encoderUsed?: string;
+}
+
+export interface PcJobSyncEntry {
+  manifest: RenderJobManifest;
+  jobFileId: string;
+  jobFileName: string;
+  modifiedTime?: string;
+  outputFile?: DriveFileMeta;
 }
