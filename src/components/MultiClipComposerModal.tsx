@@ -7,9 +7,11 @@ import type {
   TikTokEditOptions,
 } from '../types';
 import {
+  evaluateMultiClipMobileRamProtection,
   exceedsMobileRamThreshold,
   formatBytes,
   getBaseName,
+  isMobileViewportOrUserAgent,
 } from '../utils/videoPipeline';
 import { EditStyleControls } from './EditStyleControls';
 
@@ -51,13 +53,21 @@ export function MultiClipComposerModal({
 }: MultiClipComposerModalProps) {
   const [orderedIds, setOrderedIds] = useState<string[]>([]);
   const [projectName, setProjectName] = useState('');
+  const [confirmMobile1080p, setConfirmMobile1080p] = useState(false);
 
   useEffect(() => {
     if (open) {
       setOrderedIds(selectedItems.map((i) => i.id));
       setProjectName('');
+      setConfirmMobile1080p(false);
     }
   }, [open, selectedItems]);
+
+  useEffect(() => {
+    if (exportQuality === 'mobile_fast') {
+      setConfirmMobile1080p(false);
+    }
+  }, [exportQuality]);
 
   if (!open) return null;
 
@@ -67,7 +77,14 @@ export function MultiClipComposerModal({
     .filter((item): item is QueueItem => Boolean(item));
 
   const totalBytes = orderedClips.reduce((sum, item) => sum + (item.sizeBytes || 0), 0);
-  const showRamWarning = exceedsMobileRamThreshold(totalBytes);
+  const isMobile = isMobileViewportOrUserAgent();
+  const mobileRamGuard = evaluateMultiClipMobileRamProtection({
+    clipCount: orderedClips.length,
+    totalBytes,
+    exportQuality,
+    isMobile,
+  });
+  const showRamWarning = mobileRamGuard.shouldWarn || exceedsMobileRamThreshold(totalBytes);
   const previewBase = projectName.trim() || getBaseName(orderedClips[0]?.originalName || 'Proyecto');
 
   const moveClip = (index: number, direction: -1 | 1) => {
@@ -82,15 +99,30 @@ export function MultiClipComposerModal({
     });
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
+  const launchCombine = () => {
     if (orderedClips.length < 2) return;
+    setConfirmMobile1080p(false);
     onStartCombine(
       orderedClips.map((c) => c.id),
       projectName.trim(),
       stylePreset,
       customInstruction.trim()
     );
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (orderedClips.length < 2) return;
+    if (mobileRamGuard.shouldWarn && !confirmMobile1080p) {
+      setConfirmMobile1080p(true);
+      return;
+    }
+    launchCombine();
+  };
+
+  const handleSwitch720pAndStart = () => {
+    onChangeExportQuality('mobile_fast');
+    launchCombine();
   };
 
   return (
@@ -229,39 +261,60 @@ export function MultiClipComposerModal({
             </div>
           </div>
 
-          {/* Discreet non-blocking > 200 MB RAM warning */}
+          {/* Automatic mobile RAM protection (> 3 clips or > 200 MB in 1080p) + desktop > 200 MB notice */}
           {showRamWarning && (
             <div
               role="note"
-              data-testid="mobile-ram-warning"
-              className="flex items-start gap-2.5 rounded-md border border-[#fcee0a]/45 bg-[#fcee0a]/[0.08] px-3.5 py-2.5 text-xs text-[#fef08a]"
+              data-testid={mobileRamGuard.shouldWarn ? 'mobile-multiclip-ram-guard' : 'mobile-ram-warning'}
+              className={`flex items-start gap-2.5 rounded-md border px-3.5 py-3 text-xs ${
+                mobileRamGuard.shouldWarn
+                  ? 'border-[#ff2a85]/55 bg-[#ff2a85]/[0.1] text-[#ffd1e3]'
+                  : 'border-[#fcee0a]/45 bg-[#fcee0a]/[0.08] text-[#fef08a]'
+              }`}
             >
-              <AlertTriangle className="h-4 w-4 shrink-0 text-[#fcee0a] mt-0.5" />
+              <AlertTriangle
+                className={`h-4 w-4 shrink-0 mt-0.5 ${
+                  mobileRamGuard.shouldWarn ? 'text-[#ff2a85]' : 'text-[#fcee0a]'
+                }`}
+              />
               <div className="min-w-0 flex-1 space-y-2">
-                <p className="leading-relaxed">
-                  Los clips suman{' '}
-                  <strong className="font-mono tabular-nums text-[#fcee0a]">
-                    {formatBytes(totalBytes)}
-                  </strong>{' '}
-                  (más de 200 MB). En navegadores móviles FFmpeg.wasm puede consumir mucha RAM; te recomendamos usar <strong>720p móvil</strong>.
-                </p>
+                {mobileRamGuard.shouldWarn ? (
+                  <>
+                    <p className="font-semibold text-white">
+                      Protección de memoria en móvil (evita cierres en iOS)
+                    </p>
+                    <p className="leading-relaxed">{mobileRamGuard.reason}</p>
+                  </>
+                ) : (
+                  <p className="leading-relaxed">
+                    Los clips suman{' '}
+                    <strong className="font-mono tabular-nums text-[#fcee0a]">
+                      {formatBytes(totalBytes)}
+                    </strong>{' '}
+                    (más de 200 MB). El motor secuencial procesa 1 clip a la vez, pero en móvil te recomendamos usar{' '}
+                    <strong>720p móvil</strong>.
+                  </p>
+                )}
+
                 {exportQuality !== 'mobile_fast' ? (
-                  <button
-                    type="button"
-                    data-testid="modal-switch-mobile-720p-btn"
-                    onClick={() => onChangeExportQuality('mobile_fast')}
-                    className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[#00f0ff]/60 bg-[#00f0ff]/15 px-3 font-mono text-[11px] font-semibold text-[#00f0ff] hover:bg-[#00f0ff]/25 transition-colors"
-                  >
-                    <Zap className="h-3.5 w-3.5" />
-                    Cambiar a 720p móvil
-                  </button>
+                  <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                    <button
+                      type="button"
+                      data-testid="modal-switch-mobile-720p-btn"
+                      onClick={() => onChangeExportQuality('mobile_fast')}
+                      className="inline-flex h-9 items-center gap-1.5 rounded-md border border-[#00f0ff]/65 bg-[#00f0ff]/18 px-3 font-mono text-[11px] font-semibold text-[#00f0ff] hover:bg-[#00f0ff]/28 transition-colors"
+                    >
+                      <Zap className="h-3.5 w-3.5" />
+                      Cambiar a 720p móvil
+                    </button>
+                  </div>
                 ) : (
                   <span
                     data-testid="modal-mobile-720p-active"
                     className="inline-flex items-center gap-1.5 font-mono text-[11px] font-semibold text-[#00f0ff]"
                   >
                     <Check className="h-3.5 w-3.5" />
-                    Modo 720p móvil activado
+                    Modo 720p móvil activado (baja RAM)
                   </span>
                 )}
               </div>
@@ -270,23 +323,53 @@ export function MultiClipComposerModal({
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-end gap-2.5 px-5 py-4 border-t border-[#00f0ff]/20 bg-[#05060a]/85">
-          <button
-            type="button"
-            onClick={onClose}
-            disabled={isProcessing}
-            className="h-11 rounded-md border border-[#00f0ff]/25 px-4 text-xs font-medium text-[#CFE2FF] hover:border-[#00f0ff]/60 hover:bg-[#00f0ff]/10 transition-colors whitespace-nowrap"
-          >
-            Cancelar
-          </button>
-          <button
-            type="submit"
-            disabled={isProcessing || orderedClips.length < 2}
-            className="inline-flex h-11 items-center gap-2 cyber-btn-magenta px-5 text-xs disabled:opacity-45 whitespace-nowrap"
-          >
-            <Sparkles className="h-3.5 w-3.5" />
-            Combinar y editar ({orderedClips.length})
-          </button>
+        <div className="px-5 py-4 border-t border-[#00f0ff]/20 bg-[#05060a]/85 space-y-2.5">
+          {confirmMobile1080p && mobileRamGuard.shouldWarn ? (
+            <div
+              data-testid="mobile-multiclip-confirm-bar"
+              className="flex flex-col sm:flex-row items-stretch sm:items-center justify-end gap-2"
+            >
+              <button
+                type="button"
+                data-testid="modal-switch-720p-and-start-btn"
+                onClick={handleSwitch720pAndStart}
+                disabled={isProcessing}
+                className="inline-flex h-11 items-center justify-center gap-2 cyber-btn-primary px-4 text-xs font-semibold whitespace-nowrap"
+              >
+                <Zap className="h-3.5 w-3.5" />
+                Cambiar a 720p móvil y continuar
+              </button>
+              <button
+                type="button"
+                data-testid="modal-force-1080p-btn"
+                onClick={launchCombine}
+                disabled={isProcessing}
+                className="inline-flex h-11 items-center justify-center gap-2 rounded-md border border-[#ff2a85]/45 bg-[#ff2a85]/10 px-4 text-xs font-medium text-[#ffb3d1] hover:bg-[#ff2a85]/20 transition-colors whitespace-nowrap"
+              >
+                Seguir en 1080p igualmente
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center justify-end gap-2.5">
+              <button
+                type="button"
+                onClick={onClose}
+                disabled={isProcessing}
+                className="h-11 rounded-md border border-[#00f0ff]/25 px-4 text-xs font-medium text-[#CFE2FF] hover:border-[#00f0ff]/60 hover:bg-[#00f0ff]/10 transition-colors whitespace-nowrap"
+              >
+                Cancelar
+              </button>
+              <button
+                type="submit"
+                data-testid="modal-start-combine-btn"
+                disabled={isProcessing || orderedClips.length < 2}
+                className="inline-flex h-11 items-center gap-2 cyber-btn-magenta px-5 text-xs disabled:opacity-45 whitespace-nowrap"
+              >
+                <Sparkles className="h-3.5 w-3.5" />
+                Combinar y editar ({orderedClips.length})
+              </button>
+            </div>
+          )}
         </div>
       </form>
     </div>

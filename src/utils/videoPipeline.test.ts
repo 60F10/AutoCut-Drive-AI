@@ -9,14 +9,18 @@ import {
   DEFAULT_GEMINI_MODEL,
   DEFAULT_TIKTOK_OPTIONS,
   EDIT_STYLE_PRESETS,
+  MOBILE_MULTICLIP_SAFE_CLIP_LIMIT,
   MOBILE_RAM_WARNING_BYTES,
   RECOMMENDED_GEMINI_MODELS,
   buildAssSubtitles,
   buildCombinedEditedFilename,
+  buildConcatCopyFfmpegArgs,
+  buildConcatListContent,
   buildEditedFilename,
   buildFfmpegFilterComplex,
   buildGeminiSystemPrompt,
   buildMultiClipFfmpegFilterComplex,
+  buildSingleSegmentFfmpegArgs,
   buildSrtSubtitles,
   calculateSelectedDuration,
   computeFrameTimestamps,
@@ -26,6 +30,7 @@ import {
   detectPendingVideos,
   enforceAiPayloadBudget,
   evaluateHeavyVideoWarning,
+  evaluateMultiClipMobileRamProtection,
   exceedsMobileRamThreshold,
   extractDriveFolderId,
   filterEditedCuts,
@@ -33,11 +38,13 @@ import {
   formatDurationHuman,
   formatPhaseError,
   formatSeconds,
+  isMobileViewportOrUserAgent,
   mergeMultiClipEditPlans,
   normalizeStylePreset,
   normalizeTikTokOptions,
   parseGeminiEditPlan,
   parseHumanReadableApiError,
+  planSequentialMultiClipJobs,
   remapSubtitlesToFinalTimeline,
   sanitizeEtiqueta,
   sanitizeGeminiModelName,
@@ -45,15 +52,20 @@ import {
   type ExtractedVideoFrame,
 } from './videoPipeline';
 import {
+  DEBUG_LOGS_STORAGE_KEY,
   MAX_DEBUG_LOG_ENTRIES,
+  MAX_PERSISTED_DEBUG_LOG_ENTRIES,
+  NEW_SESSION_SEPARATOR,
   buildDiagnosticReport,
   clearDebugLogs,
   getDebugLogStats,
   getDebugLogs,
+  hydrateDebugLogsFromStorage,
   logError,
   logInfo,
   sanitizeLogString,
 } from '../services/debugLogger';
+import { FFMPEG_ASSET_MIME_TYPES, FFMPEG_CORE_SOURCES } from '../services/ffmpegService';
 import type { AnalyticsRecord, DriveFileMeta, SubtitleBlock, VideoCut } from '../types';
 
 test('extractDriveFolderId parses raw IDs and full Google Drive URLs', () => {
@@ -744,6 +756,221 @@ test('debugLogger keeps a 200-entry circular buffer, redacts secrets/base64, and
   clearDebugLogs();
   assert.equal(getDebugLogStats().total, 0);
 });
+
+test('FFmpeg core sources prioritize dist/esm for module workers with dist/umd strictly as fallback and exact MIME types', () => {
+  assert.equal(FFMPEG_ASSET_MIME_TYPES.coreJs, 'text/javascript');
+  assert.equal(FFMPEG_ASSET_MIME_TYPES.coreWasm, 'application/wasm');
+
+  assert.ok(FFMPEG_CORE_SOURCES.length >= 3);
+  assert.equal(FFMPEG_CORE_SOURCES[0].format, 'esm');
+  assert.equal(
+    FFMPEG_CORE_SOURCES[0].baseURL,
+    'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm'
+  );
+  assert.equal(FFMPEG_CORE_SOURCES[1].format, 'esm');
+  assert.equal(
+    FFMPEG_CORE_SOURCES[1].baseURL,
+    'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/esm'
+  );
+
+  const firstUmdIndex = FFMPEG_CORE_SOURCES.findIndex((s) => s.format === 'umd');
+  assert.ok(firstUmdIndex >= 2, 'dist/umd must only appear after all dist/esm sources');
+  assert.ok(
+    FFMPEG_CORE_SOURCES.slice(firstUmdIndex).every(
+      (s) => s.format === 'umd' && s.baseURL.endsWith('/dist/umd')
+    )
+  );
+});
+
+test('debugLogger persists last 120 events to localStorage, appends session separator on reload, and clears storage on reset', () => {
+  const store = new Map<string, string>();
+  const mockLocalStorage = {
+    getItem: (k: string) => (store.has(k) ? store.get(k)! : null),
+    setItem: (k: string, v: string) => {
+      store.set(k, String(v));
+    },
+    removeItem: (k: string) => {
+      store.delete(k);
+    },
+    clear: () => store.clear(),
+  };
+
+  const prevLocalStorage = (globalThis as Record<string, unknown>).localStorage;
+  (globalThis as Record<string, unknown>).localStorage = mockLocalStorage;
+
+  try {
+    clearDebugLogs();
+    assert.equal(MAX_PERSISTED_DEBUG_LOG_ENTRIES, 120);
+    assert.equal(DEBUG_LOGS_STORAGE_KEY, 'autocut_debug_logs_v1');
+
+    // Emit 145 events -> persisted tail must cap strictly at 120 entries
+    for (let i = 1; i <= 145; i += 1) {
+      logInfo('FFmpeg', `Paso previo ${i}`);
+    }
+    const rawSaved = store.get(DEBUG_LOGS_STORAGE_KEY);
+    assert.ok(rawSaved, 'Logs should be persisted in localStorage');
+    const parsedSaved = JSON.parse(rawSaved);
+    assert.equal(parsedSaved.length, 120);
+    assert.equal(parsedSaved[0].message, 'Paso previo 26');
+    assert.equal(parsedSaved[119].message, 'Paso previo 145');
+
+    // Simulate OOM reload: hydrate restores prior events WITHOUT deleting them and appends session separator
+    const restoredCount = hydrateDebugLogsFromStorage();
+    assert.equal(restoredCount, 120);
+
+    const afterReload = getDebugLogs();
+    assert.equal(afterReload.length, 121);
+    assert.equal(afterReload[119].message, 'Paso previo 145');
+    assert.equal(afterReload[120].message, NEW_SESSION_SEPARATOR);
+
+    // Manual clear wipes both in-memory buffer and localStorage
+    clearDebugLogs();
+    assert.equal(getDebugLogs().length, 0);
+    assert.equal(store.has(DEBUG_LOGS_STORAGE_KEY), false);
+  } finally {
+    if (prevLocalStorage === undefined) {
+      delete (globalThis as Record<string, unknown>).localStorage;
+    } else {
+      (globalThis as Record<string, unknown>).localStorage = prevLocalStorage;
+    }
+  }
+});
+
+test('Sequential Multi-Clip pipeline groups 1 clip at a time while preserving cross-clip order and using zero-reencode concat -c copy', () => {
+  const cuts: VideoCut[] = [
+    { id: 'c1', clip_index: 0, start_sec: 1, end_sec: 4, motivo: 'Intro clip 0', enabled: true },
+    { id: 'c2', clip_index: 2, start_sec: 2, end_sec: 6, motivo: 'Salto clip 2', enabled: true },
+    { id: 'c3', clip_index: 0, start_sec: 10, end_sec: 14, motivo: 'Vuelta clip 0', enabled: true },
+    { id: 'c4', clip_index: 1, start_sec: 0, end_sec: 3, motivo: 'Desactivado', enabled: false },
+  ];
+
+  const plan = planSequentialMultiClipJobs(cuts, 4, 't1');
+  assert.equal(plan.totalSegments, 3);
+  // Only clips 0 and 2 have active cuts; clips 1 and 3 are skipped completely to save RAM!
+  assert.deepEqual(
+    plan.clipBatches.map((b) => b.clipIndex),
+    [0, 2]
+  );
+  assert.deepEqual(
+    plan.clipBatches[0].cuts.map((j) => j.orderIndex),
+    [0, 2]
+  );
+  assert.deepEqual(
+    plan.clipBatches[1].cuts.map((j) => j.orderIndex),
+    [1]
+  );
+  assert.deepEqual(plan.orderedSegmentFileNames, [
+    'seg_t1_000.mp4',
+    'seg_t1_001.mp4',
+    'seg_t1_002.mp4',
+  ]);
+
+  // Single-segment FFmpeg command encodes strictly 1 input with uniform timescale 90000
+  const segCmd = buildSingleSegmentFfmpegArgs(
+    cuts[0],
+    'mc_raw_t1_0.mov',
+    'seg_t1_000.mp4',
+    'source',
+    'mobile_fast',
+    { framingMode: 'center_crop', silenceTrimEnabled: true, audioNormalizeEnabled: true }
+  );
+  assert.ok(segCmd.args.includes('-video_track_timescale'));
+  assert.ok(segCmd.args.includes('90000'));
+  assert.ok(segCmd.filterComplex.includes('loudnorm=I=-14'));
+  assert.equal(segCmd.args.filter((a) => a === '-i').length, 1);
+
+  // Silent-audio fallback generates matching 48kHz stereo track for uniform concat -c copy
+  const silentCmd = buildSingleSegmentFfmpegArgs(
+    cuts[0],
+    'mc_raw_t1_0.mov',
+    'seg_t1_000.mp4',
+    'silent',
+    'mobile_fast'
+  );
+  assert.ok(silentCmd.args.includes('anullsrc=channel_layout=stereo:sample_rate=48000'));
+
+  // Final concat demuxer uses -c copy (zero re-encoding)
+  const listTxt = buildConcatListContent(plan.orderedSegmentFileNames);
+  assert.equal(
+    listTxt,
+    "file 'seg_t1_000.mp4'\nfile 'seg_t1_001.mp4'\nfile 'seg_t1_002.mp4'\n"
+  );
+  const concatArgs = buildConcatCopyFfmpegArgs('concat_t1.txt', 'combined_t1.mp4');
+  assert.deepEqual(concatArgs, [
+    '-f',
+    'concat',
+    '-safe',
+    '0',
+    '-i',
+    'concat_t1.txt',
+    '-c',
+    'copy',
+    '-movflags',
+    '+faststart',
+    'combined_t1.mp4',
+  ]);
+});
+
+test('evaluateMultiClipMobileRamProtection warns on mobile 1080p when clips > 3 or total > 200 MB', () => {
+  assert.equal(MOBILE_MULTICLIP_SAFE_CLIP_LIMIT, 3);
+  assert.equal(
+    isMobileViewportOrUserAgent('Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)', 390),
+    true
+  );
+  assert.equal(
+    isMobileViewportOrUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)', 1440),
+    false
+  );
+
+  // 7 clips (~680 MB) on iPhone in 1080p -> MUST warn
+  const sevenClipsIos = evaluateMultiClipMobileRamProtection({
+    clipCount: 7,
+    totalBytes: 680 * 1024 * 1024,
+    exportQuality: 'high_1080p',
+    isMobile: true,
+  });
+  assert.equal(sevenClipsIos.shouldWarn, true);
+  assert.ok(sevenClipsIos.reason?.includes('7 clips'));
+  assert.ok(sevenClipsIos.reason?.includes('720p móvil'));
+
+  // 4 small clips (80 MB) on mobile in 1080p -> MUST warn (> 3 clips)
+  const fourSmallClips = evaluateMultiClipMobileRamProtection({
+    clipCount: 4,
+    totalBytes: 80 * 1024 * 1024,
+    exportQuality: 'high_1080p',
+    isMobile: true,
+  });
+  assert.equal(fourSmallClips.shouldWarn, true);
+
+  // 2 large clips (250 MB) on mobile in 1080p -> MUST warn (> 200 MB)
+  const twoHeavyClips = evaluateMultiClipMobileRamProtection({
+    clipCount: 2,
+    totalBytes: 250 * 1024 * 1024,
+    exportQuality: 'high_1080p',
+    isMobile: true,
+  });
+  assert.equal(twoHeavyClips.shouldWarn, true);
+
+  // Same 7 clips (~680 MB) on mobile once switched to 720p móvil -> cleared!
+  const safe720p = evaluateMultiClipMobileRamProtection({
+    clipCount: 7,
+    totalBytes: 680 * 1024 * 1024,
+    exportQuality: 'mobile_fast',
+    isMobile: true,
+  });
+  assert.equal(safe720p.shouldWarn, false);
+
+  // Desktop 1080p -> does not trigger mobile guard
+  const desktop1080p = evaluateMultiClipMobileRamProtection({
+    clipCount: 7,
+    totalBytes: 680 * 1024 * 1024,
+    exportQuality: 'high_1080p',
+    isMobile: false,
+  });
+  assert.equal(desktop1080p.shouldWarn, false);
+});
+
+
 
 
 

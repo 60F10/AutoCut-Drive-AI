@@ -15,6 +15,8 @@ import {
   renderMultiClipCutsWithFfmpeg,
   type RenderProgress,
 } from '../services/ffmpegService';
+import { DriveAuthExpiredError, downloadDriveVideo } from '../services/driveApi';
+import { getCachedDriveToken } from '../services/googleAuth';
 import { logError, logInfo } from '../services/debugLogger';
 
 interface UseStudioEditorOptions {
@@ -23,6 +25,8 @@ interface UseStudioEditorOptions {
   updateQueueItem: (itemId: string, patch: Partial<QueueItem>) => void;
   exportQuality: ExportQuality;
   tiktokOptions: TikTokEditOptions;
+  accessToken: string | null;
+  clearAuthSession: () => void;
   cacheEditedVideo: (itemId: string, blob: Blob, fileName: string) => Promise<void>;
   appendAnalyticsRecord: (record: AnalyticsRecord) => void;
   maybePromptDriveUpload: (itemId: string, fileName: string, sizeBytes: number) => void;
@@ -35,6 +39,8 @@ export function useStudioEditor({
   updateQueueItem,
   exportQuality,
   tiktokOptions,
+  accessToken,
+  clearAuthSession,
   cacheEditedVideo,
   appendAnalyticsRecord,
   maybePromptDriveUpload,
@@ -167,7 +173,7 @@ export function useStudioEditor({
   );
 
   const handleRerenderItem = useCallback(
-    async (itemId: string) => {
+    async (itemId: string, qualityOverride?: ExportQuality) => {
       const target = itemsRef.current.find((i) => i.id === itemId);
       if (!target || !target.analysis) return;
 
@@ -175,11 +181,14 @@ export function useStudioEditor({
         target.isMultiClip &&
           target.sourceClips &&
           target.sourceClips.length > 0 &&
-          target.sourceClips.every((c) => Boolean(c.rawBlob))
+          target.sourceClips.every(
+            (c) => Boolean(c.rawBlob) || (c.source === 'drive' && Boolean(c.driveFileId))
+          )
       );
 
       if (!isMulti && !target.rawBlob) return;
 
+      const activeQuality = qualityOverride ?? exportQuality;
       const isFirstRender = !target.completedAt;
       onError(null);
       setIsStudioRendering(true);
@@ -195,14 +204,14 @@ export function useStudioEditor({
       logInfo('FFmpeg', 'Iniciando renderizado de vídeo en Studio', {
         archivo: target.originalName,
         multiClip: isMulti ? 'sí' : 'no',
+        clips: isMulti ? target.sourceClips?.length ?? 0 : 1,
         cortesActivos: activeCutsCount,
-        calidad: exportQuality === 'mobile_fast' ? '720p' : '1080p',
+        calidad: activeQuality === 'mobile_fast' ? '720p' : '1080p',
         subtitulos: tiktokOptions.subtitlesEnabled ? 'sí' : 'no',
         encuadre: tiktokOptions.framingMode,
       });
 
       try {
-        const activeQuality = exportQuality;
         const effectiveTikTokOptions: TikTokEditOptions = { ...tiktokOptions };
         const renderConfig = {
           tiktokOptions: effectiveTikTokOptions,
@@ -224,8 +233,26 @@ export function useStudioEditor({
         const editedBlob = isMulti
           ? await renderMultiClipCutsWithFfmpeg(
               target.sourceClips!.map((c) => ({
-                blob: c.rawBlob!,
+                blob: c.rawBlob,
                 originalFileName: c.originalName,
+                sizeBytes: c.sizeBytes,
+                loadBlob:
+                  !c.rawBlob && c.source === 'drive' && c.driveFileId
+                    ? async (onDownloadPercent) => {
+                        const token = accessToken || getCachedDriveToken();
+                        if (!token) {
+                          throw new DriveAuthExpiredError(
+                            'Inicia sesión con Google Drive para descargar los clips durante el renderizado.'
+                          );
+                        }
+                        return downloadDriveVideo(
+                          c.driveFileId!,
+                          token,
+                          c.sizeBytes,
+                          onDownloadPercent
+                        );
+                      }
+                    : undefined,
               })),
               target.analysis.cortes,
               (progress) => {
@@ -298,16 +325,20 @@ export function useStudioEditor({
           maybePromptDriveUpload(itemId, fileName, editedBlob.size);
         }
       } catch (err) {
+        if (err instanceof DriveAuthExpiredError) {
+          clearAuthSession();
+        }
+        const phase = err instanceof DriveAuthExpiredError ? 'Drive' : 'FFmpeg';
         const message = formatPhaseError(
-          'FFmpeg',
+          phase,
           err instanceof Error ? err.message : 'Error al renderizar los cortes.'
         );
         console.error('[FFmpeg] Error durante el renderizado en Studio:', err);
         logError(
-          'FFmpeg',
+          phase === 'Drive' ? 'Drive' : 'FFmpeg',
           `Fallo al renderizar ${target.originalName}: ${message}`,
           {
-            calidad: exportQuality === 'mobile_fast' ? '720p' : '1080p',
+            calidad: activeQuality === 'mobile_fast' ? '720p' : '1080p',
             ms: Math.round(performance.now() - renderStartMs),
           },
           err
@@ -327,6 +358,8 @@ export function useStudioEditor({
       itemsRef,
       exportQuality,
       tiktokOptions,
+      accessToken,
+      clearAuthSession,
       updateQueueItem,
       cacheEditedVideo,
       appendAnalyticsRecord,

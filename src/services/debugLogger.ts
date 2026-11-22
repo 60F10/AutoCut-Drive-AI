@@ -34,6 +34,9 @@ export interface DiagnosticContextSnapshot {
 }
 
 export const MAX_DEBUG_LOG_ENTRIES = 200;
+export const MAX_PERSISTED_DEBUG_LOG_ENTRIES = 120;
+export const DEBUG_LOGS_STORAGE_KEY = 'autocut_debug_logs_v1';
+export const NEW_SESSION_SEPARATOR = '--- NUEVA SESIÓN (posible reinicio previo) ---';
 
 const SENSITIVE_KEY_PATTERN =
   /(api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|authorization|bearer|secret|password|credential|cookie|token)/i;
@@ -61,6 +64,98 @@ function notifyListeners(): void {
       // Ignore subscriber errors
     }
   });
+}
+
+function persistLogsToStorage(): void {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    const slice = entries.slice(-MAX_PERSISTED_DEBUG_LOG_ENTRIES);
+    localStorage.setItem(DEBUG_LOGS_STORAGE_KEY, JSON.stringify(slice));
+  } catch {
+    // QuotaExceededError or private browsing: retry with a smaller tail, never throw
+    try {
+      const compactSlice = entries.slice(-Math.min(60, MAX_PERSISTED_DEBUG_LOG_ENTRIES));
+      localStorage.setItem(DEBUG_LOGS_STORAGE_KEY, JSON.stringify(compactSlice));
+    } catch {
+      // Ignore storage failure
+    }
+  }
+}
+
+function isValidPersistedEntry(raw: unknown): raw is DebugLogEntry {
+  if (!raw || typeof raw !== 'object') return false;
+  const obj = raw as Record<string, unknown>;
+  return (
+    typeof obj.timestamp === 'string' &&
+    typeof obj.level === 'string' &&
+    typeof obj.category === 'string' &&
+    typeof obj.message === 'string'
+  );
+}
+
+/**
+ * Restores persisted events from localStorage without deleting previous session history.
+ * When prior events exist, appends a clear session separator so post-OOM crash timelines are obvious.
+ */
+export function hydrateDebugLogsFromStorage(): number {
+  if (typeof localStorage === 'undefined') return 0;
+
+  let restored: DebugLogEntry[] = [];
+  try {
+    const raw = localStorage.getItem(DEBUG_LOGS_STORAGE_KEY);
+    if (!raw) return 0;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return 0;
+    restored = parsed
+      .filter(isValidPersistedEntry)
+      .slice(-MAX_PERSISTED_DEBUG_LOG_ENTRIES)
+      .map((item, idx) => ({
+        id: typeof item.id === 'number' && Number.isFinite(item.id) ? item.id : idx + 1,
+        timestamp: item.timestamp,
+        epochMs:
+          typeof item.epochMs === 'number' && Number.isFinite(item.epochMs)
+            ? item.epochMs
+            : Date.now(),
+        level:
+          item.level === 'ERROR' || item.level === 'WARN' || item.level === 'INFO'
+            ? item.level
+            : 'INFO',
+        category:
+          item.category === 'UI' ||
+          item.category === 'Drive' ||
+          item.category === 'Frames' ||
+          item.category === 'IA' ||
+          item.category === 'FFmpeg' ||
+          item.category === 'Sistema'
+            ? item.category
+            : 'Sistema',
+        message: sanitizeLogString(item.message),
+        data: sanitizeLogData(item.data),
+        stack: typeof item.stack === 'string' ? sanitizeLogString(item.stack) : undefined,
+      }));
+  } catch {
+    return 0;
+  }
+
+  if (restored.length === 0) return 0;
+
+  const maxRestoredId = restored.reduce((max, item) => Math.max(max, item.id), 0);
+  nextEntryId = Math.max(nextEntryId, maxRestoredId + 1);
+
+  const now = new Date();
+  const separatorEntry: DebugLogEntry = {
+    id: nextEntryId++,
+    timestamp: formatLogTimestamp(now),
+    epochMs: now.getTime(),
+    level: 'INFO',
+    category: 'Sistema',
+    message: NEW_SESSION_SEPARATOR,
+  };
+
+  entries = [...restored, separatorEntry].slice(-MAX_DEBUG_LOG_ENTRIES);
+  persistLogsToStorage();
+  notifyListeners();
+  return restored.length;
 }
 
 function estimateBase64Kb(base64Length: number): string {
@@ -193,6 +288,7 @@ export function logDebug(
     entries = entries.slice(entries.length - MAX_DEBUG_LOG_ENTRIES);
   }
 
+  persistLogsToStorage();
   notifyListeners();
   return entry;
 }
@@ -251,6 +347,13 @@ export function getDebugLogStats(): DebugLogStats {
 
 export function clearDebugLogs(): void {
   entries = [];
+  if (typeof localStorage !== 'undefined') {
+    try {
+      localStorage.removeItem(DEBUG_LOGS_STORAGE_KEY);
+    } catch {
+      // Ignore storage failure
+    }
+  }
   notifyListeners();
 }
 
@@ -263,11 +366,13 @@ export function subscribeDebugLogs(listener: () => void): () => void {
 
 /**
  * Installs global browser error listeners (window.onerror & unhandledrejection)
- * once per session so silent crashes on mobile Safari/Chrome are always recorded.
+ * once per session and restores any persisted logs from localStorage before logging startup.
  */
 export function installGlobalErrorHandlers(): void {
   if (globalHandlersInstalled || typeof window === 'undefined') return;
   globalHandlersInstalled = true;
+
+  const restoredCount = hydrateDebugLogsFromStorage();
 
   const isStandalone =
     window.matchMedia?.('(display-mode: standalone)').matches ||
@@ -277,6 +382,7 @@ export function installGlobalErrorHandlers(): void {
     pantalla: `${window.innerWidth}x${window.innerHeight}`,
     pwa: isStandalone ? 'Sí' : 'No',
     online: navigator.onLine ? 'Sí' : 'No',
+    ...(restoredCount > 0 ? { eventosPrevios: restoredCount } : {}),
   });
 
   window.addEventListener('error', (event) => {

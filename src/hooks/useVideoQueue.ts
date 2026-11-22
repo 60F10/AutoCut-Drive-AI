@@ -17,6 +17,7 @@ import {
   evaluateHeavyVideoWarning,
   formatPhaseError,
   isSupportedVideoFile,
+  mergeMultiClipEditPlans,
   parseHumanReadableApiError,
   type ErrorPhase,
 } from '../utils/videoPipeline';
@@ -30,7 +31,6 @@ import {
 } from '../services/driveApi';
 import {
   GeminiClientError,
-  analyzeMultiClipWithGemini,
   analyzeVideoWithGemini,
 } from '../services/geminiClient';
 import { inspectVideoMetadata } from '../services/ffmpegService';
@@ -843,14 +843,23 @@ export function useVideoQueue({
       let currentPhase: ErrorPhase = 'Drive';
       try {
         const resolvedClips: SourceClipRef[] = [];
+        const perClipResults: Array<{
+          clipIndex: number;
+          fileName: string;
+          durationSec: number;
+          plan: Awaited<ReturnType<typeof analyzeVideoWithGemini>>['plan'];
+        }> = [];
+        let allCleaned = true;
 
-        // 1. Download any Drive clips & inspect metadata
+        // Strictly 1 clip at a time: download (if Drive) -> inspect -> extract lightweight frames -> analyze -> immediately free Drive blob!
         for (let i = 0; i < initialSourceClips.length; i += 1) {
           const clip = initialSourceClips[i];
-          let blob = clip.rawBlob;
-          let rawUrl = clip.rawUrl;
+          const clipNum = i + 1;
+          const totalClips = initialSourceClips.length;
+          let blob: Blob | undefined = clip.rawBlob;
+          const downloadedFromDriveNow = !blob && clip.source === 'drive' && Boolean(clip.driveFileId);
 
-          if (!blob && clip.source === 'drive' && clip.driveFileId) {
+          if (downloadedFromDriveNow && clip.driveFileId) {
             currentPhase = 'Drive';
             const token = accessToken || getCachedDriveToken();
             if (!token) {
@@ -861,8 +870,8 @@ export function useVideoQueue({
 
             updateQueueItem(combinedId, {
               stage: 'downloading',
-              stageDetail: `Descargando Clip ${i + 1}/${initialSourceClips.length}: ${clip.originalName}...`,
-              progress: Math.round((i / initialSourceClips.length) * 100),
+              stageDetail: `Descargando Clip ${clipNum}/${totalClips}: ${clip.originalName}...`,
+              progress: Math.round(((i * 2) / (totalClips * 2)) * 95),
             });
 
             blob = await downloadDriveVideo(
@@ -870,30 +879,83 @@ export function useVideoQueue({
               token,
               clip.sizeBytes,
               (pct) => {
-                const overall = Math.round(((i + pct / 100) / initialSourceClips.length) * 100);
+                const overall = Math.round(((i + (pct / 100) * 0.45) / totalClips) * 92);
                 updateQueueItem(combinedId, {
                   stage: 'downloading',
-                  stageDetail: `Descargando Clip ${i + 1}/${initialSourceClips.length} (${pct}%)...`,
+                  stageDetail: `Descargando Clip ${clipNum}/${totalClips} (${pct}%)...`,
                   progress: overall,
                 });
               }
             );
-            rawUrl = URL.createObjectURL(blob);
           }
 
           if (!blob) {
-            throw new Error(`Falta el archivo binario para el Clip ${i + 1} (${clip.originalName}).`);
+            throw new Error(`Falta el archivo binario para el Clip ${clipNum} (${clip.originalName}).`);
           }
 
           currentPhase = 'Extracción frames';
           const meta = await inspectVideoMetadata(blob);
-          const durationSec = clip.durationSec || meta.durationSec;
+          const durationSec = clip.durationSec || meta.durationSec || 0;
+
+          currentPhase = 'Análisis IA';
+          updateQueueItem(combinedId, {
+            stage: 'analyzing',
+            stageDetail: `Clip ${clipNum}/${totalClips}: extrayendo fotogramas ligeros y analizando con Gemini...`,
+            progress: Math.round(((i + 0.5) / totalClips) * 92),
+          });
+
+          const clipAnalysis = await analyzeVideoWithGemini(
+            blob,
+            clip.originalName,
+            settings.model,
+            durationSec,
+            (msg, pct) => {
+              const overall = Math.round(((i + 0.45 + (pct / 100) * 0.55) / totalClips) * 92);
+              updateQueueItem(combinedId, {
+                stage: 'analyzing',
+                stageDetail: `Clip ${clipNum}/${totalClips}: ${msg}`,
+                progress: Math.min(94, overall),
+              });
+            },
+            {
+              stylePreset: chosenPreset,
+              customInstruction: chosenInstruction,
+              subtitlesEnabled: tiktokOptions.subtitlesEnabled,
+              silenceTrimEnabled: tiktokOptions.silenceTrimEnabled,
+              clipIndex: i,
+            }
+          );
+
+          allCleaned = allCleaned && clipAnalysis.geminiFileCleaned;
+          perClipResults.push({
+            clipIndex: i,
+            fileName: clip.originalName,
+            durationSec,
+            plan: clipAnalysis.plan,
+          });
+
+          // Release Drive rawBlob immediately after analysis so 7 clips never sit in RAM at once!
+          // (Local File objects are disk-backed OS handles; Drive blobs are in-RAM buffers and will be lazy-fetched 1 by 1 in FFmpeg.)
+          const keepBlobInState = clip.source === 'local' ? blob : undefined;
+          if (clip.source === 'drive' && clip.rawUrl) {
+            URL.revokeObjectURL(clip.rawUrl);
+          }
+          if (clip.source === 'drive') {
+            logInfo('Drive', `Bruto Drive ${clipNum}/${totalClips} liberado de RAM tras análisis`, {
+              archivo: clip.originalName,
+              pesoMB: Number((clip.sizeBytes / (1024 * 1024)).toFixed(2)),
+            });
+          }
+
           resolvedClips.push({
             ...clip,
-            rawBlob: blob,
-            rawUrl,
+            rawBlob: keepBlobInState,
+            rawUrl: clip.source === 'local' ? clip.rawUrl : undefined,
             durationSec,
           });
+
+          // Drop local reference before starting next clip
+          blob = undefined;
         }
 
         const totalRawDurationSec = resolvedClips.reduce(
@@ -909,43 +971,17 @@ export function useVideoQueue({
           setHeavyVideoWarning(`${displayName}: ${heavyCheck.message}`);
         }
 
-        updateQueueItem(combinedId, {
-          sourceClips: resolvedClips,
-          durationSec: totalRawDurationSec,
-          stage: 'analyzing',
-          stageDetail: `Extrayendo fotogramas ligeros de ${resolvedClips.length} clips (por separado)...`,
-          progress: 8,
-        });
-
-        // 2. Analyze each clip separately via lightweight frames (< 2 MB each) and merge results
-        currentPhase = 'Análisis IA';
-        const { plan, geminiFileCleaned } = await analyzeMultiClipWithGemini(
-          resolvedClips.map((c) => ({
-            blob: c.rawBlob!,
-            fileName: c.originalName,
-            durationSec: c.durationSec,
-          })),
-          settings.model,
+        const plan = mergeMultiClipEditPlans(perClipResults, {
           projectName,
-          (message, progress) => {
-            updateQueueItem(combinedId, {
-              stage: 'analyzing',
-              stageDetail: message,
-              progress,
-            });
-          },
-          {
-            stylePreset: chosenPreset,
-            customInstruction: chosenInstruction,
-            subtitlesEnabled: tiktokOptions.subtitlesEnabled,
-            silenceTrimEnabled: tiktokOptions.silenceTrimEnabled,
-          }
-        );
+        });
+        const geminiFileCleaned = allCleaned;
 
         const outputFileName = buildCombinedEditedFilename(projectBase, plan.etiqueta);
 
-        // 3. Pause at editable EDL preview in Studio before heavy FFmpeg.wasm render
+        // 3. Pause at editable EDL preview in Studio before sequential FFmpeg.wasm render
         updateQueueItem(combinedId, {
+          sourceClips: resolvedClips,
+          durationSec: totalRawDurationSec,
           analysis: plan,
           outputFileName,
           geminiFileCleaned,

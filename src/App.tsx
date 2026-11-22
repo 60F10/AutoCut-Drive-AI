@@ -136,6 +136,8 @@ export default function App() {
     updateQueueItem: queue.updateQueueItem,
     exportQuality: settings.exportQuality,
     tiktokOptions,
+    accessToken,
+    clearAuthSession,
     cacheEditedVideo: queue.cacheEditedVideo,
     appendAnalyticsRecord: queue.appendAnalyticsRecord,
     maybePromptDriveUpload: queue.maybePromptDriveUpload,

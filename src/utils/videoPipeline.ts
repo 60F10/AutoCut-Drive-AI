@@ -14,11 +14,73 @@ const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.webm']);
 const EDITED_MARKER = '_EDITADO';
 
 export const MOBILE_RAM_WARNING_BYTES = 200 * 1024 * 1024; // 200 MB
+export const MOBILE_MULTICLIP_SAFE_CLIP_LIMIT = 3;
 export const HEAVY_VIDEO_DURATION_SEC = 360; // 6 minutes
 export const ULTRA_HD_MIN_LONG_EDGE = 3840; // 4K UHD
 
 export function exceedsMobileRamThreshold(totalBytes: number): boolean {
   return totalBytes > MOBILE_RAM_WARNING_BYTES;
+}
+
+export function isMobileViewportOrUserAgent(
+  userAgent?: string,
+  viewportWidth?: number
+): boolean {
+  const ua =
+    userAgent ?? (typeof navigator !== 'undefined' ? navigator.userAgent || '' : '');
+  if (/iPhone|iPad|iPod|Android|Mobile/i.test(ua)) {
+    return true;
+  }
+  const width =
+    viewportWidth ?? (typeof window !== 'undefined' ? window.innerWidth : Number.POSITIVE_INFINITY);
+  return Number.isFinite(width) && width <= 768;
+}
+
+export interface MultiClipMobileProtectionResult {
+  shouldWarn: boolean;
+  clipCount: number;
+  totalBytes: number;
+  reason: string | null;
+}
+
+/**
+ * Protects mobile browsers (especially iOS Safari/PWA) from OOM crashes when launching
+ * Multi-Clip jobs with > 3 clips or > 200 MB total while 1080p HD is still selected.
+ */
+export function evaluateMultiClipMobileRamProtection(input: {
+  clipCount: number;
+  totalBytes: number;
+  exportQuality: ExportQuality;
+  isMobile: boolean;
+}): MultiClipMobileProtectionResult {
+  const clipCount = Math.max(0, Math.floor(Number(input.clipCount) || 0));
+  const totalBytes = Math.max(0, Number(input.totalBytes) || 0);
+  const exceedsClips = clipCount > MOBILE_MULTICLIP_SAFE_CLIP_LIMIT;
+  const exceedsSize = exceedsMobileRamThreshold(totalBytes);
+
+  if (!input.isMobile || input.exportQuality !== 'high_1080p' || (!exceedsClips && !exceedsSize)) {
+    return {
+      shouldWarn: false,
+      clipCount,
+      totalBytes,
+      reason: null,
+    };
+  }
+
+  const triggers: string[] = [];
+  if (exceedsClips) {
+    triggers.push(`${clipCount} clips (> ${MOBILE_MULTICLIP_SAFE_CLIP_LIMIT})`);
+  }
+  if (exceedsSize) {
+    triggers.push(`${formatBytes(totalBytes)} (> 200 MB)`);
+  }
+
+  return {
+    shouldWarn: true,
+    clipCount,
+    totalBytes,
+    reason: `Este Multi-Clip suma ${triggers.join(' y ')} en 1080p HD. En iPhone/móvil esto puede agotar la RAM y reiniciar la app; te recomendamos cambiar a 720p móvil antes de empezar.`,
+  };
 }
 
 export interface HeavyVideoAssessment {
@@ -992,6 +1054,217 @@ export function buildMultiClipFfmpegFilterComplex(
     args,
     activeCount: activeCuts.length,
   };
+}
+
+export interface SequentialMultiClipCutJob {
+  orderIndex: number;
+  cut: VideoCut;
+  segmentFileName: string;
+}
+
+export interface SequentialMultiClipBatch {
+  clipIndex: number;
+  cuts: SequentialMultiClipCutJob[];
+}
+
+export interface SequentialMultiClipPlan {
+  totalSegments: number;
+  clipBatches: SequentialMultiClipBatch[];
+  orderedSegmentFileNames: string[];
+}
+
+/**
+ * Groups active Multi-Clip cuts by source `clip_index` so FFmpeg.wasm can process
+ * strictly ONE raw video in RAM/MEMFS at a time, while preserving the exact final
+ * cross-clip narrative sequence via `orderIndex` for zero-reencode `concat -c copy`.
+ */
+export function planSequentialMultiClipJobs(
+  cuts: VideoCut[],
+  clipCount: number,
+  jobId = 'job'
+): SequentialMultiClipPlan {
+  if (clipCount <= 0) {
+    throw new Error('Se necesita al menos un clip de entrada para renderizar.');
+  }
+
+  const activeCuts = filterEditedCuts(cuts, true);
+  if (activeCuts.length === 0) {
+    throw new Error('Activa al menos un corte antes de renderizar el vídeo combinado.');
+  }
+
+  const orderedSegmentFileNames: string[] = [];
+  const batchMap = new Map<number, SequentialMultiClipCutJob[]>();
+
+  activeCuts.forEach((cut, orderIndex) => {
+    const safeClipIdx = Math.max(0, Math.min(clipCount - 1, cut.clip_index ?? 0));
+    const padded = String(orderIndex).padStart(3, '0');
+    const segmentFileName = `seg_${jobId}_${padded}.mp4`;
+    orderedSegmentFileNames.push(segmentFileName);
+
+    const list = batchMap.get(safeClipIdx) ?? [];
+    list.push({
+      orderIndex,
+      cut: { ...cut, clip_index: safeClipIdx },
+      segmentFileName,
+    });
+    batchMap.set(safeClipIdx, list);
+  });
+
+  const clipBatches: SequentialMultiClipBatch[] = Array.from(batchMap.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([clipIndex, batchCuts]) => ({
+      clipIndex,
+      cuts: batchCuts,
+    }));
+
+  return {
+    totalSegments: activeCuts.length,
+    clipBatches,
+    orderedSegmentFileNames,
+  };
+}
+
+export type SegmentAudioMode = 'source' | 'silent' | 'none';
+
+/**
+ * Builds FFmpeg arguments to trim, frame (9:16), normalize audio (-14 LUFS), optionally
+ * burn cut-local ASS subtitles, and encode ONE cut from a single loaded clip into a
+ * uniform-parameter intermediate MP4 segment (`-video_track_timescale 90000`, uniform fps,
+ * yuv420p, stereo 48kHz AAC) ready for zero-reencode `concat -c copy`.
+ */
+export function buildSingleSegmentFfmpegArgs(
+  cut: VideoCut,
+  inputFileName: string,
+  outputFileName: string,
+  audioMode: SegmentAudioMode = 'source',
+  exportQuality: ExportQuality = 'high_1080p',
+  pipelineOptions?: FfmpegPipelineOptions
+): FfmpegFilterBuild {
+  const startSec = Math.max(0, Number(cut.start_sec) || 0);
+  const endSec = Math.max(startSec + 0.15, Number(cut.end_sec) || startSec + 0.15);
+  const start = startSec.toFixed(3);
+  const end = endSec.toFixed(3);
+  const duration = (endSec - startSec).toFixed(3);
+
+  const profile = EXPORT_QUALITY_PROFILES[normalizeExportQuality(exportQuality)];
+  const silenceTrimEnabled = Boolean(pipelineOptions?.silenceTrimEnabled);
+  const audioNormalizeEnabled = Boolean(pipelineOptions?.audioNormalizeEnabled);
+  const subtitleFileName = pipelineOptions?.subtitleFileName?.trim() || '';
+
+  const filterParts: string[] = [
+    ...buildVideoSegmentFilter('0:v', 0, start, end, profile, pipelineOptions?.framingMode),
+  ];
+
+  let finalVideoLabel = '[v0]';
+  if (subtitleFileName) {
+    const escapedSub = subtitleFileName.replace(/([\\':])/g, '\\$1');
+    filterParts.push(`[v0]subtitles=${escapedSub}[v0_sub]`);
+    finalVideoLabel = '[v0_sub]';
+  }
+
+  let finalAudioLabel: string | null = null;
+  const extraInputArgs: string[] = [];
+
+  if (audioMode === 'source') {
+    filterParts.push(buildAudioSegmentFilter('0:a', 0, start, end, silenceTrimEnabled));
+    finalAudioLabel = '[a0]';
+    if (audioNormalizeEnabled) {
+      filterParts.push('[a0]loudnorm=I=-14:TP=-1.5:LRA=11[a0_norm]');
+      finalAudioLabel = '[a0_norm]';
+    }
+  } else if (audioMode === 'silent') {
+    extraInputArgs.push(
+      '-f',
+      'lavfi',
+      '-t',
+      duration,
+      '-i',
+      'anullsrc=channel_layout=stereo:sample_rate=48000'
+    );
+    filterParts.push(
+      `[1:a]atrim=duration=${duration},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a0_sil]`
+    );
+    finalAudioLabel = '[a0_sil]';
+  }
+
+  const filterComplex = filterParts.join(';');
+
+  const args = [
+    '-i',
+    inputFileName,
+    ...extraInputArgs,
+    '-filter_complex',
+    filterComplex,
+    '-map',
+    finalVideoLabel,
+    ...(finalAudioLabel ? ['-map', finalAudioLabel] : ['-an']),
+    '-c:v',
+    'libx264',
+    '-profile:v',
+    profile.h264Profile,
+    '-level',
+    '4.1',
+    '-preset',
+    profile.preset,
+    '-crf',
+    profile.crf,
+    '-maxrate',
+    profile.maxrate,
+    '-bufsize',
+    profile.bufsize,
+    '-pix_fmt',
+    'yuv420p',
+    '-r',
+    String(profile.fps),
+    '-video_track_timescale',
+    '90000',
+    ...(finalAudioLabel
+      ? ['-c:a', 'aac', '-b:a', profile.audioBitrate, '-ar', '48000', '-ac', '2', '-shortest']
+      : []),
+    '-movflags',
+    '+faststart',
+    outputFileName,
+  ];
+
+  return {
+    filterComplex,
+    args,
+    activeCount: 1,
+  };
+}
+
+/**
+ * Generates the FFmpeg concat demuxer playlist file (`file 'seg_000.mp4'`).
+ */
+export function buildConcatListContent(segmentFileNames: string[]): string {
+  return (
+    segmentFileNames
+      .map((name) => `file '${name.replace(/'/g, "'\\''")}'`)
+      .join('\n') + '\n'
+  );
+}
+
+/**
+ * Builds the zero-reencode FFmpeg concat demuxer command (`-c copy`) that joins
+ * uniformly encoded intermediate segments using near-zero RAM in ~1 second.
+ */
+export function buildConcatCopyFfmpegArgs(
+  concatListFileName: string,
+  outputFileName: string
+): string[] {
+  return [
+    '-f',
+    'concat',
+    '-safe',
+    '0',
+    '-i',
+    concatListFileName,
+    '-c',
+    'copy',
+    '-movflags',
+    '+faststart',
+    outputFileName,
+  ];
 }
 
 export interface DailyAnalyticsPoint {

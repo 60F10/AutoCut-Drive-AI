@@ -80,6 +80,12 @@ export default defineConfig(() => {
         },
       },
     ],
+    optimizeDeps: {
+      exclude: ['@ffmpeg/ffmpeg', '@ffmpeg/util'],
+    },
+    worker: {
+      format: 'es' as const,
+    },
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),

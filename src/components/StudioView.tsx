@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertTriangle,
   ArrowDown,
   ArrowUp,
   Captions,
@@ -15,6 +16,7 @@ import {
   Sparkles,
   Square,
   Star,
+  Zap,
 } from 'lucide-react';
 import type { ExportQuality, QueueItem, TikTokEditOptions } from '../types';
 import {
@@ -22,10 +24,12 @@ import {
   buildEditedFilename,
   buildSrtSubtitles,
   calculateSelectedDuration,
+  evaluateMultiClipMobileRamProtection,
   filterEditedCuts,
   formatBytes,
   formatSeconds,
   getBaseName,
+  isMobileViewportOrUserAgent,
   remapSubtitlesToFinalTimeline,
 } from '../utils/videoPipeline';
 
@@ -41,7 +45,7 @@ interface StudioViewProps {
     cutId: string,
     patch: { start_sec?: number; end_sec?: number }
   ) => void;
-  onRerenderItem: (itemId: string) => void;
+  onRerenderItem: (itemId: string, qualityOverride?: ExportQuality) => void;
   onRequestDriveUpload: (itemId: string) => void;
   exportQuality: ExportQuality;
   onChangeExportQuality: (quality: ExportQuality) => void;
@@ -192,9 +196,19 @@ export function StudioView({
     ? Boolean(
         currentItem.sourceClips &&
           currentItem.sourceClips.length > 0 &&
-          currentItem.sourceClips.every((c) => Boolean(c.rawBlob))
+          currentItem.sourceClips.every(
+            (c) => Boolean(c.rawBlob) || (c.source === 'drive' && Boolean(c.driveFileId))
+          )
       )
     : Boolean(currentItem.rawBlob);
+  const multiClipMobileGuard = currentItem.isMultiClip
+    ? evaluateMultiClipMobileRamProtection({
+        clipCount: currentItem.sourceClips?.length ?? 0,
+        totalBytes: currentItem.sizeBytes || 0,
+        exportQuality,
+        isMobile: isMobileViewportOrUserAgent(),
+      })
+    : { shouldWarn: false, clipCount: 1, totalBytes: currentItem.sizeBytes || 0, reason: null };
   const isPendingFinalRender = currentItem.stage === 'review' || !currentItem.editedUrl;
   const hasGeneratedSubtitles = Boolean(plan.subtitulos && plan.subtitulos.length > 0);
   const activeDemoCut =
@@ -569,6 +583,45 @@ export function StudioView({
                 </button>
               </div>
             </div>
+
+            {multiClipMobileGuard.shouldWarn && (
+              <div
+                role="note"
+                data-testid="studio-mobile-ram-guard"
+                className="rounded-md border border-[#ff2a85]/55 bg-[#ff2a85]/12 p-3 text-xs text-[#ffd1e3] space-y-2"
+              >
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="h-4 w-4 text-[#ff2a85] shrink-0 mt-0.5" />
+                  <p className="leading-relaxed">{multiClipMobileGuard.reason}</p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    data-testid="studio-switch-720p-btn"
+                    onClick={() => onChangeExportQuality('mobile_fast')}
+                    className="inline-flex h-9 items-center gap-1.5 rounded-md border border-[#00f0ff]/65 bg-[#00f0ff]/18 px-3 font-mono text-[11px] font-semibold text-[#00f0ff] hover:bg-[#00f0ff]/28 transition-colors"
+                  >
+                    <Zap className="h-3.5 w-3.5" />
+                    Cambiar a 720p móvil
+                  </button>
+                  {hasRealSource && enabledCuts.length > 0 && (
+                    <button
+                      type="button"
+                      data-testid="studio-switch-720p-and-render-btn"
+                      disabled={isRendering}
+                      onClick={() => {
+                        onChangeExportQuality('mobile_fast');
+                        onRerenderItem(currentItem.id, 'mobile_fast');
+                      }}
+                      className="inline-flex h-9 items-center gap-1.5 cyber-btn-primary px-3 text-[11px] font-semibold disabled:opacity-45"
+                    >
+                      <Zap className="h-3.5 w-3.5" />
+                      720p y renderizar ahora
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
 
             <button
               type="button"
