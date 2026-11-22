@@ -1,105 +1,190 @@
-# AutoCut Drive AI — Worker de Renderizado Nativo en PC (0 €)
+# AutoCut Drive AI — Guía del Worker Nativo para Windows 11 (0 €)
 
-Este worker ligero en Node.js (sin dependencias externas) permite delegar el renderizado pesado de vídeos grandes (>100 MB) o proyectos **Multi-Clip** desde el móvil a tu ordenador Windows usando **FFmpeg nativo** y tu carpeta sincronizada de **Google Drive**, manteniendo el coste en **0 €**.
-
----
-
-## Cómo funciona el flujo híbrido
-
-1. **En tu iPhone / móvil (PWA):** escaneas la carpeta de Google Drive, extraes fotogramas ligeros (< 2 MB), Gemini genera el plan de cortes y revisas/editas el orden y los tiempos en **Estudio de cortes**.
-2. En lugar de renderizar con FFmpeg.wasm en la RAM del móvil, pulsas **«Enviar render a PC»**.
-   - La PWA sube únicamente un archivo ligero `job_<id>.json` a `_AutoCut_Jobs/` dentro de tu carpeta de Drive (no descarga el vídeo bruto al móvil).
-3. **En tu PC Windows (`worker/pc-worker.mjs`):**
-   - Vigila `_AutoCut_Jobs/` cada 3 segundos.
-   - Localiza los vídeos originales ya sincronizados en tu disco local.
-   - Renderiza con **FFmpeg nativo**, detectando automáticamente tu GPU NVIDIA (`h264_nvenc`) o usando CPU (`libx264 -preset fast`) como alternativa segura.
-   - Respeta exactamente tus opciones del Estudio: `720p` / `1080p`, encuadre `9:16` (`center_crop` o `blur_bg`), recorte de silencios, normalización `-14 LUFS`, orden Multi-Clip y subtítulos quemados (solo si los activaste).
-   - Guarda el MP4 final en `_AutoCut_Output/` y actualiza el progreso (`0–100%`) en el JSON.
-4. **De vuelta en el móvil:** pulsas **«Actualizar estado PC»** en **Cola** o **Galería** para ver el progreso en tiempo real y reproducir o descargar el `.mp4` terminado.
+Este worker en Node.js (`worker/pc-worker.mjs`, **sin dependencias npm externas**) vigila tu carpeta local de **Google Drive** cada 3 segundos, procesa con **FFmpeg nativo** los trabajos pesados (>100 MB o Multi-Clip) que envíes desde el móvil y devuelve los `.mp4` terminados a `_AutoCut_Output/`, actualizando el progreso en tiempo real para la PWA.
 
 ---
 
-## 1. Requisitos previos en Windows
+## Cómo funciona el buzón de Google Drive
 
-1. **Node.js 18 o superior**: [https://nodejs.org/](https://nodejs.org/)
-2. **FFmpeg nativo** (se instala en un solo comando desde PowerShell o Terminal):
+1. Desde el móvil (PWA), pulsas **«Enviar render a PC»** en **Estudio de cortes**.
+2. La PWA sube un archivo ligero `job_<id>.json` a `_AutoCut_Jobs/` (sin descargar los brutos en el móvil).
+3. Este worker detecta el JSON, lee los vídeos brutos desde tu disco local, renderiza en **9:16** con GPU NVIDIA (`h264_nvenc`) o CPU (`libx264 -preset fast`) y guarda el resultado final en `_AutoCut_Output/`.
+4. En el móvil pulsas **«Actualizar estado PC»** en **Cola** o **Galería** para ver el estado y descargar el MP4.
+
+---
+
+## Paso 1 — Instalar requisitos en Windows 11
+
+1. **Node.js 18 o superior** (recomendado LTS 22): [https://nodejs.org/](https://nodejs.org/)
+2. **FFmpeg nativo** desde PowerShell o Terminal de Windows:
 
 ```powershell
 winget install Gyan.FFmpeg
 ```
 
-> Después de instalar FFmpeg, **cierra y vuelve a abrir la terminal** y comprueba que responde ejecutando:
-> ```powershell
-> ffmpeg -version
-> ```
+3. **Cierra y vuelve a abrir PowerShell** para que recargue el `PATH` del sistema, y comprueba que responde correctamente:
 
-3. **Google Drive para ordenador (Google Drive for Desktop)**:
-   - Instálalo desde [https://www.google.com/drive/download/](https://www.google.com/drive/download/) e inicia sesión con la misma cuenta de Google que usas en la PWA.
-   - Localiza la ruta local de tu carpeta configurada en AutoCut Drive AI (por ejemplo: `G:\Mi unidad\AutoCut_Videos`).
-   - *Consejo:* haz clic derecho sobre tu carpeta en el Explorador de Windows → **Acceso sin conexión → Disponible sin conexión** para que los brutos ya estén en tu disco cuando llegue un trabajo desde el móvil.
+```powershell
+ffmpeg -version
+node -v
+```
+
+Si ambos muestran su versión sin error, el entorno de renderizado está listo.
 
 ---
 
-## 2. Cómo lanzar el worker
+## Paso 2 — Instalar y sincronizar Google Drive para ordenadores
 
-Desde la raíz del repositorio:
+1. Descarga e instala [Google Drive para ordenadores](https://www.google.com/drive/download/) e inicia sesión con la **misma cuenta de Google** que usas en la PWA.
+2. Localiza la ruta exacta de tu carpeta configurada en **Ajustes** de AutoCut Drive AI, por ejemplo:
+   - `G:\Mi unidad\AutoCut_Videos`
 
-### Opción A — Pasando la ruta con `--dir` (PowerShell o CMD)
+### Nota importante: modo *Streaming* vs. *Disponible sin conexión*
+- **Modo *Streaming* (por defecto en `G:\`)**: funciona bien porque Google Drive descarga los archivos bajo demanda cuando FFmpeg los abre, pero si subes varios brutos pesados desde el iPhone, FFmpeg tendrá que esperar a que Drive baje cada clip en ese momento (o puede fallar si el archivo aún no terminó de aparecer en `G:\`).
+- **Recomendación (*Disponible sin conexión*)**: haz clic derecho sobre tu carpeta de vídeos en el Explorador de Windows → **Acceso sin conexión → Disponible sin conexión** (o usa el modo *Duplicar archivos*). Así tus brutos estarán ya en el SSD local y el renderizado con `h264_nvenc` arrancará al instante.
+
+---
+
+## Paso 3 — Prueba manual en primer plano (y verificación de GPU NVIDIA)
+
+Antes de automatizar el arranque, haz una prueba rápida en PowerShell desde la raíz del repositorio:
 
 ```powershell
 npm run worker -- --dir "G:\Mi unidad\AutoCut_Videos"
 ```
 
-O ejecutando Node directamente:
+*(También puedes usar la variable de entorno `$env:AUTOCUT_DRIVE_DIR = "G:\Mi unidad\AutoCut_Videos"; npm run worker`.)*
+
+Comprueba la línea de arranque en consola:
+- Si tienes tarjeta gráfica **NVIDIA** compatible y drivers al día, verás:
+  ```text
+  "encoder": "h264_nvenc (GPU NVIDIA)"
+  ```
+- Si tu equipo no tiene GPU NVIDIA o los drivers no soportan NVENC, el worker realiza una prueba real de 0.1 s y cambia automáticamente sin fallar a:
+  ```text
+  "encoder": "libx264 (CPU)"
+  ```
+
+Envía un vídeo de prueba desde el móvil con **«Enviar render a PC»** y verifica que el worker procesa el corte y deja el `.mp4` en `_AutoCut_Output/`. Pulsa `Ctrl + C` cuando confirmes que funciona.
+
+---
+
+## Paso 4 — Arranque automático en segundo plano al iniciar sesión (Windows 11)
+
+Para que el worker funcione solo cada vez que enciendas el PC **sin ventana negra molesta**, usa la plantilla incluida y regístrala en el **Programador de tareas de Windows**:
+
+### 4.1. Crea tu script personal desde la plantilla
+
+En la carpeta del proyecto, copia la plantilla:
 
 ```powershell
-node worker/pc-worker.mjs --dir "G:\Mi unidad\AutoCut_Videos"
+Copy-Item worker\start-worker.example.ps1 worker\start-worker.ps1
 ```
 
-### Opción B — Usando la variable de entorno `AUTOCUT_DRIVE_DIR`
+> `worker/start-worker.ps1` y `worker/worker.log` están en `.gitignore`, así que tus rutas personales y tus logs **nunca se subirán a GitHub**.
 
-**En Windows PowerShell:**
+Abre `worker\start-worker.ps1` y edita únicamente las dos variables del inicio:
+
 ```powershell
-$env:AUTOCUT_DRIVE_DIR = "G:\Mi unidad\AutoCut_Videos"
-npm run worker
+$projectDir = "C:\Users\TU_USUARIO\proyectos\autocut-drive-ai"
+$driveDir   = "G:\Mi unidad\AutoCut_Videos"
 ```
 
-**En Símbolo del sistema (CMD):**
-```cmd
-set AUTOCUT_DRIVE_DIR=G:\Mi unidad\AutoCut_Videos
-npm run worker
+### 4.2. Registra la tarea programada desde PowerShell
+
+Ejecuta este bloque en PowerShell (ajusta `$scriptPath` a la ruta real de tu `worker\start-worker.ps1`). Configura:
+- Disparo **al iniciar sesión** con **retraso de 30 segundos (`PT30S`)** para dar tiempo a que Google Drive monte `G:\`.
+- Ejecución en segundo plano **sin ventana visible** (`-WindowStyle Hidden`).
+- **Sin límite máximo de duración** (`ExecutionTimeLimit` en `0`).
+- **Reinicio automático en caso de fallo** (hasta 3 reintentos cada 1 minuto).
+
+```powershell
+$taskName   = "AutoCutDriveAI-PCWorker"
+$scriptPath = "C:\Users\TU_USUARIO\proyectos\autocut-drive-ai\worker\start-worker.ps1"
+
+$action = New-ScheduledTaskAction `
+  -Execute "powershell.exe" `
+  -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`""
+
+$trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+$trigger.Delay = "PT30S"
+
+$settings = New-ScheduledTaskSettingsSet `
+  -AllowStartIfOnBatteries `
+  -DontStopIfGoingOnBatteries `
+  -StartWhenAvailable `
+  -ExecutionTimeLimit ([TimeSpan]::Zero) `
+  -RestartCount 3 `
+  -RestartInterval (New-TimeSpan -Minutes 1) `
+  -MultipleInstances IgnoreNew
+
+Register-ScheduledTask `
+  -TaskName $taskName `
+  -Action $action `
+  -Trigger $trigger `
+  -Settings $settings `
+  -Description "Worker FFmpeg nativo de AutoCut Drive AI (vigila _AutoCut_Jobs en Google Drive)" `
+  -Force
 ```
 
-**En macOS / Linux:**
-```bash
-AUTOCUT_DRIVE_DIR="$HOME/Google Drive/Mi unidad/AutoCut_Videos" npm run worker
+Para arrancarla inmediatamente sin reiniciar el PC:
+
+```powershell
+Start-ScheduledTask -TaskName "AutoCutDriveAI-PCWorker"
 ```
 
 ---
 
-## 3. Opciones adicionales de línea de comandos
+## Paso 5 — Comandos rápidos de PowerShell (logs y control)
+
+### Ver el log en tiempo real
+```powershell
+Get-Content -Path "worker\worker.log" -Tail 40 -Wait
+```
+*(Pulsa `Ctrl + C` para dejar de mirar el log; el worker seguirá corriendo en segundo plano.)*
+
+### Comprobar si la tarea está activa
+```powershell
+Get-ScheduledTask -TaskName "AutoCutDriveAI-PCWorker" | Select-Object TaskName, State
+```
+
+### Detener el worker manualmente
+```powershell
+Stop-ScheduledTask -TaskName "AutoCutDriveAI-PCWorker"
+```
+
+### Desactivar el arranque automático (sin borrar la tarea)
+```powershell
+Disable-ScheduledTask -TaskName "AutoCutDriveAI-PCWorker"
+```
+
+### Volver a activarlo o eliminar la tarea por completo
+```powershell
+# Volver a activar
+Enable-ScheduledTask -TaskName "AutoCutDriveAI-PCWorker"
+
+# Eliminar la tarea del Programador de tareas
+Unregister-ScheduledTask -TaskName "AutoCutDriveAI-PCWorker" -Confirm:$false
+```
+
+---
+
+## Opciones CLI de `worker/pc-worker.mjs`
 
 | Opción | Descripción |
-| :--- | :--- |
-| `--dir <ruta>` / `-d <ruta>` | Ruta local de la carpeta de Google Drive sincronizada (anula `AUTOCUT_DRIVE_DIR`). |
-| `--interval <ms>` | Frecuencia de escaneo de `_AutoCut_Jobs/` en milisegundos (por defecto `3000`). |
-| `--cpu` | Fuerza la codificación por CPU (`libx264 -preset fast`) aunque el PC tenga GPU NVIDIA. |
-| `--ffmpeg <ruta>` | Ruta explícita al ejecutable `ffmpeg.exe` si no está en el `PATH` del sistema. |
-| `--once` | Procesa los trabajos `pending` actuales y cierra el script al terminar. |
+| --- | --- |
+| `--dir <ruta>` / `-d <ruta>` | Carpeta local de Google Drive sincronizada (anula `AUTOCUT_DRIVE_DIR`). |
+| `--interval <ms>` | Intervalo de vigilancia de `_AutoCut_Jobs/` en ms (por defecto `3000`). |
+| `--cpu` | Fuerza codificación por CPU (`libx264 -preset fast`) aunque exista GPU NVIDIA. |
+| `--ffmpeg <ruta>` | Ruta explícita a `ffmpeg.exe` si no está en el `PATH`. |
+| `--once` | Procesa los trabajos `pending` actuales una vez y sale. |
 | `--help` | Muestra la ayuda rápida en español. |
 
 ---
 
-## 4. Aceleración por GPU (NVENC) vs CPU
+## Solución rápida de problemas
 
-Al arrancar, el worker realiza una prueba real de 0.1 s con `h264_nvenc`:
-- Si tienes una tarjeta gráfica NVIDIA compatible con drivers actualizados, verás en consola `h264_nvenc (GPU NVIDIA)` y los vídeos Multi-Clip de varios cientos de MB se renderizarán en cuestión de segundos.
-- Si el PC no tiene GPU NVIDIA o los drivers no soportan NVENC, el worker cambia automáticamente y sin errores a `libx264 (CPU)` con `-preset fast`.
-
----
-
-## 5. Solución rápida de problemas
-
-- **«No se encontró FFmpeg»**: ejecuta `winget install Gyan.FFmpeg`, reinicia la terminal o pasa `--ffmpeg "C:\ruta\a\ffmpeg.exe"`.
-- **«No se encontró el vídeo fuente»**: espera unos segundos a que Google Drive para ordenador sincronice los brutos en la carpeta local y revisa que el nombre del archivo coincida con el que está en Drive.
-- **El trabajo se queda en «En cola PC» en el móvil**: confirma que el worker sigue abierto en el PC y que la carpeta `--dir` coincide exactamente con el **ID de carpeta de Drive** configurado en **Ajustes** de la PWA.
+- **«No se encontró FFmpeg»**: ejecuta `winget install Gyan.FFmpeg`, cierra y abre PowerShell, o pasa `--ffmpeg "C:\ruta\a\ffmpeg.exe"`.
+- **«La carpeta de Google Drive no está disponible» al arrancar Windows**: aumenta `$trigger.Delay` a `"PT60S"` o sube `$maxWaitSec` en `worker\start-worker.ps1`.
+- **«No se encontró el vídeo fuente»**: espera unos segundos a que Google Drive para ordenadores sincronice el bruto en tu carpeta local (o marca la carpeta como *Disponible sin conexión*).
+- **El trabajo se queda en «En cola PC» en el móvil**: revisa `worker\worker.log` y verifica que `$driveDir` coincide exactamente con la carpeta configurada en **Ajustes** de la PWA.

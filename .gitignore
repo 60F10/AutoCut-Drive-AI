@@ -9,5 +9,7 @@ coverage/
 server.js
 .DS_Store
 *.log
+worker/worker.log
+worker/start-worker.ps1
 .env*
 !.env.example
