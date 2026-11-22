@@ -53,7 +53,9 @@ export default function App() {
     }
 
     const extractPhasePrefix = (text: string): { prefix: string; body: string } => {
-      const m = text.trim().match(/^(\[(?:Drive|Extracción frames|Análisis IA|FFmpeg)\])\s*(.*)$/i);
+      const m = text
+        .trim()
+        .match(/^(\[(?:Drive|Extracción frames|Análisis IA|FFmpeg|GitHub)\])\s*(.*)$/i);
       return m ? { prefix: m[1], body: m[2] } : { prefix: '', body: text };
     };
 
@@ -149,13 +151,24 @@ export default function App() {
 
   selectStudioRef.current = studio.setSelectedStudioId;
 
+  const setSelectedStudioId = studio.setSelectedStudioId;
   const openItemInStudio = useCallback(
     (itemId: string) => {
-      studio.setSelectedStudioId(itemId);
+      setSelectedStudioId(itemId);
       setActiveView('studio');
     },
-    [studio]
+    [setSelectedStudioId]
   );
+
+  const setMultiClipModalOpen = queue.setMultiClipModalOpen;
+  const closeMultiClipModal = useCallback(() => {
+    setMultiClipModalOpen(false);
+  }, [setMultiClipModalOpen]);
+
+  const setSelectedForCombine = queue.setSelectedForCombine;
+  const clearCombineSelection = useCallback(() => {
+    setSelectedForCombine([]);
+  }, [setSelectedForCombine]);
 
   const pcRender = usePcRenderJobs({
     folderId: settings.folderId,
@@ -172,8 +185,8 @@ export default function App() {
     setItems: queue.setItems,
     updateQueueItem: queue.updateQueueItem,
     onOpenStudio: openItemInStudio,
-    onCloseMultiClipModal: () => queue.setMultiClipModalOpen(false),
-    onClearCombineSelection: () => queue.setSelectedForCombine([]),
+    onCloseMultiClipModal: closeMultiClipModal,
+    onClearCombineSelection: clearCombineSelection,
     clearAuthSession,
     onError: reportError,
   });

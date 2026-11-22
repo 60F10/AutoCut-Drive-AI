@@ -197,6 +197,7 @@ export interface QueueItem {
   analyzeJobStage?: AnalyzeJobStage;
   analyzeJobProgress?: number;
   analyzeJobError?: string;
+  cloudWorkflowRunUrl?: string | null;
   completedAt?: number;
   lastUpdated: number;
 }
@@ -312,12 +313,19 @@ export interface AnalyzeJobManifest {
   isMultiClip?: boolean;
 }
 
+export interface CloudWorkflowRunStatus {
+  status: string | null;
+  conclusion: string | null;
+  htmlUrl: string | null;
+}
+
 export interface PcJobSyncEntry {
   manifest: RenderJobManifest;
   jobFileId: string;
   jobFileName: string;
   modifiedTime?: string;
   outputFile?: DriveFileMeta;
+  workflowRunUrl?: string | null;
 }
 
 export interface AnalyzeJobSyncEntry {
@@ -325,4 +333,5 @@ export interface AnalyzeJobSyncEntry {
   jobFileId: string;
   jobFileName: string;
   modifiedTime?: string;
+  workflowRunUrl?: string | null;
 }

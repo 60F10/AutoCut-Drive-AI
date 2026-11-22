@@ -1,4 +1,5 @@
 name: AutoCut Cloud Render
+run-name: cloud-render ${{ inputs.job_file_id }}
 
 on:
   workflow_dispatch:

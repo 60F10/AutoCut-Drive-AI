@@ -12,6 +12,7 @@ import {
   Cloud,
   CloudUpload,
   Download,
+  ExternalLink,
   Film,
   Loader2,
   Monitor,
@@ -817,6 +818,46 @@ export function StudioView({
                   <p className="font-mono text-[10px] text-[#8EA2BD] truncate">
                     job_{activePcJobId}.json → {targetOutputName}
                   </p>
+                  {activePcStatus === 'error' && (
+                    <div className="pt-1 space-y-1.5">
+                      {currentItem.pcJobError && (
+                        <p className="font-mono text-[10px] text-[#ff85b8] break-words">
+                          {currentItem.pcJobError}
+                        </p>
+                      )}
+                      <div className="flex flex-wrap items-center gap-2">
+                        {typeof currentItem.cloudWorkflowRunUrl === 'string' &&
+                          /^https:\/\//i.test(currentItem.cloudWorkflowRunUrl.trim()) && (
+                            <a
+                              href={currentItem.cloudWorkflowRunUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              data-testid="studio-view-run-link"
+                              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[#00f0ff]/45 bg-[#00f0ff]/12 px-2.5 font-mono text-[11px] font-semibold text-[#00f0ff] hover:bg-[#00f0ff]/22"
+                            >
+                              Ver ejecución
+                              <ExternalLink className="h-3 w-3" />
+                            </a>
+                          )}
+                        {activePcTarget === 'cloud' && activeJobFileId && (
+                          <button
+                            type="button"
+                            data-testid="studio-retry-failed-job-btn"
+                            disabled={retryingDispatchJobFileId === activeJobFileId}
+                            onClick={() => onRetryCloudDispatch(activeJobFileId)}
+                            className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[#ff2a85]/60 bg-[#ff2a85]/18 px-2.5 font-mono text-[11px] font-semibold text-[#ffd1e3] hover:bg-[#ff2a85]/28 disabled:opacity-45"
+                          >
+                            {retryingDispatchJobFileId === activeJobFileId ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <RotateCw className="h-3.5 w-3.5" />
+                            )}
+                            Reintentar
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  )}
                   {activeDispatchError && activeJobFileId && activePcStatus === 'pending' && (
                     <div className="pt-1 space-y-1.5">
                       <p className="font-mono text-[10px] text-[#ff85b8] break-words">

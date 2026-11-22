@@ -11,6 +11,16 @@ export class DriveAuthExpiredError extends Error {
   }
 }
 
+export class DriveHttpError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = 'DriveHttpError';
+    this.status = status;
+  }
+}
+
 async function assertDriveOk(res: Response, operation: string): Promise<void> {
   if (res.status === 401) {
     logError('Drive', `${operation}: sesión expirada`, { http: 401 });
@@ -26,7 +36,7 @@ async function assertDriveOk(res: Response, operation: string): Promise<void> {
     }
     const msg = detail || `Error de Google Drive (${res.status})`;
     logError('Drive', `${operation}: error HTTP`, { http: res.status, detalle: msg });
-    throw new Error(msg);
+    throw new DriveHttpError(res.status, msg);
   }
 }
 
@@ -510,6 +520,54 @@ export async function dispatchCloudRenderJob(jobFileId: string): Promise<{ ok: t
     detalle: message,
   });
   throw new Error(message);
+}
+
+/**
+ * Checks GitHub Actions run status for a dispatched cloud job via `/api/cloud-render/status`.
+ */
+export async function fetchCloudWorkflowStatus(
+  jobFileId: string
+): Promise<import('../types').CloudWorkflowRunStatus> {
+  const t0 = performance.now();
+  const res = await fetch(
+    `/api/cloud-render/status?jobFileId=${encodeURIComponent(jobFileId)}`,
+    {
+      method: 'GET',
+      credentials: 'same-origin',
+    }
+  );
+
+  if (!res.ok) {
+    let message = `No se pudo consultar el estado del workflow (HTTP ${res.status}).`;
+    try {
+      const json = (await res.json()) as { error?: string };
+      if (json?.error) message = json.error;
+    } catch {
+      // keep default
+    }
+    logError('Nube', 'Error al comprobar estado de workflow en GitHub Actions', {
+      http: res.status,
+      detalle: message,
+      ms: Math.round(performance.now() - t0),
+    });
+    throw new Error(message);
+  }
+
+  const data = (await res.json()) as Partial<import('../types').CloudWorkflowRunStatus>;
+  const result: import('../types').CloudWorkflowRunStatus = {
+    status: typeof data?.status === 'string' ? data.status : null,
+    conclusion: typeof data?.conclusion === 'string' ? data.conclusion : null,
+    htmlUrl: typeof data?.htmlUrl === 'string' ? data.htmlUrl : null,
+  };
+
+  logInfo('Nube', 'Estado de workflow comprobado en GitHub Actions', {
+    status: result.status ?? 'no_encontrado',
+    conclusion: result.conclusion ?? 'pendiente',
+    http: res.status,
+    ms: Math.round(performance.now() - t0),
+  });
+
+  return result;
 }
 
 export interface PcRenderDriveSnapshot {

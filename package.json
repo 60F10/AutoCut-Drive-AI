@@ -9,7 +9,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "worker": "node worker/pc-worker.mjs",
-    "test": "tsx --test src/utils/videoPipeline.test.ts worker/worker.test.mjs",
+    "test": "tsx --test src/utils/videoPipeline.test.ts src/hooks/usePcRenderJobs.test.ts worker/worker.test.mjs",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit"
   },

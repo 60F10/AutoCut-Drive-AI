@@ -12,6 +12,11 @@ import {
   parseHumanReadableApiError,
   sanitizeGeminiModelName,
 } from './src/utils/videoPipeline.ts';
+import {
+  findMatchingWorkflowRun,
+  isValidJobFileId,
+  type GitHubWorkflowRunLike,
+} from './src/utils/remoteJobsSync.ts';
 
 const PORT = Number(process.env.PORT) || 3000;
 const DEFAULT_SERVER_GEMINI_MODEL = sanitizeGeminiModelName(
@@ -265,6 +270,67 @@ async function startServer() {
       res.status(502).json({
         error:
           'No se pudo contactar con la API de GitHub Actions. Comprueba la conexión y vuelve a intentarlo.',
+      });
+    }
+  });
+
+  // Inspects recent GitHub Actions runs for cloud-render.yml to detect stuck/failed workflows
+  app.get('/api/cloud-render/status', async (req, res) => {
+    try {
+      const rawJobFileId =
+        typeof req.query?.jobFileId === 'string' ? req.query.jobFileId.trim() : '';
+
+      if (!isValidJobFileId(rawJobFileId)) {
+        res.status(400).json({
+          error: 'El identificador jobFileId no es válido.',
+        });
+        return;
+      }
+
+      const cloudConfig = getCloudRenderServerConfig();
+      if (!cloudConfig.configured) {
+        res.status(503).json({
+          error:
+            'El render en la nube no está configurado en el servidor. Añade GITHUB_DISPATCH_TOKEN y GITHUB_REPO en Settings > Secrets.',
+          actionHint: 'settings',
+        });
+        return;
+      }
+
+      const runsUrl = `https://api.github.com/repos/${cloudConfig.repo}/actions/workflows/cloud-render.yml/runs?event=workflow_dispatch&per_page=20`;
+      const ghRes = await fetch(runsUrl, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${cloudConfig.token}`,
+          Accept: 'application/vnd.github+json',
+          'X-GitHub-Api-Version': '2022-11-28',
+          'User-Agent': 'autocut-drive-ai',
+        },
+      });
+
+      if (!ghRes.ok) {
+        const statusCode = ghRes.status >= 400 && ghRes.status < 600 ? ghRes.status : 502;
+        res.status(statusCode).json({
+          error: humanizeGitHubDispatchError(ghRes.status),
+          githubStatus: ghRes.status,
+        });
+        return;
+      }
+
+      const data = (await ghRes.json()) as { workflow_runs?: GitHubWorkflowRunLike[] };
+      const runs = Array.isArray(data?.workflow_runs) ? data.workflow_runs : [];
+      const matched = findMatchingWorkflowRun(runs, rawJobFileId);
+
+      res.json({
+        status: matched.status,
+        conclusion: matched.conclusion,
+        htmlUrl: matched.htmlUrl,
+      });
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : 'Error de red al contactar con GitHub.';
+      console.error('[Nube] Error en /api/cloud-render/status:', msg);
+      res.status(502).json({
+        error: 'No se pudo consultar el estado del workflow en GitHub Actions.',
       });
     }
   });

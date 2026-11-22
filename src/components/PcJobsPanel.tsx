@@ -199,6 +199,14 @@ export function PcJobsPanel({
               manifest.status === 'pending' &&
               Boolean(onRetryCloudDispatch) &&
               (Boolean(dispatchError) || cloudRenderConfigured);
+            const canRetryFailedCloudJob =
+              isCloud &&
+              manifest.status === 'error' &&
+              Boolean(onRetryCloudDispatch) &&
+              cloudRenderConfigured;
+            const safeWorkflowRunUrl = isSafeHttpsUrl(entry.workflowRunUrl ?? undefined)
+              ? entry.workflowRunUrl!
+              : null;
 
             return (
               <div
@@ -318,6 +326,36 @@ export function PcJobsPanel({
                           <RotateCw className="h-3.5 w-3.5" />
                         )}
                         Reintentar envío
+                      </button>
+                    )}
+
+                    {manifest.status === 'error' && safeWorkflowRunUrl && (
+                      <a
+                        href={safeWorkflowRunUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        data-testid="remote-job-view-run-link"
+                        className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[#00f0ff]/35 bg-[#0c0f1a] px-2.5 font-mono text-[11px] font-semibold text-[#00f0ff] hover:border-[#00f0ff]/70 hover:bg-[#00f0ff]/12 transition-colors whitespace-nowrap"
+                      >
+                        Ver ejecución
+                        <ExternalLink className="h-3 w-3" />
+                      </a>
+                    )}
+
+                    {canRetryFailedCloudJob && (
+                      <button
+                        type="button"
+                        data-testid="remote-job-retry-btn"
+                        disabled={isRetryingDispatch}
+                        onClick={() => onRetryCloudDispatch?.(entry.jobFileId)}
+                        className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[#ff2a85]/65 bg-[#ff2a85]/18 px-2.5 font-mono text-[11px] font-semibold text-[#ffd1e3] hover:bg-[#ff2a85]/28 transition-colors whitespace-nowrap disabled:opacity-45"
+                      >
+                        {isRetryingDispatch ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <RotateCw className="h-3.5 w-3.5" />
+                        )}
+                        Reintentar
                       </button>
                     )}
 

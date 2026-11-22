@@ -127,6 +127,10 @@ function isActiveStage(stage: QueueStage): boolean {
   );
 }
 
+function isSafeHttpsUrl(url?: string | null): url is string {
+  return typeof url === 'string' && /^https:\/\//i.test(url.trim());
+}
+
 export function QueueView({
   items,
   analyticsRecords,
@@ -674,18 +678,91 @@ export function QueueView({
                                 Reintentar envío
                               </button>
                             )}
+                          {item.analyzeJobStatus === 'error' &&
+                            isSafeHttpsUrl(item.cloudWorkflowRunUrl) && (
+                              <a
+                                href={item.cloudWorkflowRunUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                data-testid={`queue-view-run-${item.id}`}
+                                className="inline-flex h-6 items-center gap-1 rounded-sm border border-[#00f0ff]/45 bg-[#00f0ff]/10 px-2 font-mono text-[10px] font-semibold text-[#00f0ff] hover:bg-[#00f0ff]/20"
+                              >
+                                Ver ejecución
+                                <ExternalLink className="h-2.5 w-2.5" />
+                              </a>
+                            )}
+                          {item.analyzeJobFileId && item.analyzeJobStatus === 'error' && (
+                            <button
+                              type="button"
+                              data-testid={`queue-retry-cloud-${item.id}`}
+                              disabled={retryingDispatchJobFileId === item.analyzeJobFileId}
+                              onClick={() => onRetryCloudDispatch(item.analyzeJobFileId!)}
+                              className="inline-flex h-6 items-center gap-1 rounded-sm border border-[#ff2a85]/55 bg-[#ff2a85]/15 px-2 font-mono text-[10px] font-semibold text-[#ffd1e3] hover:bg-[#ff2a85]/25 disabled:opacity-45"
+                            >
+                              <RotateCw
+                                className={`h-3 w-3 ${
+                                  retryingDispatchJobFileId === item.analyzeJobFileId
+                                    ? 'animate-spin'
+                                    : ''
+                                }`}
+                              />
+                              Reintentar
+                            </button>
+                          )}
                         </div>
                       )}
 
                       {item.pcJobStatus && (
-                        <p className="inline-flex items-center gap-1.5 rounded-sm border border-[#00f0ff]/30 bg-[#00f0ff]/10 px-2 py-0.5 font-mono text-[11px] font-semibold text-[#00f0ff]">
-                          {item.pcJobTarget === 'cloud' ? 'Nube' : 'PC'}:{' '}
-                          {formatPcJobStatusLabel(
-                            item.pcJobStatus,
-                            item.pcJobProgress,
-                            item.pcJobTarget
-                          )}
-                        </p>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p
+                            className={`inline-flex items-center gap-1.5 rounded-sm border px-2 py-0.5 font-mono text-[11px] font-semibold ${
+                              item.pcJobStatus === 'error'
+                                ? 'border-[#ff2a85]/45 bg-[#ff2a85]/12 text-[#ff85b8]'
+                                : 'border-[#00f0ff]/30 bg-[#00f0ff]/10 text-[#00f0ff]'
+                            }`}
+                          >
+                            {item.pcJobTarget === 'cloud' ? 'Nube' : 'PC'}:{' '}
+                            {formatPcJobStatusLabel(
+                              item.pcJobStatus,
+                              item.pcJobProgress,
+                              item.pcJobTarget
+                            )}
+                          </p>
+                          {item.pcJobStatus === 'error' &&
+                            item.pcJobTarget === 'cloud' &&
+                            isSafeHttpsUrl(item.cloudWorkflowRunUrl) && (
+                              <a
+                                href={item.cloudWorkflowRunUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                data-testid={`queue-render-view-run-${item.id}`}
+                                className="inline-flex h-6 items-center gap-1 rounded-sm border border-[#00f0ff]/45 bg-[#00f0ff]/10 px-2 font-mono text-[10px] font-semibold text-[#00f0ff] hover:bg-[#00f0ff]/20"
+                              >
+                                Ver ejecución
+                                <ExternalLink className="h-2.5 w-2.5" />
+                              </a>
+                            )}
+                          {item.pcJobStatus === 'error' &&
+                            item.pcJobTarget === 'cloud' &&
+                            item.pcJobFileId && (
+                              <button
+                                type="button"
+                                data-testid={`queue-render-retry-cloud-${item.id}`}
+                                disabled={retryingDispatchJobFileId === item.pcJobFileId}
+                                onClick={() => onRetryCloudDispatch(item.pcJobFileId!)}
+                                className="inline-flex h-6 items-center gap-1 rounded-sm border border-[#ff2a85]/55 bg-[#ff2a85]/15 px-2 font-mono text-[10px] font-semibold text-[#ffd1e3] hover:bg-[#ff2a85]/25 disabled:opacity-45"
+                              >
+                                <RotateCw
+                                  className={`h-3 w-3 ${
+                                    retryingDispatchJobFileId === item.pcJobFileId
+                                      ? 'animate-spin'
+                                      : ''
+                                  }`}
+                                />
+                                Reintentar
+                              </button>
+                            )}
+                        </div>
                       )}
 
                       {item.outputFileName && (
@@ -896,7 +973,7 @@ export function QueueView({
                     >
                       {(() => {
                         const match = item.errorMessage.match(
-                          /^(\[(?:Drive|Extracción frames|Análisis IA|FFmpeg)\])\s*(.*)$/i
+                          /^(\[(?:Drive|Extracción frames|Análisis IA|FFmpeg|GitHub)\])\s*(.*)$/i
                         );
                         if (!match) return item.errorMessage;
                         return (

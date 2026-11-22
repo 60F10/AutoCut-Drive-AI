@@ -26,10 +26,12 @@ import type {
 } from '../types';
 import {
   DriveAuthExpiredError,
+  DriveHttpError,
   deleteDriveFile,
   dispatchCloudRenderJob,
   downloadDriveVideo,
   ensureCloudSourcesSubfolder,
+  fetchCloudWorkflowStatus,
   listPcRenderJobsAndOutputs,
   uploadAnalyzeJobManifest,
   uploadRenderJobManifest,
@@ -46,6 +48,15 @@ import {
   formatPcJobStatusLabel,
   formatPhaseError,
 } from '../utils/videoPipeline';
+import {
+  BASE_REMOTE_POLL_INTERVAL_MS,
+  RemoteJobsPoller,
+  computeNextPollBackoffMs,
+  hasActiveRemoteJobs,
+  inspectStuckCloudJobs,
+  isBackoffTriggerHttpStatus,
+  type CloudWorkflowFailureRecord,
+} from '../utils/remoteJobsSync';
 import { logError, logInfo, logWarn } from '../services/debugLogger';
 
 interface UsePcRenderJobsParams {
@@ -94,9 +105,6 @@ interface ClipUploadCandidate {
   uploadedTempSource?: boolean;
 }
 
-const ACTIVE_REMOTE_POLL_INTERVAL_MS = 15_000;
-const AUTO_RELAUNCH_PENDING_MS = 3 * 60 * 1000; // 3 minutes
-
 export function usePcRenderJobs({
   folderId,
   accessToken,
@@ -133,6 +141,7 @@ export function usePcRenderJobs({
   const [retryingDispatchJobFileId, setRetryingDispatchJobFileId] = useState<string | null>(null);
   const [downloadingOutputId, setDownloadingOutputId] = useState<string | null>(null);
   const [pcOutputPreviewUrls, setPcOutputPreviewUrls] = useState<Record<string, string>>({});
+  const [pollIntervalMs, setPollIntervalMs] = useState<number>(BASE_REMOTE_POLL_INTERVAL_MS);
   const [isPageVisible, setIsPageVisible] = useState<boolean>(() =>
     typeof document === 'undefined' ? true : document.visibilityState === 'visible'
   );
@@ -142,6 +151,22 @@ export function usePcRenderJobs({
   const autoRetriedJobIdsRef = useRef<Set<string>>(new Set());
   const cleanedTempJobsRef = useRef<Set<string>>(new Set());
   const appliedAnalyzeJobIdsRef = useRef<Set<string>>(new Set());
+  const dispatchedAtByJobFileIdRef = useRef<Record<string, number>>({});
+  const cloudWorkflowFailuresRef = useRef<Record<string, CloudWorkflowFailureRecord>>({});
+  const pollIntervalMsRef = useRef<number>(BASE_REMOTE_POLL_INTERVAL_MS);
+  const pollerRef = useRef<RemoteJobsPoller | null>(null);
+  const syncPcJobsRef = useRef<(silent?: boolean) => Promise<void>>(async () => {});
+  const wasHiddenRef = useRef<boolean>(false);
+  const isDriveConnectedRef = useRef<boolean>(isDriveConnected);
+  const trimmedFolderId = folderId.trim();
+  const folderIdRef = useRef<string>(trimmedFolderId);
+  const hasActivePcJobs = hasActiveRemoteJobs(pcJobs, analyzeJobs);
+  const hasActivePcJobsRef = useRef<boolean>(hasActivePcJobs);
+
+  isDriveConnectedRef.current = isDriveConnected;
+  folderIdRef.current = trimmedFolderId;
+  hasActivePcJobsRef.current = hasActivePcJobs;
+  pollIntervalMsRef.current = pollIntervalMs;
 
   useEffect(() => {
     return () => {
@@ -158,7 +183,23 @@ export function usePcRenderJobs({
   useEffect(() => {
     if (typeof document === 'undefined') return;
     const handleVisibility = () => {
-      setIsPageVisible(document.visibilityState === 'visible');
+      const visible = document.visibilityState === 'visible';
+      setIsPageVisible(visible);
+      if (!visible) {
+        wasHiddenRef.current = true;
+        return;
+      }
+      if (
+        wasHiddenRef.current &&
+        isDriveConnectedRef.current &&
+        folderIdRef.current &&
+        hasActivePcJobsRef.current
+      ) {
+        wasHiddenRef.current = false;
+        void syncPcJobsRef.current(true);
+      } else {
+        wasHiddenRef.current = false;
+      }
     };
     document.addEventListener('visibilitychange', handleVisibility);
     return () => document.removeEventListener('visibilitychange', handleVisibility);
@@ -299,16 +340,44 @@ export function usePcRenderJobs({
 
       try {
         const snapshot = await listPcRenderJobsAndOutputs(folderId.trim(), token);
-        setPcJobs(snapshot.jobs);
-        setAnalyzeJobs(snapshot.analyzeJobs);
-        setPcOutputs(snapshot.outputs);
-        setLastPcSyncTime(Date.now());
-
         const nowMs = Date.now();
+
+        // Reset backoff back to 15 s once Drive responds cleanly
+        if (pollIntervalMsRef.current !== BASE_REMOTE_POLL_INTERVAL_MS) {
+          pollIntervalMsRef.current = BASE_REMOTE_POLL_INTERVAL_MS;
+          setPollIntervalMs(BASE_REMOTE_POLL_INTERVAL_MS);
+        }
+
+        // Check GitHub Actions runs for any cloud job stuck > 3 min with progress <= 5
+        const inspection = await inspectStuckCloudJobs({
+          jobs: snapshot.jobs,
+          analyzeJobs: snapshot.analyzeJobs,
+          cloudRenderConfigured,
+          dispatchedAtByJobFileId: dispatchedAtByJobFileIdRef.current,
+          existingFailures: cloudWorkflowFailuresRef.current,
+          nowMs,
+          fetchWorkflowStatus: fetchCloudWorkflowStatus,
+          logger: {
+            info: (message, details) => logInfo('Nube', message, details),
+            warn: (message, details) => logWarn('Nube', message, details),
+            error: (message, details) => logError('Nube', message, details),
+          },
+        });
+
+        cloudWorkflowFailuresRef.current = inspection.failures;
+        const missingRunSet = new Set(inspection.missingRunJobFileIds);
+        const effectiveJobs = inspection.jobs;
+        const effectiveAnalyzeJobs = inspection.analyzeJobs;
+
+        setPcJobs(effectiveJobs);
+        setAnalyzeJobs(effectiveAnalyzeJobs);
+        setPcOutputs(snapshot.outputs);
+        setLastPcSyncTime(nowMs);
+
         const currentItems = itemsRef.current;
 
         // 1. Sync Render Jobs (`job_*.json`)
-        for (const entry of snapshot.jobs) {
+        for (const entry of effectiveJobs) {
           const { manifest, outputFile } = entry;
           const target: RenderJobTarget = manifest.target === 'cloud' ? 'cloud' : 'pc';
 
@@ -325,37 +394,36 @@ export function usePcRenderJobs({
             void cleanupTempSourcesForJob(manifest, token);
           }
 
+          // Only auto-relaunch once if GitHub Actions had NO run at all after > 3 min
           if (
             target === 'cloud' &&
             manifest.status === 'pending' &&
             cloudRenderConfigured &&
+            missingRunSet.has(entry.jobFileId) &&
             !autoRetriedJobIdsRef.current.has(entry.jobFileId)
           ) {
-            const createdMs = Date.parse(manifest.createdAt || '');
-            if (Number.isFinite(createdMs) && nowMs - createdMs > AUTO_RELAUNCH_PENDING_MS) {
-              autoRetriedJobIdsRef.current.add(entry.jobFileId);
-              logInfo('Nube', 'Relanzando render en la nube pendiente > 3 min', {
-                jobId: manifest.jobId,
-                esperaMin: Math.round((nowMs - createdMs) / 60_000),
-              });
-              void dispatchCloudRenderJob(entry.jobFileId)
-                .then(() => {
-                  setFailedDispatchJobFileIds((prev) => {
-                    if (!prev[entry.jobFileId]) return prev;
-                    const next = { ...prev };
-                    delete next[entry.jobFileId];
-                    return next;
-                  });
-                })
-                .catch((err) => {
-                  const errMsg =
-                    err instanceof Error ? err.message : 'No se pudo relanzar GitHub Actions.';
-                  setFailedDispatchJobFileIds((prev) => ({
-                    ...prev,
-                    [entry.jobFileId]: errMsg,
-                  }));
+            autoRetriedJobIdsRef.current.add(entry.jobFileId);
+            logInfo('Nube', 'Relanzando render en la nube sin ejecución tras > 3 min', {
+              jobId: manifest.jobId,
+            });
+            void dispatchCloudRenderJob(entry.jobFileId)
+              .then(() => {
+                dispatchedAtByJobFileIdRef.current[entry.jobFileId] = Date.now();
+                setFailedDispatchJobFileIds((prev) => {
+                  if (!prev[entry.jobFileId]) return prev;
+                  const next = { ...prev };
+                  delete next[entry.jobFileId];
+                  return next;
                 });
-            }
+              })
+              .catch((err) => {
+                const errMsg =
+                  err instanceof Error ? err.message : 'No se pudo relanzar GitHub Actions.';
+                setFailedDispatchJobFileIds((prev) => ({
+                  ...prev,
+                  [entry.jobFileId]: errMsg,
+                }));
+              });
           }
 
           const matchingItem = currentItems.find(
@@ -391,6 +459,7 @@ export function usePcRenderJobs({
             patch.stage = 'completed';
             patch.progress = 100;
             patch.completedAt = matchingItem.completedAt || Date.now();
+            patch.cloudWorkflowRunUrl = undefined;
             patch.stageDetail = manifest.encoderUsed
               ? `${originLabel} (${manifest.encoderUsed}) · Listo en _AutoCut_Output`
               : `${originLabel} · Listo en _AutoCut_Output`;
@@ -405,10 +474,16 @@ export function usePcRenderJobs({
             }
           } else if (manifest.status === 'processing' || manifest.status === 'pending') {
             patch.stageDetail = `${target === 'cloud' ? 'Nube' : 'PC'}: ${statusLabel}`;
+            if ((manifest.progress ?? 0) > 5) {
+              patch.cloudWorkflowRunUrl = undefined;
+            }
           } else if (manifest.status === 'error') {
-            patch.stageDetail = `${target === 'cloud' ? 'Nube' : 'PC'} Error: ${
-              manifest.errorMessage || 'Fallo en FFmpeg remoto'
-            }`;
+            patch.cloudWorkflowRunUrl = entry.workflowRunUrl ?? matchingItem.cloudWorkflowRunUrl;
+            patch.stageDetail = manifest.errorMessage?.startsWith('[GitHub]')
+              ? manifest.errorMessage
+              : `${target === 'cloud' ? 'Nube' : 'PC'} Error: ${
+                  manifest.errorMessage || 'Fallo en FFmpeg remoto'
+                }`;
           }
 
           updateQueueItem(matchingItem.id, patch);
@@ -417,7 +492,7 @@ export function usePcRenderJobs({
         // 2. Sync Cloud Analyze Jobs (`analyze_*.json`)
         let newlyReadyStudioItemId: string | null = null;
 
-        for (const entry of snapshot.analyzeJobs) {
+        for (const entry of effectiveAnalyzeJobs) {
           const { manifest } = entry;
 
           if (manifest.status === 'processing' || manifest.status === 'analyzed') {
@@ -429,36 +504,35 @@ export function usePcRenderJobs({
             });
           }
 
+          // Only auto-relaunch once if GitHub Actions had NO run at all after > 3 min
           if (
             manifest.status === 'pending' &&
             cloudRenderConfigured &&
+            missingRunSet.has(entry.jobFileId) &&
             !autoRetriedJobIdsRef.current.has(entry.jobFileId)
           ) {
-            const createdMs = Date.parse(manifest.createdAt || '');
-            if (Number.isFinite(createdMs) && nowMs - createdMs > AUTO_RELAUNCH_PENDING_MS) {
-              autoRetriedJobIdsRef.current.add(entry.jobFileId);
-              logInfo('Nube', 'Relanzando análisis en la nube pendiente > 3 min', {
-                jobId: manifest.jobId,
-                esperaMin: Math.round((nowMs - createdMs) / 60_000),
-              });
-              void dispatchCloudRenderJob(entry.jobFileId)
-                .then(() => {
-                  setFailedDispatchJobFileIds((prev) => {
-                    if (!prev[entry.jobFileId]) return prev;
-                    const next = { ...prev };
-                    delete next[entry.jobFileId];
-                    return next;
-                  });
-                })
-                .catch((err) => {
-                  const errMsg =
-                    err instanceof Error ? err.message : 'No se pudo relanzar GitHub Actions.';
-                  setFailedDispatchJobFileIds((prev) => ({
-                    ...prev,
-                    [entry.jobFileId]: errMsg,
-                  }));
+            autoRetriedJobIdsRef.current.add(entry.jobFileId);
+            logInfo('Nube', 'Relanzando análisis en la nube sin ejecución tras > 3 min', {
+              jobId: manifest.jobId,
+            });
+            void dispatchCloudRenderJob(entry.jobFileId)
+              .then(() => {
+                dispatchedAtByJobFileIdRef.current[entry.jobFileId] = Date.now();
+                setFailedDispatchJobFileIds((prev) => {
+                  if (!prev[entry.jobFileId]) return prev;
+                  const next = { ...prev };
+                  delete next[entry.jobFileId];
+                  return next;
                 });
-            }
+              })
+              .catch((err) => {
+                const errMsg =
+                  err instanceof Error ? err.message : 'No se pudo relanzar GitHub Actions.';
+                setFailedDispatchJobFileIds((prev) => ({
+                  ...prev,
+                  [entry.jobFileId]: errMsg,
+                }));
+              });
           }
 
           const matchingItem = itemsRef.current.find(
@@ -509,6 +583,7 @@ export function usePcRenderJobs({
                   analyzeJobStage: 'revision',
                   analyzeJobProgress: 100,
                   analyzeJobError: undefined,
+                  cloudWorkflowRunUrl: undefined,
                 });
                 newlyReadyStudioItemId = matchingItem.id;
               } else {
@@ -584,6 +659,7 @@ export function usePcRenderJobs({
                   analyzeJobStage: manifest.stage,
                   analyzeJobProgress: manifest.progress || 0,
                   analyzeJobError: undefined,
+                  ...((manifest.progress ?? 0) > 5 ? { cloudWorkflowRunUrl: undefined } : {}),
                 });
               }
             }
@@ -604,6 +680,7 @@ export function usePcRenderJobs({
                 analyzeJobStage: manifest.stage,
                 analyzeJobProgress: manifest.progress || 0,
                 analyzeJobError: manifest.errorMessage,
+                cloudWorkflowRunUrl: entry.workflowRunUrl ?? matchingItem.cloudWorkflowRunUrl,
               });
             }
           }
@@ -619,6 +696,15 @@ export function usePcRenderJobs({
             onError(formatPhaseError('Drive', err.message));
           }
         } else {
+          if (err instanceof DriveHttpError && isBackoffTriggerHttpStatus(err.status)) {
+            const nextIntervalMs = computeNextPollBackoffMs(pollIntervalMsRef.current);
+            pollIntervalMsRef.current = nextIntervalMs;
+            setPollIntervalMs(nextIntervalMs);
+            logWarn('Drive', 'Backoff exponencial activado en polling remoto', {
+              http: err.status,
+              siguienteIntervaloSeg: Math.round(nextIntervalMs / 1000),
+            });
+          }
           const msg = err instanceof Error ? err.message : 'No se pudo consultar _AutoCut_Jobs.';
           logError('Drive', 'Error al sincronizar trabajos remotos', { error: msg });
           if (!silent) {
@@ -704,6 +790,7 @@ export function usePcRenderJobs({
 
       try {
         await dispatchCloudRenderJob(uploaded.id);
+        dispatchedAtByJobFileIdRef.current[uploaded.id] = Date.now();
         setFailedDispatchJobFileIds((prev) => {
           if (!prev[uploaded.id]) return prev;
           const next = { ...prev };
@@ -711,6 +798,7 @@ export function usePcRenderJobs({
           return next;
         });
         updateQueueItem(params.queueItemId, {
+          cloudWorkflowRunUrl: undefined,
           stageDetail: 'En cola nube (análisis) · GitHub Actions disparado',
         });
       } catch (dispatchErr) {
@@ -1348,6 +1436,7 @@ export function usePcRenderJobs({
 
         try {
           await dispatchCloudRenderJob(uploaded.id);
+          dispatchedAtByJobFileIdRef.current[uploaded.id] = Date.now();
           setFailedDispatchJobFileIds((prev) => {
             if (!prev[uploaded.id]) return prev;
             const next = { ...prev };
@@ -1355,6 +1444,7 @@ export function usePcRenderJobs({
             return next;
           });
           updateQueueItem(itemId, {
+            cloudWorkflowRunUrl: undefined,
             stageDetail: 'Nube: En cola nube · GitHub Actions disparado',
           });
         } catch (dispatchErr) {
@@ -1429,12 +1519,50 @@ export function usePcRenderJobs({
       try {
         logInfo('Nube', 'Reintentando disparo manual de GitHub Actions');
         await dispatchCloudRenderJob(jobFileId);
+        delete cloudWorkflowFailuresRef.current[jobFileId];
+        autoRetriedJobIdsRef.current.delete(jobFileId);
+        dispatchedAtByJobFileIdRef.current[jobFileId] = Date.now();
+
         setFailedDispatchJobFileIds((prev) => {
           if (!prev[jobFileId]) return prev;
           const next = { ...prev };
           delete next[jobFileId];
           return next;
         });
+
+        setPcJobs((prev) =>
+          prev.map((entry) =>
+            entry.jobFileId !== jobFileId
+              ? entry
+              : {
+                  ...entry,
+                  workflowRunUrl: undefined,
+                  manifest: {
+                    ...entry.manifest,
+                    status: 'pending',
+                    progress: 0,
+                    errorMessage: undefined,
+                  },
+                }
+          )
+        );
+
+        setAnalyzeJobs((prev) =>
+          prev.map((entry) =>
+            entry.jobFileId !== jobFileId
+              ? entry
+              : {
+                  ...entry,
+                  workflowRunUrl: undefined,
+                  manifest: {
+                    ...entry.manifest,
+                    status: 'pending',
+                    progress: 0,
+                    errorMessage: undefined,
+                  },
+                }
+          )
+        );
 
         const matchingRenderEntry = pcJobs.find((j) => j.jobFileId === jobFileId);
         if (matchingRenderEntry) {
@@ -1447,6 +1575,10 @@ export function usePcRenderJobs({
           );
           if (matchingItem) {
             updateQueueItem(matchingItem.id, {
+              pcJobStatus: 'pending',
+              pcJobProgress: 0,
+              pcJobError: undefined,
+              cloudWorkflowRunUrl: undefined,
               stageDetail: 'Nube: En cola nube · Reenvío a GitHub Actions aceptado',
             });
           }
@@ -1463,6 +1595,13 @@ export function usePcRenderJobs({
           );
           if (matchingItem) {
             updateQueueItem(matchingItem.id, {
+              stage: 'analyzing',
+              progress: 5,
+              errorMessage: undefined,
+              analyzeJobStatus: 'pending',
+              analyzeJobProgress: 0,
+              analyzeJobError: undefined,
+              cloudWorkflowRunUrl: undefined,
               stageDetail: 'En cola nube (análisis) · Reenvío aceptado',
             });
           }
@@ -1554,35 +1693,39 @@ export function usePcRenderJobs({
     [resolveDriveToken, clearAuthSession, onError]
   );
 
-  // Initial silent sync when Drive connects with a valid folderId (also checks >3 min pending cloud jobs)
-  useEffect(() => {
-    if (!isDriveConnected || !folderId.trim()) return;
-    void syncPcJobs(true);
-  }, [isDriveConnected, folderId, syncPcJobs]);
+  // Always keep latest syncPcJobs reference without re-triggering effects on re-renders
+  syncPcJobsRef.current = syncPcJobs;
 
-  // Active remote jobs polling: every 15 s ONLY while pending/processing (render OR analyze) AND tab is visible
-  const hasActivePcJobs =
-    pcJobs.some(
-      (entry) => entry.manifest.status === 'pending' || entry.manifest.status === 'processing'
-    ) ||
-    analyzeJobs.some(
-      (entry) => entry.manifest.status === 'pending' || entry.manifest.status === 'processing'
-    );
+  // Initial silent sync ONLY when Drive connection or folderId actually changes
+  useEffect(() => {
+    if (!isDriveConnected || !trimmedFolderId) return;
+    void syncPcJobsRef.current(true);
+  }, [isDriveConnected, trimmedFolderId]);
+
+  // Single active polling interval via RemoteJobsPoller ref + stable primitive deps.
+  // Polls ONLY while pending/processing jobs exist AND tab is visible; backs off on 429/5xx.
+  const shouldPollRemoteJobs = Boolean(
+    isDriveConnected && trimmedFolderId && hasActivePcJobs && isPageVisible
+  );
 
   useEffect(() => {
-    if (!isDriveConnected || !folderId.trim() || !hasActivePcJobs || !isPageVisible) return;
-    const timer = window.setInterval(() => {
-      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
-      void syncPcJobs(true);
-    }, ACTIVE_REMOTE_POLL_INTERVAL_MS);
-    return () => window.clearInterval(timer);
-  }, [isDriveConnected, folderId, hasActivePcJobs, isPageVisible, syncPcJobs]);
+    if (!pollerRef.current) {
+      pollerRef.current = new RemoteJobsPoller();
+    }
+    pollerRef.current.update({
+      shouldPoll: shouldPollRemoteJobs,
+      intervalMs: pollIntervalMs,
+      onTick: () => {
+        void syncPcJobsRef.current(true);
+      },
+    });
+  }, [shouldPollRemoteJobs, pollIntervalMs]);
 
-  // Immediate refresh when returning to the tab while remote jobs are active
   useEffect(() => {
-    if (!isPageVisible || !isDriveConnected || !folderId.trim() || !hasActivePcJobs) return;
-    void syncPcJobs(true);
-  }, [isPageVisible]);
+    return () => {
+      pollerRef.current?.dispose();
+    };
+  }, []);
 
   return {
     pcJobs,
