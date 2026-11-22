@@ -125,6 +125,7 @@ export default function App() {
     customInstruction,
     tiktokOptions,
     accessToken,
+    cloudRenderConfigured,
     clearAuthSession,
     refreshCacheStats,
     onError: reportError,
@@ -342,7 +343,7 @@ export default function App() {
             </div>
           )}
 
-          {queue.heavyVideoWarning && (
+          {!cloudRenderConfigured && queue.heavyVideoWarning && (
             <div
               role="note"
               data-testid="heavy-video-warning-banner"

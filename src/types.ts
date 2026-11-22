@@ -52,6 +52,12 @@ export interface DriveFileMeta {
   thumbnailLink?: string;
 }
 
+export interface WordTimestamp {
+  start: number;
+  end: number;
+  text: string;
+}
+
 export interface VideoCut {
   id: string;
   clip_index: number;
@@ -60,6 +66,7 @@ export interface VideoCut {
   motivo: string;
   puntuacion_interes?: number;
   enabled: boolean;
+  words?: WordTimestamp[];
 }
 
 export interface SubtitleBlock {
@@ -166,6 +173,7 @@ export interface RenderJobCut {
   clipIndex: number;
   start: number;
   end: number;
+  words?: WordTimestamp[];
 }
 
 export interface RenderJobSubtitleBlock {

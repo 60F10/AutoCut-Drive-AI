@@ -1148,3 +1148,76 @@ test('Cloud render contract: target "cloud" manifest, uploadedTempSource, status
   clearDebugLogs();
 });
 
+test('buildRenderJobManifest preserves cut.words and evaluateHeavyVideoWarning stays silent for cloud render target', () => {
+  // Cloud target MUST suppress mobile RAM heavy-video warning even for 4K / 400 MB / 10 min footage
+  const cloudWarning = evaluateHeavyVideoWarning({
+    sizeBytes: 420 * 1024 * 1024,
+    durationSec: 600,
+    width: 3840,
+    height: 2160,
+    renderTarget: 'cloud',
+  });
+  assert.equal(cloudWarning.isHeavy, false);
+  assert.equal(cloudWarning.message, null);
+
+  // Mobile target still warns normally
+  const mobileWarning = evaluateHeavyVideoWarning({
+    sizeBytes: 420 * 1024 * 1024,
+    durationSec: 600,
+    width: 3840,
+    height: 2160,
+    renderTarget: 'mobile',
+  });
+  assert.equal(mobileWarning.isHeavy, true);
+  assert.ok(mobileWarning.message?.includes('720p móvil'));
+
+  // Manifest copies cut.words verbatim while preserving user's edited start/end
+  const manifestWithWords = buildRenderJobManifest({
+    jobId: 'wordsjob1',
+    target: 'cloud',
+    exportQuality: 'high_1080p',
+    tiktokOptions: {
+      subtitlesEnabled: true,
+      silenceTrimEnabled: true,
+      audioNormalizeEnabled: true,
+      framingMode: 'center_crop',
+    },
+    item: {
+      id: 'item-words',
+      originalName: 'IMG_HDR.MOV',
+      driveFileId: 'drv-hdr',
+      isMultiClip: false,
+      analysis: {
+        etiqueta: 'VLOG',
+        titulo_interno: 'Prueba palabras',
+        duracion_objetivo_seg: 6,
+        cortes: [
+          {
+            id: 'cut-w1',
+            clip_index: 0,
+            start_sec: 4.5,
+            end_sec: 8.2,
+            motivo: 'Frase clave',
+            enabled: true,
+            words: [
+              { start: 4.1, end: 4.4, text: 'Antes' },
+              { start: 4.6, end: 4.95, text: 'Hola' },
+              { start: 5.0, end: 5.45, text: 'mundo!' },
+            ],
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(manifestWithWords.cuts.length, 1);
+  assert.equal(manifestWithWords.cuts[0].start, 4.5);
+  assert.equal(manifestWithWords.cuts[0].end, 8.2);
+  assert.deepEqual(manifestWithWords.cuts[0].words, [
+    { start: 4.1, end: 4.4, text: 'Antes' },
+    { start: 4.6, end: 4.95, text: 'Hola' },
+    { start: 5.0, end: 5.45, text: 'mundo!' },
+  ]);
+});
+
+

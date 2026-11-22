@@ -33,6 +33,21 @@ export const QUALITY_PROFILES = {
   },
 };
 
+export const SDR_COLOR_ARGS = [
+  '-colorspace',
+  'bt709',
+  '-color_primaries',
+  'bt709',
+  '-color_trc',
+  'bt709',
+];
+
+const HLG_TO_SDR_FILTER =
+  'zscale=tin=arib-std-b67:min=bt2020nc:pin=bt2020:rin=tv:t=linear:npl=203,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0:peak=4,zscale=t=bt709:m=bt709:r=tv,format=yuv420p';
+
+const PQ_TO_SDR_FILTER =
+  'zscale=tin=smpte2084:min=bt2020nc:pin=bt2020:rin=tv:t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0:peak=4,zscale=t=bt709:m=bt709:r=tv,format=yuv420p';
+
 /**
  * Returns the tuned CPU libx264 preset for cloud runners (no GPU):
  * - 1080p -> veryfast
@@ -40,6 +55,33 @@ export const QUALITY_PROFILES = {
  */
 export function getCloudCpuPreset(quality) {
   return quality === '720p' ? 'ultrafast' : 'veryfast';
+}
+
+/**
+ * Derives the companion `ffprobe` binary path from a given `ffmpeg` binary path.
+ */
+export function resolveFfprobeBin(ffmpegBin = 'ffmpeg') {
+  const str = String(ffmpegBin || 'ffmpeg').trim();
+  if (!str || str === 'ffmpeg') return 'ffprobe';
+  const dir = path.dirname(str);
+  const base = path.basename(str);
+  const replaced = base.replace(/ffmpeg/i, (m) => (m === m.toUpperCase() ? 'FFPROBE' : 'ffprobe'));
+  if (replaced === base) return 'ffprobe';
+  return dir === '.' ? replaced : path.join(dir, replaced);
+}
+
+/**
+ * Returns the exact HDR -> SDR BT.709 tonemap filter chain for iPhone HLG (`arib-std-b67`)
+ * or PQ (`smpte2084`) footage, or empty string for SDR footage (or when zscale is disabled).
+ */
+export function buildHdrToSdrFilterChain(colorTransfer, zscaleAvailable = true) {
+  if (!zscaleAvailable) return '';
+  const normalized = String(colorTransfer || '')
+    .trim()
+    .toLowerCase();
+  if (normalized === 'arib-std-b67') return HLG_TO_SDR_FILTER;
+  if (normalized === 'smpte2084') return PQ_TO_SDR_FILTER;
+  return '';
 }
 
 /**
@@ -67,10 +109,51 @@ function formatAssTime(seconds) {
   ).padStart(2, '0')}`;
 }
 
-export function buildAssFileContent(blocks, width, height) {
-  const fontSize = Math.round(width * 0.056);
-  const marginV = Math.round(height * 0.18);
-  const fontName = process.platform === 'win32' ? 'Arial' : 'DejaVu Sans';
+/**
+ * Highlights the longest word in a subtitle block in yellow (`&H0000E5FF&`),
+ * returning white (`&H00FFFFFF&`) for the rest, without altering any word text.
+ */
+export function highlightLongestWordAss(text) {
+  const safe = String(text || '')
+    .replace(/[{}]/g, '')
+    .replace(/\r?\n/g, ' ')
+    .trim();
+  if (!safe) return '';
+
+  const tokens = safe.split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return '';
+
+  let longestIdx = 0;
+  let longestLen = -1;
+  for (let i = 0; i < tokens.length; i += 1) {
+    const cleanLen = tokens[i].replace(/^[¡¿"'«(\[]+|[.,?!:;"'»)\]]+$/g, '').length || tokens[i].length;
+    if (cleanLen > longestLen) {
+      longestLen = cleanLen;
+      longestIdx = i;
+    }
+  }
+
+  return tokens
+    .map((tok, idx) =>
+      idx === longestIdx ? `{\\c&H0000E5FF&}${tok}{\\c&H00FFFFFF&}` : tok
+    )
+    .join(' ');
+}
+
+/**
+ * Builds TikTok/Reels-styled ASS subtitle file scaled proportionally from 1080×1920:
+ * - Font: DejaVu Sans Bold, size 78 @ 1080p (proportional @ 720p)
+ * - White primary text, black 6 px outline, shadow 0, Alignment=2, MarginV=620 @ 1080p
+ * - Longest word in each block highlighted in yellow (&H0000E5FF&)
+ */
+export function buildAssFileContent(blocks, width = 1080, height = 1920) {
+  const scale = width / 1080;
+  const fontSize = Math.max(24, Math.round(78 * scale));
+  const outline = Math.max(2, Math.round(6 * scale));
+  const marginV = Math.max(120, Math.round(620 * scale));
+  const marginH = Math.max(24, Math.round(48 * scale));
+  const fontName = 'DejaVu Sans';
+
   const header = `[Script Info]
 ScriptType: v4.00+
 PlayResX: ${width}
@@ -79,25 +162,122 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: TikTok,${fontName},${fontSize},&H00FFFFFF,&H0000F0FF,&H0005060A,&H80000000,-1,0,0,0,100,100,0,0,1,4,2,2,48,48,${marginV},1
+Style: TikTok,${fontName},${fontSize},&H00FFFFFF,&H0000E5FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,${outline},0,2,${marginH},${marginH},${marginV},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`;
 
-  const lines = blocks.map((b) => {
-    const safeText = String(b.text || '')
-      .replace(/[{}]/g, '')
-      .replace(/\r?\n/g, '\\N')
-      .trim();
-    return `Dialogue: 0,${formatAssTime(b.start)},${formatAssTime(b.end)},TikTok,,0,0,0,,${safeText}`;
-  });
+  const lines = blocks
+    .map((b) => {
+      const highlighted = highlightLongestWordAss(b.text);
+      if (!highlighted) return null;
+      return `Dialogue: 0,${formatAssTime(b.start)},${formatAssTime(b.end)},TikTok,,0,0,0,,${highlighted}`;
+    })
+    .filter(Boolean);
 
   return `${header}\n${lines.join('\n')}\n`;
 }
 
 /**
- * Slices final-timeline subtitle blocks to the local [0, cutDuration] window of a single segment
- * so subtitles burn cleanly in the single encode pass and concat remains zero-reencode `-c copy`.
+ * Builds final-timeline subtitle blocks strictly from real word-level timestamps on each cut.
+ *
+ * Rules:
+ * - Iterates cuts in assembly order tracking a final-timeline cursor.
+ * - Filters words with `word.start >= cut.start` and `word.end <= cut.end` and maps to
+ *   `t_final = cursor + (t - cut.start)`.
+ * - Groups 1..4 words per block, max 26 chars, max 1.6 s duration.
+ * - Always closes a block after punctuation (`.`, `?`, `!`, `,`).
+ * - Never mixes words from two cuts into the same block.
+ * - Each block ends at next block's start if gap < 0.25 s; otherwise at last word end + 0.15 s.
+ * - Preserves exact word text verbatim (no rewriting/invention).
+ */
+export function buildSubtitlesFromCutWords(cuts) {
+  if (!Array.isArray(cuts) || cuts.length === 0) return [];
+
+  const rawBlocks = [];
+  let cursor = 0;
+
+  for (const cut of cuts) {
+    const cutStart = Math.max(0, Number(cut?.start) || 0);
+    const cutEnd = Math.max(cutStart + 0.15, Number(cut?.end) || cutStart + 0.15);
+    const cutDur = cutEnd - cutStart;
+
+    const words = Array.isArray(cut?.words) ? cut.words : [];
+    const inCutWords = words
+      .map((w) => ({
+        start: Number(w?.start),
+        end: Number(w?.end),
+        text: String(w?.text || '').trim(),
+      }))
+      .filter(
+        (w) =>
+          Boolean(w.text) &&
+          Number.isFinite(w.start) &&
+          Number.isFinite(w.end) &&
+          w.end >= w.start &&
+          w.start >= cutStart &&
+          w.end <= cutEnd
+      )
+      .sort((a, b) => a.start - b.start || a.end - b.end)
+      .map((w) => ({
+        start: cursor + (w.start - cutStart),
+        end: cursor + (w.end - cutStart),
+        text: w.text,
+      }));
+
+    let current = [];
+
+    const flushCurrent = () => {
+      if (current.length === 0) return;
+      rawBlocks.push({
+        start: current[0].start,
+        rawEnd: current[current.length - 1].end,
+        text: current.map((w) => w.text).join(' '),
+      });
+      current = [];
+    };
+
+    for (const word of inCutWords) {
+      if (current.length > 0) {
+        const candidateText = `${current.map((w) => w.text).join(' ')} ${word.text}`;
+        const candidateDuration = word.end - current[0].start;
+        if (
+          current.length >= 4 ||
+          candidateText.length > 26 ||
+          candidateDuration > 1.6
+        ) {
+          flushCurrent();
+        }
+      }
+
+      current.push(word);
+
+      if (/[.?!,]$/.test(word.text)) {
+        flushCurrent();
+      }
+    }
+
+    // Never leak words across cut boundaries
+    flushCurrent();
+    cursor += cutDur;
+  }
+
+  return rawBlocks.map((block, idx) => {
+    const next = rawBlocks[idx + 1];
+    const gap = next ? next.start - block.rawEnd : Infinity;
+    const computedEnd =
+      next && gap < 0.25 && next.start > block.start ? next.start : block.rawEnd + 0.15;
+
+    return {
+      start: Number(block.start.toFixed(3)),
+      end: Number(Math.max(block.start + 0.05, computedEnd).toFixed(3)),
+      text: block.text,
+    };
+  });
+}
+
+/**
+ * Legacy helper retained for backward-compatibility with existing imports.
  */
 export function sliceSubtitlesForSegment(subtitlesData, timelineOffsetSec, cutDurationSec) {
   if (!Array.isArray(subtitlesData) || subtitlesData.length === 0) return [];
@@ -141,7 +321,7 @@ export function runProcess(command, args, options = {}) {
     child.stdout.on('data', (chunk) => {
       const text = chunk.toString();
       stdout += text;
-      if (stdout.length > 32768) stdout = stdout.slice(-16384);
+      if (stdout.length > 65536) stdout = stdout.slice(-32768);
     });
 
     child.stderr.on('data', (chunk) => {
@@ -156,6 +336,143 @@ export function runProcess(command, args, options = {}) {
       resolve({ code: code ?? -1, stdout, stderr });
     });
   });
+}
+
+export async function hasZscaleFilter(ffmpegBin = 'ffmpeg') {
+  try {
+    const res = await runProcess(ffmpegBin, ['-hide_banner', '-filters']);
+    if (res.code !== 0) return false;
+    return /\bzscale\b/.test(res.stdout);
+  } catch {
+    return false;
+  }
+}
+
+export async function probeVideoColorTransfer(ffprobeBin, inputPath) {
+  try {
+    const res = await runProcess(ffprobeBin, [
+      '-v',
+      'error',
+      '-select_streams',
+      'v:0',
+      '-show_entries',
+      'stream=color_transfer',
+      '-of',
+      'default=nw=1:nk=1',
+      inputPath,
+    ]);
+    if (res.code !== 0) return '';
+    return res.stdout.trim().split(/\r?\n/)[0]?.trim() || '';
+  } catch {
+    return '';
+  }
+}
+
+export async function probeMediaDurations(ffprobeBin, mediaPath) {
+  const res = await runProcess(ffprobeBin, [
+    '-v',
+    'error',
+    '-show_entries',
+    'stream=codec_type,duration:format=duration',
+    '-of',
+    'json',
+    mediaPath,
+  ]);
+  if (res.code !== 0) {
+    throw new Error(`No se pudo inspeccionar duraciones con ffprobe: ${summarizeFfmpegError(res.stderr)}`);
+  }
+
+  const parsed = JSON.parse(res.stdout || '{}');
+  const formatDuration = Number(parsed?.format?.duration);
+  const streams = Array.isArray(parsed?.streams) ? parsed.streams : [];
+  const videoStream = streams.find((s) => s?.codec_type === 'video');
+  const audioStream = streams.find((s) => s?.codec_type === 'audio');
+
+  const videoDurationSec = Number(videoStream?.duration);
+  const audioDurationSec = Number(audioStream?.duration);
+
+  return {
+    videoDurationSec: Number.isFinite(videoDurationSec)
+      ? videoDurationSec
+      : Number.isFinite(formatDuration)
+      ? formatDuration
+      : NaN,
+    audioDurationSec: Number.isFinite(audioDurationSec)
+      ? audioDurationSec
+      : audioStream && Number.isFinite(formatDuration)
+      ? formatDuration
+      : NaN,
+    hasAudio: Boolean(audioStream),
+  };
+}
+
+/**
+ * Mandatory post-render A/V sync verification:
+ * - |videoDuration - expectedDuration| < 0.10 s
+ * - |audioDuration - videoDuration| < 0.05 s (when audio stream is present)
+ */
+export function verifyRenderedDurations({
+  videoDurationSec,
+  audioDurationSec,
+  expectedDurationSec,
+  hasAudio = true,
+}) {
+  const v = Number(videoDurationSec);
+  const a = Number(audioDurationSec);
+  const e = Number(expectedDurationSec);
+
+  const fmt = (n) => (Number.isFinite(n) ? n.toFixed(2) : 'NaN');
+
+  const videoDelta = Math.abs(v - e);
+  const avDelta = hasAudio ? Math.abs(a - v) : 0;
+
+  if (
+    !Number.isFinite(v) ||
+    !Number.isFinite(e) ||
+    videoDelta >= 0.1 ||
+    (hasAudio && (!Number.isFinite(a) || avDelta >= 0.05))
+  ) {
+    throw new Error(
+      `[FFmpeg] Desincronización detectada: vídeo ${fmt(v)} s, audio ${fmt(
+        hasAudio ? a : v
+      )} s, esperado ${fmt(e)} s`
+    );
+  }
+
+  return {
+    ok: true,
+    videoDurationSec: v,
+    audioDurationSec: hasAudio ? a : v,
+    expectedDurationSec: e,
+    videoDelta,
+    avDelta,
+  };
+}
+
+/**
+ * Parses the JSON summary printed by `loudnorm=...:print_format=json` from FFmpeg stderr.
+ */
+export function parseLoudnormMeasurements(stderr) {
+  const text = String(stderr || '');
+  const matches = text.match(/\{[\s\S]*?"input_i"[\s\S]*?\}/g);
+  if (!matches || matches.length === 0) return null;
+  try {
+    const parsed = JSON.parse(matches[matches.length - 1]);
+    const keys = ['input_i', 'input_tp', 'input_lra', 'input_thresh', 'target_offset'];
+    for (const k of keys) {
+      const val = Number(parsed[k]);
+      if (!Number.isFinite(val)) return null;
+    }
+    return {
+      input_i: String(parsed.input_i),
+      input_tp: String(parsed.input_tp),
+      input_lra: String(parsed.input_lra),
+      input_thresh: String(parsed.input_thresh),
+      target_offset: String(parsed.target_offset),
+    };
+  } catch {
+    return null;
+  }
 }
 
 export async function detectVideoEncoder(ffmpegBin, forceCpu = false) {
@@ -226,32 +543,81 @@ export function summarizeFfmpegError(stderr) {
   return lines.slice(-4).join(' | ').slice(0, 480);
 }
 
+function buildVideoCodecArgs(encoderCodec, profile, cpuPreset = 'fast') {
+  return encoderCodec === 'h264_nvenc'
+    ? [
+        '-c:v',
+        'h264_nvenc',
+        '-preset',
+        'p4',
+        '-rc',
+        'vbr',
+        '-cq',
+        profile.nvencCq,
+        '-b:v',
+        '0',
+        '-maxrate',
+        profile.maxrate,
+        '-bufsize',
+        profile.bufsize,
+        '-profile:v',
+        'high',
+      ]
+    : [
+        '-c:v',
+        'libx264',
+        '-preset',
+        cpuPreset,
+        '-crf',
+        profile.crf,
+        '-maxrate',
+        profile.maxrate,
+        '-bufsize',
+        profile.bufsize,
+        '-profile:v',
+        'high',
+        '-level',
+        '4.1',
+      ];
+}
+
+/**
+ * Builds segment FFmpeg args with exact A/V sync (duration D = end - start in both streams):
+ * - Always selects `0:v:0` and `0:a:0` (ignores iPhone secondary `apac` audio & data streams).
+ * - Never runs `silenceremove`, `loudnorm`, or subtitle burning inside segment pass.
+ * - Uses `afade` + `apad=whole_dur=D` and output `-t D` for sample-accurate segment length.
+ * - Prepends HDR -> SDR BT.709 `zscale`/`tonemap=hable` chain when input is HLG or PQ.
+ * - Always tags SDR BT.709 color metadata.
+ */
 export function buildSegmentFfmpegArgs({
   inputPath,
   outputPath,
   cut,
   profile,
   framing,
-  removeSilences,
-  normalizeAudio,
   audioMode, // 'source' | 'silent' | 'none'
-  subtitleAssPath,
   encoderCodec,
   cpuPreset = 'fast',
+  colorTransfer = '',
+  zscaleAvailable = true,
 }) {
   const startSec = Math.max(0, Number(cut.start) || 0);
   const endSec = Math.max(startSec + 0.15, Number(cut.end) || startSec + 0.15);
   const durationSec = Math.max(0.15, endSec - startSec);
   const startStr = startSec.toFixed(3);
   const durStr = durationSec.toFixed(3);
+  const fadeOutStartStr = Math.max(0, durationSec - 0.03).toFixed(3);
 
   const w = profile.width;
   const h = profile.height;
   const fps = profile.fps;
 
+  const hdrChain = buildHdrToSdrFilterChain(colorTransfer, zscaleAvailable);
+  const hdrPrefix = hdrChain ? `${hdrChain},` : '';
+
   const filterParts = [];
   if (framing === 'blur_bg') {
-    filterParts.push(`[0:v]setpts=PTS-STARTPTS,split=2[bgsrc][fgsrc]`);
+    filterParts.push(`[0:v:0]setpts=PTS-STARTPTS,${hdrPrefix}split=2[bgsrc][fgsrc]`);
     filterParts.push(
       `[bgsrc]scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},boxblur=24:4[bg]`
     );
@@ -259,32 +625,19 @@ export function buildSegmentFfmpegArgs({
     filterParts.push(`[bg][fg]overlay=(W-w)/2:(H-h)/2,fps=${fps},format=yuv420p,setsar=1[v0]`);
   } else {
     filterParts.push(
-      `[0:v]setpts=PTS-STARTPTS,scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},fps=${fps},format=yuv420p,setsar=1[v0]`
+      `[0:v:0]setpts=PTS-STARTPTS,${hdrPrefix}scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},fps=${fps},format=yuv420p,setsar=1[v0]`
     );
   }
 
-  let finalVideoLabel = '[v0]';
-  if (subtitleAssPath) {
-    const escapedAss = escapePathForFfmpegFilter(subtitleAssPath);
-    filterParts.push(`[v0]ass='${escapedAss}'[v0_sub]`);
-    finalVideoLabel = '[v0_sub]';
-  }
-
+  const finalVideoLabel = '[v0]';
   const extraInputs = [];
   let finalAudioLabel = null;
 
   if (audioMode === 'source') {
-    const silenceClause = removeSilences
-      ? ',silenceremove=start_periods=1:start_duration=0.15:start_threshold=-42dB'
-      : '';
     filterParts.push(
-      `[0:a]asetpts=PTS-STARTPTS${silenceClause},aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a0]`
+      `[0:a:0]asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,afade=t=in:d=0.02,afade=t=out:st=${fadeOutStartStr}:d=0.03,apad=whole_dur=${durStr}[a0]`
     );
     finalAudioLabel = '[a0]';
-    if (normalizeAudio) {
-      filterParts.push('[a0]loudnorm=I=-14:TP=-1.5:LRA=11[a0_norm]');
-      finalAudioLabel = '[a0_norm]';
-    }
   } else if (audioMode === 'silent') {
     extraInputs.push(
       '-f',
@@ -295,47 +648,12 @@ export function buildSegmentFfmpegArgs({
       'anullsrc=channel_layout=stereo:sample_rate=48000'
     );
     filterParts.push(
-      `[1:a]atrim=duration=${durStr},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a0_sil]`
+      `[1:a:0]atrim=duration=${durStr},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,apad=whole_dur=${durStr}[a0]`
     );
-    finalAudioLabel = '[a0_sil]';
+    finalAudioLabel = '[a0]';
   }
 
-  const videoCodecArgs =
-    encoderCodec === 'h264_nvenc'
-      ? [
-          '-c:v',
-          'h264_nvenc',
-          '-preset',
-          'p4',
-          '-rc',
-          'vbr',
-          '-cq',
-          profile.nvencCq,
-          '-b:v',
-          '0',
-          '-maxrate',
-          profile.maxrate,
-          '-bufsize',
-          profile.bufsize,
-          '-profile:v',
-          'high',
-        ]
-      : [
-          '-c:v',
-          'libx264',
-          '-preset',
-          cpuPreset,
-          '-crf',
-          profile.crf,
-          '-maxrate',
-          profile.maxrate,
-          '-bufsize',
-          profile.bufsize,
-          '-profile:v',
-          'high',
-          '-level',
-          '4.1',
-        ];
+  const videoCodecArgs = buildVideoCodecArgs(encoderCodec, profile, cpuPreset);
 
   return [
     '-y',
@@ -359,15 +677,126 @@ export function buildSegmentFfmpegArgs({
     'yuv420p',
     '-r',
     String(fps),
+    ...SDR_COLOR_ARGS,
     '-video_track_timescale',
     '90000',
     ...(finalAudioLabel
-      ? ['-c:a', 'aac', '-b:a', profile.audioBitrate, '-ar', '48000', '-ac', '2', '-shortest']
+      ? ['-c:a', 'aac', '-b:a', profile.audioBitrate, '-ar', '48000', '-ac', '2']
       : []),
+    '-t',
+    durStr,
     '-movflags',
     '+faststart',
     outputPath,
   ];
+}
+
+/**
+ * Builds the final assembly pass FFmpeg args over `joined.mp4`:
+ * - Video: burns final-timeline `.ass` subtitles and re-encodes when `subtitleAssPath` is provided;
+ *   otherwise `-c:v copy`.
+ * - Audio: applies 2-pass linear `loudnorm` when `loudnormMeasurements` are provided (or single-pass
+ *   when `normalizeAudio` is true without measurements); otherwise `-c:a copy` (or `-an`).
+ * - Always `-movflags +faststart`.
+ */
+export function buildFinalAssemblyFfmpegArgs({
+  joinedPath,
+  outputPath,
+  profile,
+  encoderCodec,
+  cpuPreset = 'fast',
+  hasAudio = true,
+  normalizeAudio = true,
+  loudnormMeasurements = null,
+  subtitleAssPath = null,
+}) {
+  const args = ['-y', '-hide_banner', '-loglevel', 'error', '-i', joinedPath, '-map', '0:v:0'];
+
+  if (hasAudio) {
+    args.push('-map', '0:a:0');
+  } else {
+    args.push('-an');
+  }
+
+  if (subtitleAssPath) {
+    const escapedAss = escapePathForFfmpegFilter(subtitleAssPath);
+    args.push(
+      '-vf',
+      `ass='${escapedAss}'`,
+      ...buildVideoCodecArgs(encoderCodec, profile, cpuPreset),
+      '-pix_fmt',
+      'yuv420p',
+      '-r',
+      String(profile.fps),
+      ...SDR_COLOR_ARGS
+    );
+  } else {
+    args.push('-c:v', 'copy');
+  }
+
+  if (hasAudio) {
+    if (normalizeAudio && loudnormMeasurements) {
+      const m = loudnormMeasurements;
+      args.push(
+        '-af',
+        `loudnorm=I=-14:TP=-1.5:LRA=11:measured_I=${m.input_i}:measured_TP=${m.input_tp}:measured_LRA=${m.input_lra}:measured_thresh=${m.input_thresh}:offset=${m.target_offset}:linear=true`,
+        '-c:a',
+        'aac',
+        '-b:a',
+        profile.audioBitrate,
+        '-ar',
+        '48000',
+        '-ac',
+        '2'
+      );
+    } else if (normalizeAudio) {
+      args.push(
+        '-af',
+        'loudnorm=I=-14:TP=-1.5:LRA=11',
+        '-c:a',
+        'aac',
+        '-b:a',
+        profile.audioBitrate,
+        '-ar',
+        '48000',
+        '-ac',
+        '2'
+      );
+    } else {
+      args.push('-c:a', 'copy');
+    }
+  }
+
+  args.push('-movflags', '+faststart', outputPath);
+  return args;
+}
+
+/**
+ * Resolves final-timeline subtitle blocks:
+ * Priority 1: real word-level timestamps on `manifest.cuts` (`buildSubtitlesFromCutWords`).
+ * Priority 2: legacy `manifest.options.subtitlesData`.
+ */
+export function resolveFinalSubtitles(manifest) {
+  const options = manifest?.options || {};
+  if (!options.subtitlesEnabled) return [];
+
+  const cuts = Array.isArray(manifest?.cuts) ? manifest.cuts : [];
+  const hasWordLevelSubs = cuts.some((c) => Array.isArray(c?.words) && c.words.length > 0);
+  if (hasWordLevelSubs) {
+    return buildSubtitlesFromCutWords(cuts);
+  }
+
+  if (Array.isArray(options.subtitlesData) && options.subtitlesData.length > 0) {
+    return options.subtitlesData
+      .map((b) => ({
+        start: Number(b?.start),
+        end: Number(b?.end),
+        text: String(b?.text || '').trim(),
+      }))
+      .filter((b) => Boolean(b.text) && Number.isFinite(b.start) && Number.isFinite(b.end) && b.end > b.start);
+  }
+
+  return [];
 }
 
 /**
@@ -379,7 +808,9 @@ export async function renderJob({
   sourcePaths,
   workDir,
   ffmpegBin = 'ffmpeg',
+  ffprobeBin,
   encoder,
+  zscaleAvailable,
   onProgress,
 }) {
   if (!Array.isArray(sourcePaths) || sourcePaths.length === 0) {
@@ -389,18 +820,16 @@ export async function renderJob({
     throw new Error('El manifiesto no contiene cortes activos (cuts).');
   }
 
+  const resolvedFfprobe = ffprobeBin || resolveFfprobeBin(ffmpegBin);
+  const canUseZscale =
+    typeof zscaleAvailable === 'boolean' ? zscaleAvailable : await hasZscaleFilter(ffmpegBin);
+
   const jobId = manifest.jobId || 'job';
   const options = manifest.options || {};
   const qualityKey = options.quality === '720p' ? '720p' : '1080p';
   const profile = QUALITY_PROFILES[qualityKey];
   const framing = options.framing === 'blur_bg' ? 'blur_bg' : 'center_crop';
-  const removeSilences = Boolean(options.removeSilences);
   const normalizeAudio = Boolean(options.normalizeAudio);
-  const subtitlesEnabled = Boolean(
-    options.subtitlesEnabled &&
-      Array.isArray(options.subtitlesData) &&
-      options.subtitlesData.length > 0
-  );
 
   const encoderCodec = encoder?.codec || 'libx264';
   const cpuPreset =
@@ -408,15 +837,17 @@ export async function renderJob({
       ? encoder.cpuPreset(qualityKey)
       : encoder?.cpuPreset || 'fast';
 
-  // Inspect audio streams across resolved source clips so Multi-Clip concat stays stream-compatible
+  // Inspect audio streams and HDR color_transfer per source clip
   const audioFlags = [];
+  const colorTransfers = [];
   for (const filePath of sourcePaths) {
     audioFlags.push(await fileHasAudioStream(ffmpegBin, filePath));
+    colorTransfers.push(await probeVideoColorTransfer(resolvedFfprobe, filePath));
   }
   const anyClipHasAudio = audioFlags.some(Boolean);
 
   const segmentPaths = [];
-  let timelineCursorSec = 0;
+  let expectedTotalDurationSec = 0;
   const totalCuts = manifest.cuts.length;
 
   for (let i = 0; i < totalCuts; i += 1) {
@@ -425,20 +856,10 @@ export async function renderJob({
     const inputPath = sourcePaths[clipIdx];
     const hasAudio = audioFlags[clipIdx];
     const audioMode = anyClipHasAudio ? (hasAudio ? 'source' : 'silent') : 'none';
-    const cutDur = Math.max(0.15, (Number(cut.end) || 0) - (Number(cut.start) || 0));
-
-    let subtitleAssPath = null;
-    if (subtitlesEnabled) {
-      const segSubs = sliceSubtitlesForSegment(options.subtitlesData, timelineCursorSec, cutDur);
-      if (segSubs.length > 0) {
-        subtitleAssPath = path.join(workDir, `sub_${String(i).padStart(3, '0')}.ass`);
-        await fsp.writeFile(
-          subtitleAssPath,
-          buildAssFileContent(segSubs, profile.width, profile.height),
-          'utf8'
-        );
-      }
-    }
+    const startSec = Math.max(0, Number(cut.start) || 0);
+    const endSec = Math.max(startSec + 0.15, Number(cut.end) || startSec + 0.15);
+    const cutDur = Math.max(0.15, endSec - startSec);
+    expectedTotalDurationSec += cutDur;
 
     const segPath = path.join(workDir, `seg_${String(i).padStart(3, '0')}.mp4`);
     const args = buildSegmentFfmpegArgs({
@@ -447,15 +868,14 @@ export async function renderJob({
       cut,
       profile,
       framing,
-      removeSilences,
-      normalizeAudio,
       audioMode,
-      subtitleAssPath,
       encoderCodec,
       cpuPreset,
+      colorTransfer: colorTransfers[clipIdx],
+      zscaleAvailable: canUseZscale,
     });
 
-    const pctStart = 10 + Math.round((i / totalCuts) * 72);
+    const pctStart = 10 + Math.round((i / totalCuts) * 62);
     if (onProgress) {
       await onProgress({
         percent: pctStart,
@@ -472,12 +892,11 @@ export async function renderJob({
     }
 
     segmentPaths.push(segPath);
-    timelineCursorSec += cutDur;
 
-    const pctAfter = 10 + Math.round(((i + 1) / totalCuts) * 75);
+    const pctAfter = 10 + Math.round(((i + 1) / totalCuts) * 65);
     if (onProgress) {
       await onProgress({
-        percent: Math.min(85, pctAfter),
+        percent: Math.min(75, pctAfter),
         stage: 'segment_done',
         cutIndex: i,
         totalCuts,
@@ -486,15 +905,14 @@ export async function renderJob({
     }
   }
 
-  const finalFileName = sanitizeOutputFilename(manifest.outputFileName, jobId);
-  const finalOutputPath = path.join(workDir, finalFileName);
-
+  // 1. Join segments via concat demuxer (-c copy) into joined.mp4
+  const joinedPath = path.join(workDir, 'joined.mp4');
   if (segmentPaths.length === 1) {
-    await fsp.copyFile(segmentPaths[0], finalOutputPath);
+    await fsp.copyFile(segmentPaths[0], joinedPath);
   } else {
     if (onProgress) {
       await onProgress({
-        percent: 87,
+        percent: 78,
         stage: 'concat',
         cutIndex: totalCuts,
         totalCuts,
@@ -521,9 +939,7 @@ export async function renderJob({
       concatListPath,
       '-c',
       'copy',
-      '-movflags',
-      '+faststart',
-      finalOutputPath,
+      joinedPath,
     ]);
 
     if (concatRes.code !== 0) {
@@ -532,6 +948,82 @@ export async function renderJob({
       );
     }
   }
+
+  // 2. Final pass over joined.mp4: 2-pass loudnorm + optional final-timeline ASS subtitles
+  const finalSubtitles = resolveFinalSubtitles(manifest);
+  let finalAssPath = null;
+  if (finalSubtitles.length > 0) {
+    finalAssPath = path.join(workDir, 'final_subtitles.ass');
+    await fsp.writeFile(
+      finalAssPath,
+      buildAssFileContent(finalSubtitles, profile.width, profile.height),
+      'utf8'
+    );
+  }
+
+  let loudnormMeasurements = null;
+  if (anyClipHasAudio && normalizeAudio) {
+    if (onProgress) {
+      await onProgress({
+        percent: 82,
+        stage: 'loudnorm_measure',
+        cutIndex: totalCuts,
+        totalCuts,
+      });
+    }
+    const measureRes = await runProcess(ffmpegBin, [
+      '-hide_banner',
+      '-i',
+      joinedPath,
+      '-vn',
+      '-af',
+      'loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json',
+      '-f',
+      'null',
+      '-',
+    ]);
+    if (measureRes.code === 0) {
+      loudnormMeasurements = parseLoudnormMeasurements(measureRes.stderr);
+    }
+  }
+
+  const finalFileName = sanitizeOutputFilename(manifest.outputFileName, jobId);
+  const finalOutputPath = path.join(workDir, finalFileName);
+
+  if (onProgress) {
+    await onProgress({
+      percent: 86,
+      stage: 'final_assembly',
+      cutIndex: totalCuts,
+      totalCuts,
+    });
+  }
+
+  const finalArgs = buildFinalAssemblyFfmpegArgs({
+    joinedPath,
+    outputPath: finalOutputPath,
+    profile,
+    encoderCodec,
+    cpuPreset,
+    hasAudio: anyClipHasAudio,
+    normalizeAudio,
+    loudnormMeasurements,
+    subtitleAssPath: finalAssPath,
+  });
+
+  const finalRes = await runProcess(ffmpegBin, finalArgs);
+  if (finalRes.code !== 0) {
+    throw new Error(`Fallo en montaje final: ${summarizeFfmpegError(finalRes.stderr)}`);
+  }
+
+  // 3. Mandatory post-render duration & A/V sync verification with ffprobe
+  const probed = await probeMediaDurations(resolvedFfprobe, finalOutputPath);
+  verifyRenderedDurations({
+    videoDurationSec: probed.videoDurationSec,
+    audioDurationSec: probed.audioDurationSec,
+    expectedDurationSec: expectedTotalDurationSec,
+    hasAudio: anyClipHasAudio && probed.hasAudio,
+  });
 
   return finalOutputPath;
 }

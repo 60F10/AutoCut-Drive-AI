@@ -104,7 +104,12 @@ export function evaluateHeavyVideoWarning(input: {
   durationSec?: number;
   width?: number;
   height?: number;
+  renderTarget?: 'mobile' | 'pc' | 'cloud';
 }): HeavyVideoAssessment {
+  if (input.renderTarget === 'cloud') {
+    return { isHeavy: false, reasons: [], message: null };
+  }
+
   const sizeBytes = Math.max(0, Number(input.sizeBytes) || 0);
   const durationSec = Math.max(0, Number(input.durationSec) || 0);
   const width = Math.max(0, Number(input.width) || 0);
@@ -1371,11 +1376,30 @@ export function buildRenderJobManifest(input: {
     ? rawOutputName
     : `${rawOutputName}.mp4`;
 
-  const cuts = activeCuts.map((cut) => ({
-    clipIndex: Math.max(0, Math.min(sourceFiles.length - 1, cut.clip_index ?? 0)),
-    start: Number(Math.max(0, cut.start_sec).toFixed(3)),
-    end: Number(Math.max(cut.start_sec + 0.15, cut.end_sec).toFixed(3)),
-  }));
+  const cuts = activeCuts.map((cut) => {
+    const validWords = Array.isArray(cut.words)
+      ? cut.words
+          .map((w) => ({
+            start: Number(Number(w?.start).toFixed(3)),
+            end: Number(Number(w?.end).toFixed(3)),
+            text: String(w?.text || '').trim(),
+          }))
+          .filter(
+            (w) =>
+              Boolean(w.text) &&
+              Number.isFinite(w.start) &&
+              Number.isFinite(w.end) &&
+              w.end >= w.start
+          )
+      : [];
+
+    return {
+      clipIndex: Math.max(0, Math.min(sourceFiles.length - 1, cut.clip_index ?? 0)),
+      start: Number(Math.max(0, cut.start_sec).toFixed(3)),
+      end: Number(Math.max(cut.start_sec + 0.15, cut.end_sec).toFixed(3)),
+      ...(validWords.length > 0 ? { words: validWords } : {}),
+    };
+  });
 
   let subtitlesData: RenderJobManifest['options']['subtitlesData'];
   if (normalizedOpts.subtitlesEnabled && plan.subtitulos && plan.subtitulos.length > 0) {

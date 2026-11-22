@@ -95,6 +95,7 @@ interface UseVideoQueueOptions {
   customInstruction: string;
   tiktokOptions: TikTokEditOptions;
   accessToken: string | null;
+  cloudRenderConfigured?: boolean;
   clearAuthSession: () => void;
   refreshCacheStats: () => Promise<void>;
   onError: (error: string | AppErrorBanner | null) => void;
@@ -109,6 +110,7 @@ export function useVideoQueue({
   customInstruction,
   tiktokOptions,
   accessToken,
+  cloudRenderConfigured = false,
   clearAuthSession,
   refreshCacheStats,
   onError,
@@ -477,9 +479,13 @@ export function useVideoQueue({
       });
 
       // Inspect resolution & duration asynchronously to warn early about heavy/4K files
+      const activeRenderTarget = cloudRenderConfigured ? 'cloud' : 'mobile';
       added.forEach((entry) => {
         if (!entry.rawBlob) return;
-        const quickCheck = evaluateHeavyVideoWarning({ sizeBytes: entry.sizeBytes });
+        const quickCheck = evaluateHeavyVideoWarning({
+          sizeBytes: entry.sizeBytes,
+          renderTarget: activeRenderTarget,
+        });
         if (quickCheck.isHeavy && quickCheck.message) {
           setHeavyVideoWarning(`${entry.originalName}: ${quickCheck.message}`);
         }
@@ -493,6 +499,7 @@ export function useVideoQueue({
             durationSec: meta.durationSec,
             width: meta.width,
             height: meta.height,
+            renderTarget: activeRenderTarget,
           });
           if (fullCheck.isHeavy && fullCheck.message) {
             setHeavyVideoWarning(`${entry.originalName}: ${fullCheck.message}`);
@@ -500,7 +507,7 @@ export function useVideoQueue({
         });
       });
     },
-    [onError, updateQueueItem]
+    [cloudRenderConfigured, onError, updateQueueItem]
   );
 
   const handleLoadDemo = useCallback(() => {
@@ -642,6 +649,7 @@ export function useVideoQueue({
           durationSec,
           width: meta.width,
           height: meta.height,
+          renderTarget: cloudRenderConfigured ? 'cloud' : 'mobile',
         });
         if (heavyCheck.isHeavy && heavyCheck.message) {
           setHeavyVideoWarning(`${target.originalName}: ${heavyCheck.message}`);
@@ -750,6 +758,7 @@ export function useVideoQueue({
     },
     [
       accessToken,
+      cloudRenderConfigured,
       settings.model,
       settings.exportQuality,
       stylePreset,
@@ -966,6 +975,7 @@ export function useVideoQueue({
         const heavyCheck = evaluateHeavyVideoWarning({
           sizeBytes: totalSizeBytes,
           durationSec: totalRawDurationSec,
+          renderTarget: cloudRenderConfigured ? 'cloud' : 'mobile',
         });
         if (heavyCheck.isHeavy && heavyCheck.message) {
           setHeavyVideoWarning(`${displayName}: ${heavyCheck.message}`);
@@ -1041,6 +1051,7 @@ export function useVideoQueue({
     },
     [
       accessToken,
+      cloudRenderConfigured,
       settings.model,
       settings.exportQuality,
       tiktokOptions,

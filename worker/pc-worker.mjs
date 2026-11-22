@@ -18,6 +18,7 @@ import {
   buildAssFileContent,
   detectVideoEncoder,
   escapePathForFfmpegFilter,
+  hasZscaleFilter,
   renderJob,
   sanitizeOutputFilename,
   sliceSubtitlesForSegment,
@@ -157,7 +158,15 @@ async function writeJobManifest(jobFilePath, manifest) {
   await fsp.writeFile(jobFilePath, payload, 'utf8');
 }
 
-async function processJob({ jobFilePath, manifest, driveDir, outputDir, ffmpegBin, encoder }) {
+async function processJob({
+  jobFilePath,
+  manifest,
+  driveDir,
+  outputDir,
+  ffmpegBin,
+  encoder,
+  zscaleAvailable,
+}) {
   const jobId = manifest.jobId || path.basename(jobFilePath, '.json');
   const tempWorkDir = await fsp.mkdtemp(path.join(os.tmpdir(), `autocut_job_${jobId}_`));
   const workingManifest = {
@@ -202,6 +211,7 @@ async function processJob({ jobFilePath, manifest, driveDir, outputDir, ffmpegBi
       sourcePaths: resolvedPaths,
       workDir: tempWorkDir,
       ffmpegBin,
+      zscaleAvailable,
       encoder: { ...encoder, cpuPreset: 'fast' },
       onProgress: async (evt) => {
         workingManifest.progress = Math.max(5, Math.min(92, Math.round(evt.percent)));
@@ -255,7 +265,14 @@ async function processJob({ jobFilePath, manifest, driveDir, outputDir, ffmpegBi
   }
 }
 
-async function scanAndProcessPending({ jobsDir, outputDir, driveDir, ffmpegBin, encoder }) {
+async function scanAndProcessPending({
+  jobsDir,
+  outputDir,
+  driveDir,
+  ffmpegBin,
+  encoder,
+  zscaleAvailable,
+}) {
   let entries;
   try {
     entries = await fsp.readdir(jobsDir, { withFileTypes: true });
@@ -292,6 +309,7 @@ async function scanAndProcessPending({ jobsDir, outputDir, driveDir, ffmpegBin, 
       outputDir,
       ffmpegBin,
       encoder,
+      zscaleAvailable,
     });
   }
 
@@ -325,12 +343,20 @@ async function main() {
   await fsp.mkdir(outputDir, { recursive: true });
 
   const encoder = await detectVideoEncoder(cli.ffmpegBin, cli.forceCpu);
+  const zscaleAvailable = await hasZscaleFilter(cli.ffmpegBin);
+  if (!zscaleAvailable) {
+    log(
+      'WARN',
+      'El filtro zscale no está disponible en el FFmpeg local; los clips HDR se procesarán sin tonemap HDR->SDR.'
+    );
+  }
 
   log('INFO', 'AutoCut Drive AI — PC Worker iniciado', {
     driveDir,
     jobsDir,
     outputDir,
     encoder: encoder.label,
+    zscaleAvailable,
     pollMs: cli.pollIntervalMs,
   });
 
@@ -341,6 +367,7 @@ async function main() {
       driveDir,
       ffmpegBin: cli.ffmpegBin,
       encoder,
+      zscaleAvailable,
     });
     log('INFO', `Modo --once finalizado (${count} trabajo(s) procesados).`);
     return;
@@ -357,6 +384,7 @@ async function main() {
         driveDir,
         ffmpegBin: cli.ffmpegBin,
         encoder,
+        zscaleAvailable,
       });
     } finally {
       busy = false;

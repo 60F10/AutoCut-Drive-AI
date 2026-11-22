@@ -497,12 +497,14 @@ async function processCloudJob({ tokenManager, jobFileId, manifest, outputFolder
         sourcePaths,
         workDir,
         ffmpegBin: process.env.AUTOCUT_FFMPEG_BIN || 'ffmpeg',
+        ffprobeBin: process.env.AUTOCUT_FFPROBE_BIN || undefined,
+        zscaleAvailable: true,
         encoder: {
           codec: 'libx264',
           cpuPreset: (q) => getCloudCpuPreset(q),
         },
         onProgress: async (evt) => {
-          const clamped = Math.max(10, Math.min(85, Math.round(evt.percent)));
+          const clamped = Math.max(10, Math.min(88, Math.round(evt.percent)));
           await writeProgress(clamped, false);
         },
       });
