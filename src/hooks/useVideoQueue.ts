@@ -7,15 +7,14 @@ import type {
   PendingDriveUpload,
   QueueItem,
   SourceClipRef,
+  TikTokEditOptions,
 } from '../types';
 import {
   buildCombinedEditedFilename,
   buildEditedFilename,
-  calculateSelectedDuration,
   detectPendingVideos,
   evaluateHeavyVideoWarning,
   isSupportedVideoFile,
-  toLocalDateKey,
 } from '../utils/videoPipeline';
 import { createDemoAnalyticsRecords, createDemoQueueItems } from '../utils/demoData';
 import { getCachedDriveToken } from '../services/googleAuth';
@@ -29,11 +28,7 @@ import {
   analyzeMultiClipWithGemini,
   analyzeVideoWithGemini,
 } from '../services/geminiClient';
-import {
-  inspectVideoMetadata,
-  renderCutsWithFfmpeg,
-  renderMultiClipCutsWithFfmpeg,
-} from '../services/ffmpegService';
+import { inspectVideoMetadata } from '../services/ffmpegService';
 import {
   clearAllEditedVideoBlobs,
   deleteEditedVideoBlob,
@@ -92,6 +87,7 @@ interface UseVideoQueueOptions {
   persistSettings: (next: AppSettings) => void;
   stylePreset: EditStylePreset;
   customInstruction: string;
+  tiktokOptions: TikTokEditOptions;
   accessToken: string | null;
   clearAuthSession: () => void;
   refreshCacheStats: () => Promise<void>;
@@ -105,6 +101,7 @@ export function useVideoQueue({
   persistSettings,
   stylePreset,
   customInstruction,
+  tiktokOptions,
   accessToken,
   clearAuthSession,
   refreshCacheStats,
@@ -252,6 +249,23 @@ export function useVideoQueue({
       return next;
     });
   }, []);
+
+  const maybePromptDriveUpload = useCallback(
+    (itemId: string, fileName: string, sizeBytes: number) => {
+      const canUpload = Boolean(
+        (accessToken || getCachedDriveToken()) && settings.folderId && settings.autoUploadEnabled
+      );
+      if (canUpload) {
+        setPendingDriveUpload({
+          itemId,
+          fileName,
+          folderId: settings.folderId,
+          sizeBytes,
+        });
+      }
+    },
+    [accessToken, settings.folderId, settings.autoUploadEnabled]
+  );
 
   const handleDownloadFromDrive = useCallback(
     async (itemId: string) => {
@@ -524,7 +538,7 @@ export function useVideoQueue({
   }, []);
 
   const processSingleItem = useCallback(
-    async (itemId: string) => {
+    async (itemId: string, openStudioOnReview = true) => {
       const target = itemsRef.current.find((i) => i.id === itemId);
       if (!target) return;
 
@@ -617,86 +631,30 @@ export function useVideoQueue({
           {
             stylePreset,
             customInstruction,
+            subtitlesEnabled: tiktokOptions.subtitlesEnabled,
+            silenceTrimEnabled: tiktokOptions.silenceTrimEnabled,
           }
         );
 
         const outputFileName = buildEditedFilename(target.originalName, plan.etiqueta);
-        const activeQuality = settings.exportQuality;
 
+        // Stage 3: Pause at editable EDL preview before heavy FFmpeg.wasm render
         updateQueueItem(itemId, {
           analysis: plan,
           outputFileName,
           geminiFileCleaned,
           stylePreset,
           customInstruction: customInstruction.trim() || undefined,
-          exportQuality: activeQuality,
-          stage: 'rendering',
-          stageDetail:
-            activeQuality === 'mobile_fast'
-              ? 'Iniciando FFmpeg.wasm (720p rápido móvil)...'
-              : 'Iniciando FFmpeg.wasm (1080p HD TikTok)...',
-          progress: 5,
-        });
-
-        // Stage 3: Render jump cuts in browser with FFmpeg.wasm
-        const editedBlob = await renderCutsWithFfmpeg(
-          rawBlob,
-          target.originalName,
-          plan.cortes,
-          ({ percent, message }) => {
-            updateQueueItem(itemId, {
-              stage: 'rendering',
-              stageDetail: message,
-              progress: percent,
-            });
-          },
-          activeQuality
-        );
-
-        const editedUrl = URL.createObjectURL(editedBlob);
-        if (target.editedUrl) {
-          URL.revokeObjectURL(target.editedUrl);
-        }
-
-        const completedAt = Date.now();
-        updateQueueItem(itemId, {
-          editedBlob,
-          editedUrl,
-          editedSizeBytes: editedBlob.size,
-          cachedInIndexedDb: true,
-          outputFileName,
-          stage: 'completed',
-          stageDetail: 'Renderizado y guardado en caché local (Galería y Estudio)',
+          tiktokOptions: { ...tiktokOptions },
+          exportQuality: settings.exportQuality,
+          stage: 'review',
+          stageDetail: `EDL listo (${plan.cortes.length} cortes) — Revisa y pulsa Renderizar vídeo final`,
           progress: 100,
-          completedAt,
-        });
-
-        await cacheEditedVideo(itemId, editedBlob, outputFileName);
-
-        appendAnalyticsRecord({
-          id: `ana-${itemId}-${completedAt}`,
-          dateKey: toLocalDateKey(completedAt),
-          processedAt: completedAt,
-          etiqueta: plan.etiqueta,
-          rawDurationSec: durationSec || calculateSelectedDuration(plan.cortes),
-          editedDurationSec: calculateSelectedDuration(plan.cortes),
-          isMultiClip: false,
-          clipCount: 1,
         });
 
         onSelectStudioItem(itemId);
-
-        // Stage 4: Prompt explicit user confirmation before uploading to Google Drive
-        const canUpload = Boolean(
-          (accessToken || getCachedDriveToken()) && settings.folderId && settings.autoUploadEnabled
-        );
-        if (canUpload) {
-          setPendingDriveUpload({
-            itemId,
-            fileName: outputFileName,
-            folderId: settings.folderId,
-            sizeBytes: editedBlob.size,
-          });
+        if (openStudioOnReview) {
+          onNavigateView('studio');
         }
       } catch (err) {
         if (err instanceof DriveAuthExpiredError) {
@@ -718,17 +676,15 @@ export function useVideoQueue({
     [
       accessToken,
       settings.model,
-      settings.folderId,
-      settings.autoUploadEnabled,
       settings.exportQuality,
       stylePreset,
       customInstruction,
+      tiktokOptions,
       updateQueueItem,
-      cacheEditedVideo,
-      appendAnalyticsRecord,
       clearAuthSession,
       onError,
       onSelectStudioItem,
+      onNavigateView,
     ]
   );
 
@@ -894,81 +850,26 @@ export function useVideoQueue({
           {
             stylePreset: chosenPreset,
             customInstruction: chosenInstruction,
+            subtitlesEnabled: tiktokOptions.subtitlesEnabled,
+            silenceTrimEnabled: tiktokOptions.silenceTrimEnabled,
           }
         );
 
         const outputFileName = buildCombinedEditedFilename(projectBase, plan.etiqueta);
 
+        // 3. Pause at editable EDL preview in Studio before heavy FFmpeg.wasm render
         updateQueueItem(combinedId, {
           analysis: plan,
           outputFileName,
           geminiFileCleaned,
-          stage: 'rendering',
-          stageDetail:
-            activeQuality === 'mobile_fast'
-              ? 'Normalizando clips a 720×1280 (30fps · ultrafast) en FFmpeg.wasm...'
-              : 'Normalizando clips a 1080×1920 (30fps · TikTok) en FFmpeg.wasm...',
-          progress: 5,
-        });
-
-        // 3. Render normalized combined MP4 in browser
-        const editedBlob = await renderMultiClipCutsWithFfmpeg(
-          resolvedClips.map((c) => ({
-            blob: c.rawBlob!,
-            originalFileName: c.originalName,
-          })),
-          plan.cortes,
-          ({ percent, message }) => {
-            updateQueueItem(combinedId, {
-              stage: 'rendering',
-              stageDetail: message,
-              progress: percent,
-            });
-          },
-          activeQuality
-        );
-
-        const editedUrl = URL.createObjectURL(editedBlob);
-        const completedAt = Date.now();
-
-        updateQueueItem(combinedId, {
-          editedBlob,
-          editedUrl,
-          editedSizeBytes: editedBlob.size,
-          cachedInIndexedDb: true,
-          outputFileName,
-          stage: 'completed',
-          stageDetail: `Combinado con ${plan.cortes.length} cortes de ${resolvedClips.length} brutos`,
+          tiktokOptions: { ...tiktokOptions },
+          stage: 'review',
+          stageDetail: `Plan Multi-Clip listo (${plan.cortes.length} cortes de ${resolvedClips.length} clips) — Revisa y renderiza`,
           progress: 100,
-          completedAt,
-        });
-
-        await cacheEditedVideo(combinedId, editedBlob, outputFileName);
-
-        appendAnalyticsRecord({
-          id: `ana-${combinedId}`,
-          dateKey: toLocalDateKey(completedAt),
-          processedAt: completedAt,
-          etiqueta: plan.etiqueta,
-          rawDurationSec: totalRawDurationSec || calculateSelectedDuration(plan.cortes),
-          editedDurationSec: calculateSelectedDuration(plan.cortes),
-          isMultiClip: true,
-          clipCount: resolvedClips.length,
         });
 
         onSelectStudioItem(combinedId);
-
-        const canUpload = Boolean(
-          (accessToken || getCachedDriveToken()) && settings.folderId && settings.autoUploadEnabled
-        );
-        if (canUpload) {
-          setPendingDriveUpload({
-            itemId: combinedId,
-            fileName: outputFileName,
-            folderId: settings.folderId,
-            sizeBytes: editedBlob.size,
-          });
-        }
+        onNavigateView('studio');
       } catch (err) {
         if (err instanceof DriveAuthExpiredError) {
           clearAuthSession();
@@ -989,15 +890,13 @@ export function useVideoQueue({
     [
       accessToken,
       settings.model,
-      settings.folderId,
-      settings.autoUploadEnabled,
       settings.exportQuality,
+      tiktokOptions,
       updateQueueItem,
-      cacheEditedVideo,
-      appendAnalyticsRecord,
       clearAuthSession,
       onError,
       onSelectStudioItem,
+      onNavigateView,
     ]
   );
 
@@ -1019,9 +918,13 @@ export function useVideoQueue({
     }
 
     for (const id of pendingIds) {
-      await processSingleItem(id);
+      await processSingleItem(id, false);
     }
-  }, [processSingleItem, onError]);
+    if (pendingIds.length > 0) {
+      onSelectStudioItem(pendingIds[0]);
+      onNavigateView('studio');
+    }
+  }, [processSingleItem, onError, onSelectStudioItem, onNavigateView]);
 
   const handleRequestDriveUpload = useCallback(
     (itemId: string) => {
@@ -1164,6 +1067,8 @@ export function useVideoQueue({
     setHeavyVideoWarning,
     queueCounts,
     cacheEditedVideo,
+    appendAnalyticsRecord,
+    maybePromptDriveUpload,
     handleClearVideoCache,
     handleDownloadFromDrive,
     handleScanFolder,

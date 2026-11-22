@@ -1,11 +1,16 @@
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile, toBlobURL } from '@ffmpeg/util';
-import type { ExportQuality, VideoCut } from '../types';
+import type { ExportQuality, SubtitleBlock, TikTokEditOptions, VideoCut } from '../types';
 import {
   EXPORT_QUALITY_PROFILES,
+  buildAssSubtitles,
   buildFfmpegFilterComplex,
   buildMultiClipFfmpegFilterComplex,
+  filterEditedCuts,
   getExtension,
+  normalizeTikTokOptions,
+  remapSubtitlesToFinalTimeline,
+  type FfmpegPipelineOptions,
 } from '../utils/videoPipeline';
 
 // Single-threaded @ffmpeg/core CDNs (does NOT require SharedArrayBuffer or COOP/COEP headers)
@@ -14,7 +19,17 @@ const FFMPEG_CORE_CDNS = [
   'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd',
 ];
 
-const FFMPEG_TEMP_EXTENSIONS = ['.mp4', '.mov', '.webm', '.m4a', '.aac', '.tmp', '.txt'];
+const FFMPEG_TEMP_EXTENSIONS = [
+  '.mp4',
+  '.mov',
+  '.webm',
+  '.m4a',
+  '.aac',
+  '.tmp',
+  '.txt',
+  '.srt',
+  '.ass',
+];
 
 let ffmpegInstance: FFmpeg | null = null;
 let loadPromise: Promise<FFmpeg> | null = null;
@@ -52,7 +67,7 @@ async function getLoadedFfmpeg(onStatus?: (msg: string) => void): Promise<FFmpeg
 }
 
 /**
- * Strictly purges tracked files AND sweeps any leftover media/temp artifacts
+ * Strictly purges tracked files AND sweeps any leftover media/temp/subtitle artifacts
  * in the FFmpeg.wasm virtual root filesystem to keep mobile browser RAM low.
  */
 async function purgeFfmpegVirtualFs(ffmpeg: FFmpeg, trackedFiles: string[] = []): Promise<void> {
@@ -122,24 +137,59 @@ export interface RenderProgress {
   message: string;
 }
 
+export interface RenderTikTokConfig {
+  tiktokOptions?: Partial<TikTokEditOptions>;
+  subtitles?: SubtitleBlock[];
+  preserveOrder?: boolean;
+}
+
+async function prepareOptionalSubtitleFile(
+  ffmpeg: FFmpeg,
+  jobId: string,
+  cuts: VideoCut[],
+  exportQuality: ExportQuality,
+  renderConfig?: RenderTikTokConfig
+): Promise<string | undefined> {
+  const opts = normalizeTikTokOptions(renderConfig?.tiktokOptions);
+  if (!opts.subtitlesEnabled || !renderConfig?.subtitles?.length) {
+    return undefined;
+  }
+
+  const activeCuts = filterEditedCuts(cuts, Boolean(renderConfig?.preserveOrder));
+  const remapped = remapSubtitlesToFinalTimeline(renderConfig.subtitles, activeCuts);
+  if (remapped.length === 0) {
+    return undefined;
+  }
+
+  const profile = EXPORT_QUALITY_PROFILES[exportQuality];
+  const assContent = buildAssSubtitles(remapped, profile.width, profile.height);
+  const subFileName = `subs_${jobId}.ass`;
+  await ffmpeg.writeFile(subFileName, new TextEncoder().encode(assContent));
+  return subFileName;
+}
+
 /**
  * Renders single-clip selected cuts into a clean H.264 + AAC MP4 preserving 9:16 vertical orientation,
- * balanced TikTok/Reels bitrate caps, and strict virtual FS cleanup in `finally`.
+ * optional framing mode (center_crop / blur_pad), silence trim, -14 LUFS normalization,
+ * optional burned ASS subtitles, and strict virtual FS cleanup in `finally`.
  */
 export async function renderCutsWithFfmpeg(
   sourceBlob: Blob,
   originalFileName: string,
   cuts: VideoCut[],
   onProgress?: (progress: RenderProgress) => void,
-  exportQuality: ExportQuality = 'high_1080p'
+  exportQuality: ExportQuality = 'high_1080p',
+  renderConfig?: RenderTikTokConfig
 ): Promise<Blob> {
   const ffmpeg = await getLoadedFfmpeg((msg) => onProgress?.({ percent: 5, message: msg }));
   const profile = EXPORT_QUALITY_PROFILES[exportQuality];
+  const opts = normalizeTikTokOptions(renderConfig?.tiktokOptions);
 
   const jobId = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
   const ext = getExtension(originalFileName) || '.mp4';
   const inputName = `in_${jobId}${ext}`;
   const outputName = `out_${jobId}.mp4`;
+  let subtitleFileName: string | undefined;
 
   const progressHandler = ({ progress }: { progress: number }) => {
     const pct = Math.max(10, Math.min(98, Math.round(progress * 100)));
@@ -152,45 +202,68 @@ export async function renderCutsWithFfmpeg(
   ffmpeg.on('progress', progressHandler);
 
   try {
-    // Clear any residual artifacts from previous aborted renders before allocating memory
     await purgeFfmpegVirtualFs(ffmpeg);
 
     onProgress?.({ percent: 8, message: 'Preparando vídeo en memoria de FFmpeg...' });
     await ffmpeg.writeFile(inputName, await fetchFile(sourceBlob));
 
-    let exitCode = 0;
-    try {
-      const { args, activeCount } = buildFfmpegFilterComplex(
-        cuts,
-        inputName,
-        outputName,
-        true,
-        exportQuality
-      );
-      onProgress?.({
-        percent: 12,
-        message: `Uniendo ${activeCount} cortes (${profile.shortLabel} · ${profile.maxrate})...`,
-      });
-      exitCode = await ffmpeg.exec(args);
-    } catch {
-      exitCode = 1;
-    }
+    subtitleFileName = await prepareOptionalSubtitleFile(
+      ffmpeg,
+      jobId,
+      cuts,
+      exportQuality,
+      renderConfig
+    );
 
-    if (exitCode !== 0) {
+    const basePipelineOptions: FfmpegPipelineOptions = {
+      framingMode: opts.framingMode,
+      silenceTrimEnabled: opts.silenceTrimEnabled,
+      audioNormalizeEnabled: opts.audioNormalizeEnabled,
+      subtitleFileName,
+      preserveOrder: renderConfig?.preserveOrder ?? true,
+    };
+
+    const runAttempt = async (hasAudio: boolean, withSubtitles: boolean): Promise<number> => {
       await ffmpeg.deleteFile(outputName).catch(() => {});
       const { args, activeCount } = buildFfmpegFilterComplex(
         cuts,
         inputName,
         outputName,
-        false,
-        exportQuality
+        hasAudio,
+        exportQuality,
+        {
+          ...basePipelineOptions,
+          subtitleFileName: withSubtitles ? subtitleFileName : undefined,
+        }
       );
+      const audioTag = hasAudio && opts.audioNormalizeEnabled ? ' · -14 LUFS' : '';
+      const subTag = withSubtitles && subtitleFileName ? ' · Subtítulos' : '';
       onProgress?.({
-        percent: 18,
-        message: `Sin pista de audio detectada: uniendo ${activeCount} cortes (${profile.shortLabel})...`,
+        percent: hasAudio ? 12 : 18,
+        message: `Renderizando ${activeCount} cortes (${profile.shortLabel}${audioTag}${subTag})...`,
       });
-      const fallbackCode = await ffmpeg.exec(args);
-      if (fallbackCode !== 0) {
+      try {
+        return await ffmpeg.exec(args);
+      } catch {
+        return 1;
+      }
+    };
+
+    let exitCode = await runAttempt(true, Boolean(subtitleFileName));
+
+    // If burned subtitles failed in this wasm build (e.g. missing libass/fontconfig), retry cleanly without burning
+    if (exitCode !== 0 && subtitleFileName) {
+      onProgress?.({
+        percent: 16,
+        message: 'Reintentando render sin quemar subtítulos (disponibles en .SRT)...',
+      });
+      exitCode = await runAttempt(true, false);
+    }
+
+    // Fallback for videos without an audio track
+    if (exitCode !== 0) {
+      exitCode = await runAttempt(false, false);
+      if (exitCode !== 0) {
         throw new Error(
           'FFmpeg.wasm no pudo renderizar los cortes. Comprueba que el códec sea compatible o prueba el modo "720p móvil" para ahorrar RAM.'
         );
@@ -205,7 +278,7 @@ export async function renderCutsWithFfmpeg(
     return new Blob([bytes.buffer], { type: 'video/mp4' });
   } finally {
     ffmpeg.off('progress', progressHandler);
-    await purgeFfmpegVirtualFs(ffmpeg, [inputName, outputName]);
+    await purgeFfmpegVirtualFs(ffmpeg, [inputName, outputName, subtitleFileName ?? '']);
   }
 }
 
@@ -216,21 +289,24 @@ export interface MultiClipFfmpegSource {
 
 /**
  * Renders multi-clip cuts referencing each input by clip_index, normalizing every clip
- * to 1080x1920 (or 720x1280 mobile_fast) vertical 9:16, 30fps, yuv420p with balanced bitrate caps,
- * and purging all virtual FS inputs/outputs inside `finally`.
+ * to 9:16 vertical with framing mode, silence trim, -14 LUFS loudness normalization,
+ * optional burned ASS subtitles, and strict virtual FS cleanup in `finally`.
  */
 export async function renderMultiClipCutsWithFfmpeg(
   sources: MultiClipFfmpegSource[],
   cuts: VideoCut[],
   onProgress?: (progress: RenderProgress) => void,
-  exportQuality: ExportQuality = 'high_1080p'
+  exportQuality: ExportQuality = 'high_1080p',
+  renderConfig?: RenderTikTokConfig
 ): Promise<Blob> {
   const ffmpeg = await getLoadedFfmpeg((msg) => onProgress?.({ percent: 4, message: msg }));
   const profile = EXPORT_QUALITY_PROFILES[exportQuality];
+  const opts = normalizeTikTokOptions(renderConfig?.tiktokOptions);
 
   const jobId = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
   const inputNames: string[] = [];
   const outputName = `combined_${jobId}.mp4`;
+  let subtitleFileName: string | undefined;
 
   const progressHandler = ({ progress }: { progress: number }) => {
     const pct = Math.max(15, Math.min(98, Math.round(progress * 100)));
@@ -256,39 +332,59 @@ export async function renderMultiClipCutsWithFfmpeg(
       await ffmpeg.writeFile(fileName, await fetchFile(sources[i].blob));
     }
 
-    let exitCode = 0;
-    try {
-      const { args, activeCount } = buildMultiClipFfmpegFilterComplex(
-        cuts,
-        inputNames,
-        outputName,
-        true,
-        exportQuality
-      );
-      onProgress?.({
-        percent: 16,
-        message: `Renderizando ${activeCount} cortes de ${sources.length} clips (${profile.width}×${profile.height} · ${profile.maxrate})...`,
-      });
-      exitCode = await ffmpeg.exec(args);
-    } catch {
-      exitCode = 1;
-    }
+    subtitleFileName = await prepareOptionalSubtitleFile(
+      ffmpeg,
+      jobId,
+      cuts,
+      exportQuality,
+      { ...renderConfig, preserveOrder: true }
+    );
 
-    if (exitCode !== 0) {
+    const basePipelineOptions: FfmpegPipelineOptions = {
+      framingMode: opts.framingMode,
+      silenceTrimEnabled: opts.silenceTrimEnabled,
+      audioNormalizeEnabled: opts.audioNormalizeEnabled,
+      subtitleFileName,
+      preserveOrder: true,
+    };
+
+    const runAttempt = async (includeAudio: boolean, withSubtitles: boolean): Promise<number> => {
       await ffmpeg.deleteFile(outputName).catch(() => {});
       const { args, activeCount } = buildMultiClipFfmpegFilterComplex(
         cuts,
         inputNames,
         outputName,
-        false,
-        exportQuality
+        includeAudio,
+        exportQuality,
+        {
+          ...basePipelineOptions,
+          subtitleFileName: withSubtitles ? subtitleFileName : undefined,
+        }
       );
       onProgress?.({
-        percent: 22,
-        message: `Algún clip sin pista de audio: uniendo ${activeCount} cortes (${profile.width}×${profile.height})...`,
+        percent: includeAudio ? 16 : 22,
+        message: `Renderizando ${activeCount} cortes de ${sources.length} clips (${profile.width}×${profile.height})...`,
       });
-      const fallbackCode = await ffmpeg.exec(args);
-      if (fallbackCode !== 0) {
+      try {
+        return await ffmpeg.exec(args);
+      } catch {
+        return 1;
+      }
+    };
+
+    let exitCode = await runAttempt(true, Boolean(subtitleFileName));
+
+    if (exitCode !== 0 && subtitleFileName) {
+      onProgress?.({
+        percent: 20,
+        message: 'Reintentando combinación sin quemar subtítulos (disponibles en .SRT)...',
+      });
+      exitCode = await runAttempt(true, false);
+    }
+
+    if (exitCode !== 0) {
+      exitCode = await runAttempt(false, false);
+      if (exitCode !== 0) {
         throw new Error(
           'FFmpeg.wasm no pudo combinar estos clips. En móvil, activa "Rápido móvil — 720p" o reduce el peso total.'
         );
@@ -303,6 +399,6 @@ export async function renderMultiClipCutsWithFfmpeg(
     return new Blob([bytes.buffer], { type: 'video/mp4' });
   } finally {
     ffmpeg.off('progress', progressHandler);
-    await purgeFfmpegVirtualFs(ffmpeg, [...inputNames, outputName]);
+    await purgeFfmpegVirtualFs(ffmpeg, [...inputNames, outputName, subtitleFileName ?? '']);
   }
 }

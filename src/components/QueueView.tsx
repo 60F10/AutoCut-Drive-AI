@@ -23,6 +23,7 @@ import type {
   ExportQuality,
   QueueItem,
   QueueStage,
+  TikTokEditOptions,
 } from '../types';
 import {
   exceedsMobileRamThreshold,
@@ -47,6 +48,8 @@ interface QueueViewProps {
   onChangeStylePreset: (preset: EditStylePreset) => void;
   customInstruction: string;
   onChangeCustomInstruction: (value: string) => void;
+  tiktokOptions: TikTokEditOptions;
+  onChangeTikTokOptions: (patch: Partial<TikTokEditOptions>) => void;
   exportQuality: ExportQuality;
   onChangeExportQuality: (quality: ExportQuality) => void;
   alreadyEditedCount: number;
@@ -68,6 +71,7 @@ const STAGE_ORDER: QueueStage[] = [
   'pending',
   'downloading',
   'analyzing',
+  'review',
   'rendering',
   'uploading',
   'completed',
@@ -76,9 +80,10 @@ const STAGE_ORDER: QueueStage[] = [
 const STAGE_LABELS: Record<QueueStage, string> = {
   pending: 'Pendiente',
   downloading: 'Descargando',
-  analyzing: 'Analizando con Gemini',
-  rendering: 'Renderizando cortes',
-  uploading: 'Subiendo a Drive',
+  analyzing: 'Analizando',
+  review: 'Revisar EDL',
+  rendering: 'Renderizando',
+  uploading: 'Subiendo',
   completed: 'Completado',
   error: 'Error',
 };
@@ -87,6 +92,7 @@ function isActiveStage(stage: QueueStage): boolean {
   return (
     stage === 'downloading' ||
     stage === 'analyzing' ||
+    stage === 'review' ||
     stage === 'rendering' ||
     stage === 'uploading'
   );
@@ -105,6 +111,8 @@ export function QueueView({
   onChangeStylePreset,
   customInstruction,
   onChangeCustomInstruction,
+  tiktokOptions,
+  onChangeTikTokOptions,
   exportQuality,
   onChangeExportQuality,
   alreadyEditedCount,
@@ -259,12 +267,14 @@ export function QueueView({
         </div>
       </section>
 
-      {/* Style Presets, Quick Gemini Instruction & Quick Quality Toggle */}
+      {/* Style Presets, TikTok Options, Quick Gemini Instruction & Quick Quality Toggle */}
       <EditStyleControls
         stylePreset={stylePreset}
         onChangeStylePreset={onChangeStylePreset}
         customInstruction={customInstruction}
         onChangeCustomInstruction={onChangeCustomInstruction}
+        tiktokOptions={tiktokOptions}
+        onChangeTikTokOptions={onChangeTikTokOptions}
         exportQuality={exportQuality}
         onChangeExportQuality={onChangeExportQuality}
         collapsible
@@ -560,6 +570,8 @@ export function QueueView({
                         <CheckCircle2 className="h-4 w-4 text-[#00f0ff]" />
                       ) : item.stage === 'error' ? (
                         <AlertCircle className="h-4 w-4 text-[#ff2a85]" />
+                      ) : item.stage === 'review' ? (
+                        <Sparkles className="h-4 w-4 text-[#fcee0a]" />
                       ) : active ? (
                         <Loader2 className="h-4 w-4 animate-spin text-[#fcee0a]" />
                       ) : (
@@ -584,10 +596,18 @@ export function QueueView({
                       <button
                         type="button"
                         onClick={() => onOpenStudio(item.id)}
-                        className="inline-flex h-10 sm:h-9 items-center gap-1.5 rounded-md border border-[#00f0ff]/35 bg-[#05060a]/90 px-3 text-xs font-medium text-[#EEF5FF] hover:border-[#00f0ff]/70 hover:text-[#00f0ff] transition-colors whitespace-nowrap"
+                        className={
+                          item.stage === 'review'
+                            ? 'cyber-btn-primary inline-flex h-10 sm:h-9 items-center gap-1.5 px-3.5 text-xs whitespace-nowrap'
+                            : 'inline-flex h-10 sm:h-9 items-center gap-1.5 rounded-md border border-[#00f0ff]/35 bg-[#05060a]/90 px-3 text-xs font-medium text-[#EEF5FF] hover:border-[#00f0ff]/70 hover:text-[#00f0ff] transition-colors whitespace-nowrap'
+                        }
                       >
-                        <Film className="h-3.5 w-3.5 text-[#00f0ff]" />
-                        Abrir estudio
+                        <Film
+                          className={`h-3.5 w-3.5 ${
+                            item.stage === 'review' ? '' : 'text-[#00f0ff]'
+                          }`}
+                        />
+                        {item.stage === 'review' ? 'Revisar y renderizar' : 'Abrir estudio'}
                       </button>
                     )}
 
@@ -630,9 +650,9 @@ export function QueueView({
                   </div>
                 </div>
 
-                {/* 6-Stage Energy Pipeline Bar + Real Progress */}
+                {/* 7-Stage Energy Pipeline Bar + Real Progress */}
                 <div className="mt-4 space-y-2 pl-8">
-                  <div className="grid grid-cols-6 gap-1.5" aria-label="Etapas del flujo">
+                  <div className="grid grid-cols-7 gap-1.5" aria-label="Etapas del flujo">
                     {STAGE_ORDER.map((step, idx) => {
                       const reached = item.stage !== 'error' && stageIdx >= idx;
                       const isCurrent = item.stage === step;
@@ -667,7 +687,7 @@ export function QueueView({
                     })}
                   </div>
 
-                  {active && (
+                  {active && item.stage !== 'review' && (
                     <>
                       <div className="flex items-center justify-between gap-3 pt-1">
                         <p className="text-xs text-[#C8D7EC] truncate">
@@ -684,6 +704,10 @@ export function QueueView({
                         />
                       </div>
                     </>
+                  )}
+
+                  {item.stage === 'review' && item.stageDetail && (
+                    <p className="font-mono text-xs text-[#fcee0a] pt-1">{item.stageDetail}</p>
                   )}
 
                   {item.stage === 'error' && item.errorMessage && (

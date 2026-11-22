@@ -3,7 +3,10 @@ import type {
   DriveFileMeta,
   EditStylePreset,
   ExportQuality,
+  FramingMode,
   GeminiEditPlan,
+  SubtitleBlock,
+  TikTokEditOptions,
   VideoCut,
 } from '../types';
 
@@ -105,6 +108,29 @@ export const EDIT_STYLE_PRESETS: StylePresetMeta[] = [
   },
 ];
 
+export const DEFAULT_TIKTOK_OPTIONS: TikTokEditOptions = {
+  subtitlesEnabled: false,
+  silenceTrimEnabled: true,
+  audioNormalizeEnabled: true,
+  framingMode: 'center_crop',
+};
+
+export function normalizeFramingMode(value?: unknown): FramingMode {
+  return value === 'blur_pad' ? 'blur_pad' : 'center_crop';
+}
+
+export function normalizeTikTokOptions(raw?: Partial<TikTokEditOptions> | null): TikTokEditOptions {
+  if (!raw || typeof raw !== 'object') {
+    return { ...DEFAULT_TIKTOK_OPTIONS };
+  }
+  return {
+    subtitlesEnabled: Boolean(raw.subtitlesEnabled),
+    silenceTrimEnabled: raw.silenceTrimEnabled !== false,
+    audioNormalizeEnabled: raw.audioNormalizeEnabled !== false,
+    framingMode: normalizeFramingMode(raw.framingMode),
+  };
+}
+
 export function normalizeStylePreset(value?: unknown): EditStylePreset {
   if (value === 'agile_vlog' || value === 'express_summary' || value === 'funny_jumpcut') {
     return value;
@@ -115,11 +141,13 @@ export function normalizeStylePreset(value?: unknown): EditStylePreset {
 export function buildGeminiSystemPrompt(
   mode: 'single' | 'multi',
   stylePreset: EditStylePreset = 'funny_jumpcut',
-  customInstruction?: string
+  customInstruction?: string,
+  tiktokOptions?: Partial<TikTokEditOptions>
 ): string {
   const preset =
     EDIT_STYLE_PRESETS.find((p) => p.id === normalizeStylePreset(stylePreset)) ??
     EDIT_STYLE_PRESETS[0];
+  const opts = normalizeTikTokOptions(tiktokOptions);
 
   const cleanInstruction = typeof customInstruction === 'string' ? customInstruction.trim() : '';
 
@@ -129,25 +157,36 @@ export function buildGeminiSystemPrompt(
 Tu objetivo es mezclar y ordenar los mejores momentos de todos los clips proporcionados para construir UNA SOLA historia coherente y dinámica.`
       : `Eres un editor de vídeo experto en contenido vertical (Reels/TikTok/Shorts). Tu objetivo es transformar un vídeo bruto en una pieza vertical ágil y atractiva.`;
 
+  const silenceDirective = opts.silenceTrimEnabled
+    ? 'Elimina estrictamente silencios, respiraciones largas y pausas muertas mayores a 0.4 segundos ajustando start_sec y end_sec al milímetro.'
+    : 'Respeta pausas naturales breves si aportan ritmo o dramatismo.';
+
   const technicalRules =
     mode === 'multi'
       ? `Reglas técnicas obligatorias:
 1. Puedes alternar libremente entre los distintos clips en el orden narrativo más efectivo.
-2. En cada elemento de "cortes" indica obligatoriamente "clip_index" (entero 0, 1, 2... correspondiente al Clip de origen), además de "start_sec", "end_sec" y "motivo".
-3. Los timestamps start_sec y end_sec deben ser precisos al decimal para que no se corten palabras a medias y estar dentro de la duración del clip correspondiente.
+2. En cada elemento de "cortes" indica obligatoriamente "clip_index" (entero 0, 1, 2... correspondiente al Clip de origen), "start_sec", "end_sec", "motivo" y "puntuacion_interes" (entero de 1 a 10 según su gancho/retención en TikTok).
+3. ${silenceDirective} Los timestamps start_sec y end_sec deben ser precisos al decimal para no cortar palabras a medias.
 4. Genera una etiqueta corta de 1 palabra en mayúsculas sin tildes que identifique el contenido (ej: COCINA, VLOG, RECETA, FAIL, COCHE, VIAJE).
 5. Respeta estrictamente el esquema JSON solicitado.`
       : `Reglas técnicas obligatorias:
 1. Usa siempre "clip_index": 0 en cada corte.
-2. Los timestamps start_sec y end_sec deben ser precisos al decimal para que no se corten palabras a medias.
-3. Genera una etiqueta corta de 1 palabra en mayúsculas sin tildes que identifique el contenido (ej: COCINA, VLOG, RECETA, FAIL, COCHE, VIAJE).
-4. Respeta estrictamente el esquema JSON solicitado.`;
+2. En cada elemento de "cortes" indica obligatoriamente "start_sec", "end_sec", "motivo" y "puntuacion_interes" (entero de 1 a 10 según su gancho/retención en TikTok).
+3. ${silenceDirective} Los timestamps start_sec y end_sec deben ser precisos al decimal para no cortar palabras a medias.
+4. Genera una etiqueta corta de 1 palabra en mayúsculas sin tildes que identifique el contenido (ej: COCINA, VLOG, RECETA, FAIL, COCHE, VIAJE).
+5. Respeta estrictamente el esquema JSON solicitado.`;
+
+  const subtitlesBlock = opts.subtitlesEnabled
+    ? `\n\nSUBTÍTULOS AUTOMÁTICOS ACTIVADOS:
+- Devuelve además el campo "subtitulos": un array de bloques cortos (2 a 5 palabras por bloque, estilo TikTok dinámico) cubriendo lo que se dice dentro de los cortes seleccionados.
+- Cada bloque debe incluir "clip_index", "start_sec", "end_sec" (marcas exactas sobre el vídeo bruto) y "text" (texto limpio, sin emojis rotos).`
+    : '';
 
   const customBlock = cleanInstruction
     ? `\n\nINSTRUCCIÓN PRIORITARIA DEL USUARIO (cúmplela con máxima prioridad manteniendo el esquema JSON):\n"${cleanInstruction}"`
     : '';
 
-  return `${intro}\n\n${preset.promptDirectives}\n\n${technicalRules}${customBlock}`;
+  return `${intro}\n\n${preset.promptDirectives}\n\n${technicalRules}${subtitlesBlock}${customBlock}`;
 }
 
 export interface ExportQualityProfile {
@@ -365,6 +404,7 @@ export function normalizeCuts(
     start_sec: number;
     end_sec: number;
     motivo: string;
+    puntuacion_interes?: number;
     enabled?: boolean;
     id?: string;
   }>,
@@ -393,12 +433,19 @@ export function normalizeCuts(
         end = Math.min(end, clipMaxDuration);
       }
 
+      const rawScore = Number(cut.puntuacion_interes);
+      const score =
+        Number.isFinite(rawScore) && rawScore > 0
+          ? Math.max(1, Math.min(10, Math.round(rawScore)))
+          : undefined;
+
       return {
         id: cut.id ?? `cut-${index + 1}`,
         clip_index: clipIndex,
         start_sec: Number(start.toFixed(2)),
         end_sec: Number(end.toFixed(2)),
         motivo: String(cut.motivo || 'Momento destacado').trim(),
+        ...(score !== undefined ? { puntuacion_interes: score } : {}),
         enabled: cut.enabled !== false,
       };
     })
@@ -427,6 +474,172 @@ export function normalizeCuts(
   return nonOverlapping;
 }
 
+export function normalizeSubtitles(
+  rawSubtitles: unknown,
+  options?: {
+    maxDurationSec?: number;
+    clipCount?: number;
+    clipDurationsSec?: number[];
+  }
+): SubtitleBlock[] {
+  if (!Array.isArray(rawSubtitles)) return [];
+  const clipCount = Math.max(1, options?.clipCount ?? 1);
+
+  return rawSubtitles
+    .map((entry, idx) => {
+      const item = entry as Record<string, unknown>;
+      const rawClipIdx = Number.isFinite(Number(item?.clip_index))
+        ? Math.floor(Number(item.clip_index))
+        : 0;
+      const clipIndex = Math.max(0, Math.min(clipCount - 1, rawClipIdx));
+      const clipMaxDuration =
+        options?.clipDurationsSec?.[clipIndex] || options?.maxDurationSec || 0;
+
+      const start = Math.max(0, Number(item?.start_sec) || 0);
+      let end = Math.max(0, Number(item?.end_sec) || 0);
+      if (clipMaxDuration > 0) {
+        end = Math.min(end, clipMaxDuration);
+      }
+      const text = String(item?.text ?? '').replace(/\s+/g, ' ').trim();
+
+      return {
+        id: typeof item?.id === 'string' && item.id ? item.id : `sub-${idx + 1}`,
+        clip_index: clipIndex,
+        start_sec: Number(start.toFixed(2)),
+        end_sec: Number(end.toFixed(2)),
+        text,
+      };
+    })
+    .filter((sub) => sub.text.length > 0 && sub.end_sec - sub.start_sec >= 0.1);
+}
+
+/**
+ * Filters user-edited EDL cuts keeping only enabled valid segments.
+ * Preserves explicit user ordering when `preserveOrder` is true.
+ */
+export function filterEditedCuts(cuts: VideoCut[], preserveOrder = true): VideoCut[] {
+  const valid = cuts.filter(
+    (cut) =>
+      cut.enabled &&
+      Number.isFinite(cut.start_sec) &&
+      Number.isFinite(cut.end_sec) &&
+      cut.end_sec - cut.start_sec >= 0.15
+  );
+  if (preserveOrder) {
+    return valid;
+  }
+  return [...valid].sort((a, b) => a.start_sec - b.start_sec);
+}
+
+/**
+ * Projects raw-clip subtitle timestamps onto the final concatenated timeline
+ * according to the user's active & ordered EDL cuts.
+ */
+export function remapSubtitlesToFinalTimeline(
+  subtitles: SubtitleBlock[],
+  activeCuts: VideoCut[]
+): SubtitleBlock[] {
+  if (!subtitles.length || !activeCuts.length) return [];
+
+  const mapped: SubtitleBlock[] = [];
+  let cursorSec = 0;
+
+  for (const cut of activeCuts) {
+    const cutStart = Math.max(0, cut.start_sec);
+    const cutEnd = Math.max(cutStart, cut.end_sec);
+    const cutDuration = cutEnd - cutStart;
+    if (cutDuration < 0.15) continue;
+
+    const matching = subtitles
+      .filter(
+        (sub) =>
+          (sub.clip_index ?? 0) === (cut.clip_index ?? 0) &&
+          sub.end_sec > cutStart &&
+          sub.start_sec < cutEnd
+      )
+      .sort((a, b) => a.start_sec - b.start_sec);
+
+    for (const sub of matching) {
+      const clippedStart = Math.max(sub.start_sec, cutStart);
+      const clippedEnd = Math.min(sub.end_sec, cutEnd);
+      if (clippedEnd - clippedStart < 0.1) continue;
+
+      mapped.push({
+        id: `${sub.id}-${mapped.length + 1}`,
+        clip_index: cut.clip_index ?? 0,
+        start_sec: Number((cursorSec + (clippedStart - cutStart)).toFixed(2)),
+        end_sec: Number((cursorSec + (clippedEnd - cutStart)).toFixed(2)),
+        text: sub.text,
+      });
+    }
+
+    cursorSec += cutDuration;
+  }
+
+  return mapped;
+}
+
+function formatSrtTime(seconds: number): string {
+  const clamped = Math.max(0, seconds);
+  const totalMs = Math.round(clamped * 1000);
+  const hours = Math.floor(totalMs / 3_600_000);
+  const minutes = Math.floor((totalMs % 3_600_000) / 60_000);
+  const secs = Math.floor((totalMs % 60_000) / 1000);
+  const ms = totalMs % 1000;
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(
+    secs
+  ).padStart(2, '0')},${String(ms).padStart(3, '0')}`;
+}
+
+function formatAssTime(seconds: number): string {
+  const clamped = Math.max(0, seconds);
+  const totalCs = Math.round(clamped * 100);
+  const hours = Math.floor(totalCs / 360_000);
+  const minutes = Math.floor((totalCs % 360_000) / 6000);
+  const secs = Math.floor((totalCs % 6000) / 100);
+  const cs = totalCs % 100;
+  return `${hours}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}.${String(
+    cs
+  ).padStart(2, '0')}`;
+}
+
+export function buildSrtSubtitles(timelineSubtitles: SubtitleBlock[]): string {
+  return timelineSubtitles
+    .map(
+      (sub, idx) =>
+        `${idx + 1}\n${formatSrtTime(sub.start_sec)} --> ${formatSrtTime(sub.end_sec)}\n${sub.text}`
+    )
+    .join('\n\n');
+}
+
+export function buildAssSubtitles(
+  timelineSubtitles: SubtitleBlock[],
+  width = 1080,
+  height = 1920
+): string {
+  const fontSize = Math.round(width * 0.058);
+  const marginV = Math.round(height * 0.18);
+  const header = `[Script Info]
+ScriptType: v4.00+
+PlayResX: ${width}
+PlayResY: ${height}
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: TikTok,DejaVu Sans,${fontSize},&H00FFFFFF,&H0000F0FF,&H0005060A,&H80000000,-1,0,0,0,100,100,0,0,1,4,2,2,48,48,${marginV},1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`;
+
+  const lines = timelineSubtitles.map((sub) => {
+    const safeText = sub.text.replace(/[{}]/g, '').replace(/\r?\n/g, '\\N');
+    return `Dialogue: 0,${formatAssTime(sub.start_sec)},${formatAssTime(sub.end_sec)},TikTok,,0,0,0,,${safeText}`;
+  });
+
+  return `${header}\n${lines.join('\n')}\n`;
+}
+
 export function parseGeminiEditPlan(
   raw: unknown,
   maxDurationSecOrOptions?:
@@ -436,6 +649,7 @@ export function parseGeminiEditPlan(
         clipCount?: number;
         clipDurationsSec?: number[];
         preserveOrder?: boolean;
+        subtitlesEnabled?: boolean;
       }
 ): GeminiEditPlan {
   const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
@@ -456,6 +670,7 @@ export function parseGeminiEditPlan(
       start_sec: number;
       end_sec: number;
       motivo: string;
+      puntuacion_interes?: number;
     }>,
     options
   );
@@ -466,6 +681,10 @@ export function parseGeminiEditPlan(
 
   const totalSelected = calculateSelectedDuration(cuts);
   const targetDuration = Number(obj.duracion_objetivo_seg);
+  const includeSubtitles = options?.subtitlesEnabled === true;
+  const subtitulos = includeSubtitles
+    ? normalizeSubtitles(obj.subtitulos, options)
+    : undefined;
 
   return {
     etiqueta: sanitizeEtiqueta(String(obj.etiqueta || 'VIDEO')),
@@ -475,6 +694,7 @@ export function parseGeminiEditPlan(
         ? Math.round(targetDuration)
         : Math.round(totalSelected),
     cortes: cuts,
+    ...(subtitulos && subtitulos.length > 0 ? { subtitulos } : {}),
   };
 }
 
@@ -486,27 +706,87 @@ export function calculateSelectedDuration(cuts: VideoCut[]): number {
   return Number(total.toFixed(2));
 }
 
+export interface FfmpegPipelineOptions {
+  framingMode?: FramingMode;
+  silenceTrimEnabled?: boolean;
+  audioNormalizeEnabled?: boolean;
+  subtitleFileName?: string;
+  preserveOrder?: boolean;
+}
+
 export interface FfmpegFilterBuild {
   filterComplex: string;
   args: string[];
   activeCount: number;
 }
 
+function buildVideoSegmentFilter(
+  inputLabel: string,
+  idx: number,
+  start: string,
+  end: string,
+  profile: ExportQualityProfile,
+  framingMode?: FramingMode
+): string[] {
+  const w = profile.width;
+  const h = profile.height;
+  const fps = profile.fps;
+
+  if (framingMode === 'center_crop') {
+    return [
+      `[${inputLabel}]trim=start=${start}:end=${end},setpts=PTS-STARTPTS,` +
+        `scale=${w}:${h}:force_original_aspect_ratio=increase,` +
+        `crop=${w}:${h},fps=${fps},format=yuv420p,setsar=1[v${idx}]`,
+    ];
+  }
+
+  if (framingMode === 'blur_pad') {
+    return [
+      `[${inputLabel}]trim=start=${start}:end=${end},setpts=PTS-STARTPTS,split=2[bgsrc${idx}][fgsrc${idx}]`,
+      `[bgsrc${idx}]scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},boxblur=24:4[bg${idx}]`,
+      `[fgsrc${idx}]scale=${w}:${h}:force_original_aspect_ratio=decrease[fg${idx}]`,
+      `[bg${idx}][fg${idx}]overlay=(W-w)/2:(H-h)/2,fps=${fps},format=yuv420p,setsar=1[v${idx}]`,
+    ];
+  }
+
+  // Legacy default (decrease + black pad) when framingMode is omitted
+  return [
+    `[${inputLabel}]trim=start=${start}:end=${end},setpts=PTS-STARTPTS,` +
+      `scale=${w}:${h}:force_original_aspect_ratio=decrease,` +
+      `pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2:black,` +
+      `fps=${fps},format=yuv420p,setsar=1[v${idx}]`,
+  ];
+}
+
+function buildAudioSegmentFilter(
+  inputLabel: string,
+  idx: number,
+  start: string,
+  end: string,
+  silenceTrimEnabled: boolean
+): string {
+  const silenceFilter = silenceTrimEnabled
+    ? ',silenceremove=start_periods=1:start_duration=0.15:start_threshold=-42dB'
+    : '';
+  return (
+    `[${inputLabel}]atrim=start=${start}:end=${end},asetpts=PTS-STARTPTS` +
+    `${silenceFilter},aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a${idx}]`
+  );
+}
+
 /**
- * Single-clip FFmpeg filter_complex with quality-aware vertical scaling and encoding flags:
- * - 'mobile_fast': 720x1280, 30fps, -preset ultrafast, -crf 26, AAC 128k
- * - 'high_1080p': 1080x1920, 30fps, -preset veryfast, -crf 21, AAC 192k
+ * Single-clip FFmpeg filter_complex with quality-aware vertical scaling, optional framing mode,
+ * optional silence trimming, optional -14 LUFS loudness normalization, and optional burned subtitles.
  */
 export function buildFfmpegFilterComplex(
   cuts: VideoCut[],
   inputFileName = 'input.mp4',
   outputFileName = 'output.mp4',
   hasAudio = true,
-  exportQuality: ExportQuality = 'high_1080p'
+  exportQuality: ExportQuality = 'high_1080p',
+  pipelineOptions?: FfmpegPipelineOptions
 ): FfmpegFilterBuild {
-  const activeCuts = cuts
-    .filter((cut) => cut.enabled && cut.end_sec > cut.start_sec)
-    .sort((a, b) => a.start_sec - b.start_sec);
+  const activeCuts = filterEditedCuts(cuts, Boolean(pipelineOptions?.preserveOrder));
 
   if (activeCuts.length === 0) {
     throw new Error('Activa al menos un corte antes de renderizar el vídeo.');
@@ -515,21 +795,18 @@ export function buildFfmpegFilterComplex(
   const profile = EXPORT_QUALITY_PROFILES[normalizeExportQuality(exportQuality)];
   const filterParts: string[] = [];
   const concatInputs: string[] = [];
+  const silenceTrimEnabled = Boolean(pipelineOptions?.silenceTrimEnabled);
+  const audioNormalizeEnabled = Boolean(pipelineOptions?.audioNormalizeEnabled);
+  const subtitleFileName = pipelineOptions?.subtitleFileName?.trim() || '';
 
   activeCuts.forEach((cut, idx) => {
     const start = cut.start_sec.toFixed(3);
     const end = cut.end_sec.toFixed(3);
     filterParts.push(
-      `[0:v]trim=start=${start}:end=${end},setpts=PTS-STARTPTS,` +
-        `scale=${profile.width}:${profile.height}:force_original_aspect_ratio=decrease,` +
-        `pad=${profile.width}:${profile.height}:(ow-iw)/2:(oh-ih)/2:black,` +
-        `fps=${profile.fps},format=yuv420p,setsar=1[v${idx}]`
+      ...buildVideoSegmentFilter('0:v', idx, start, end, profile, pipelineOptions?.framingMode)
     );
     if (hasAudio) {
-      filterParts.push(
-        `[0:a]atrim=start=${start}:end=${end},asetpts=PTS-STARTPTS,` +
-          `aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a${idx}]`
-      );
+      filterParts.push(buildAudioSegmentFilter('0:a', idx, start, end, silenceTrimEnabled));
       concatInputs.push(`[v${idx}][a${idx}]`);
     } else {
       concatInputs.push(`[v${idx}]`);
@@ -542,6 +819,19 @@ export function buildFfmpegFilterComplex(
     filterParts.push(`${concatInputs.join('')}concat=n=${activeCuts.length}:v=1:a=0[outv]`);
   }
 
+  let finalVideoLabel = '[outv]';
+  if (subtitleFileName) {
+    const escapedSub = subtitleFileName.replace(/([\\':])/g, '\\$1');
+    filterParts.push(`[outv]subtitles=${escapedSub}[outv_sub]`);
+    finalVideoLabel = '[outv_sub]';
+  }
+
+  let finalAudioLabel = '[outa]';
+  if (hasAudio && audioNormalizeEnabled) {
+    filterParts.push('[outa]loudnorm=I=-14:TP=-1.5:LRA=11[outa_norm]');
+    finalAudioLabel = '[outa_norm]';
+  }
+
   const filterComplex = filterParts.join(';');
 
   const args = [
@@ -550,8 +840,8 @@ export function buildFfmpegFilterComplex(
     '-filter_complex',
     filterComplex,
     '-map',
-    '[outv]',
-    ...(hasAudio ? ['-map', '[outa]'] : ['-an']),
+    finalVideoLabel,
+    ...(hasAudio ? ['-map', finalAudioLabel] : ['-an']),
     '-c:v',
     'libx264',
     '-profile:v',
@@ -585,22 +875,23 @@ export function buildFfmpegFilterComplex(
 
 /**
  * Multi-clip FFmpeg filter_complex referencing each input by `clip_index` and normalizing
- * all clips according to `exportQuality` (720x1280 ultrafast or 1080x1920 high quality),
- * 30fps, yuv420p, and 48kHz stereo before concat.
+ * all clips according to `exportQuality`, framing mode, silence trim, -14 LUFS loudness,
+ * and optional burned subtitles.
  */
 export function buildMultiClipFfmpegFilterComplex(
   cuts: VideoCut[],
   inputFileNames: string[],
   outputFileName = 'output.mp4',
   includeAudio = true,
-  exportQuality: ExportQuality = 'high_1080p'
+  exportQuality: ExportQuality = 'high_1080p',
+  pipelineOptions?: FfmpegPipelineOptions
 ): FfmpegFilterBuild {
   if (inputFileNames.length === 0) {
     throw new Error('Se necesita al menos un archivo de entrada para renderizar.');
   }
 
-  // Preserve Gemini's narrative cut order across clips
-  const activeCuts = cuts.filter((cut) => cut.enabled && cut.end_sec > cut.start_sec);
+  // Preserve Gemini's or the user's cross-clip narrative cut order
+  const activeCuts = filterEditedCuts(cuts, true);
 
   if (activeCuts.length === 0) {
     throw new Error('Activa al menos un corte antes de renderizar el vídeo combinado.');
@@ -614,6 +905,9 @@ export function buildMultiClipFfmpegFilterComplex(
 
   const filterParts: string[] = [];
   const concatInputs: string[] = [];
+  const silenceTrimEnabled = Boolean(pipelineOptions?.silenceTrimEnabled);
+  const audioNormalizeEnabled = Boolean(pipelineOptions?.audioNormalizeEnabled);
+  const subtitleFileName = pipelineOptions?.subtitleFileName?.trim() || '';
 
   activeCuts.forEach((cut, idx) => {
     const clipIdx = Math.max(0, Math.min(inputFileNames.length - 1, cut.clip_index ?? 0));
@@ -621,16 +915,19 @@ export function buildMultiClipFfmpegFilterComplex(
     const end = cut.end_sec.toFixed(3);
 
     filterParts.push(
-      `[${clipIdx}:v]trim=start=${start}:end=${end},setpts=PTS-STARTPTS,` +
-        `scale=${profile.width}:${profile.height}:force_original_aspect_ratio=decrease,` +
-        `pad=${profile.width}:${profile.height}:(ow-iw)/2:(oh-ih)/2:black,` +
-        `fps=${profile.fps},format=yuv420p,setsar=1[v${idx}]`
+      ...buildVideoSegmentFilter(
+        `${clipIdx}:v`,
+        idx,
+        start,
+        end,
+        profile,
+        pipelineOptions?.framingMode
+      )
     );
 
     if (includeAudio) {
       filterParts.push(
-        `[${clipIdx}:a]atrim=start=${start}:end=${end},asetpts=PTS-STARTPTS,` +
-          `aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a${idx}]`
+        buildAudioSegmentFilter(`${clipIdx}:a`, idx, start, end, silenceTrimEnabled)
       );
       concatInputs.push(`[v${idx}][a${idx}]`);
     } else {
@@ -644,6 +941,19 @@ export function buildMultiClipFfmpegFilterComplex(
     filterParts.push(`${concatInputs.join('')}concat=n=${activeCuts.length}:v=1:a=0[outv]`);
   }
 
+  let finalVideoLabel = '[outv]';
+  if (subtitleFileName) {
+    const escapedSub = subtitleFileName.replace(/([\\':])/g, '\\$1');
+    filterParts.push(`[outv]subtitles=${escapedSub}[outv_sub]`);
+    finalVideoLabel = '[outv_sub]';
+  }
+
+  let finalAudioLabel = '[outa]';
+  if (includeAudio && audioNormalizeEnabled) {
+    filterParts.push('[outa]loudnorm=I=-14:TP=-1.5:LRA=11[outa_norm]');
+    finalAudioLabel = '[outa_norm]';
+  }
+
   const filterComplex = filterParts.join(';');
 
   const args = [
@@ -651,8 +961,8 @@ export function buildMultiClipFfmpegFilterComplex(
     '-filter_complex',
     filterComplex,
     '-map',
-    '[outv]',
-    ...(includeAudio ? ['-map', '[outa]'] : ['-an']),
+    finalVideoLabel,
+    ...(includeAudio ? ['-map', finalAudioLabel] : ['-an']),
     '-c:v',
     'libx264',
     '-profile:v',

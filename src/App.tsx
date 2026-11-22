@@ -40,6 +40,8 @@ export default function App() {
     handleChangeStylePreset,
     customInstruction,
     setCustomInstruction,
+    tiktokOptions,
+    handleChangeTikTokOptions,
     handleChangeExportQuality,
     cacheStats,
     refreshCacheStats,
@@ -61,6 +63,7 @@ export default function App() {
     persistSettings,
     stylePreset,
     customInstruction,
+    tiktokOptions,
     accessToken,
     clearAuthSession,
     refreshCacheStats,
@@ -74,7 +77,10 @@ export default function App() {
     setItems: queue.setItems,
     updateQueueItem: queue.updateQueueItem,
     exportQuality: settings.exportQuality,
+    tiktokOptions,
     cacheEditedVideo: queue.cacheEditedVideo,
+    appendAnalyticsRecord: queue.appendAnalyticsRecord,
+    maybePromptDriveUpload: queue.maybePromptDriveUpload,
     onError: setBannerError,
   });
 
@@ -190,6 +196,8 @@ export default function App() {
               onChangeStylePreset={handleChangeStylePreset}
               customInstruction={customInstruction}
               onChangeCustomInstruction={setCustomInstruction}
+              tiktokOptions={tiktokOptions}
+              onChangeTikTokOptions={handleChangeTikTokOptions}
               exportQuality={settings.exportQuality}
               onChangeExportQuality={handleChangeExportQuality}
               alreadyEditedCount={queue.alreadyEditedCount}
@@ -228,10 +236,14 @@ export default function App() {
               onSelectItem={studio.setSelectedStudioId}
               onToggleCut={studio.handleToggleCut}
               onSelectAllCuts={studio.handleSelectAllCuts}
+              onReorderCut={studio.handleReorderCut}
+              onUpdateCutTiming={studio.handleUpdateCutTiming}
               onRerenderItem={studio.handleRerenderItem}
               onRequestDriveUpload={queue.handleRequestDriveUpload}
               exportQuality={settings.exportQuality}
               onChangeExportQuality={handleChangeExportQuality}
+              tiktokOptions={tiktokOptions}
+              onChangeTikTokOptions={handleChangeTikTokOptions}
               isRendering={studio.isStudioRendering}
               renderProgress={studio.studioRenderProgress}
               canUploadToDrive={Boolean(isDriveConnected && settings.folderId)}
@@ -271,6 +283,8 @@ export default function App() {
         onChangeStylePreset={handleChangeStylePreset}
         customInstruction={customInstruction}
         onChangeCustomInstruction={setCustomInstruction}
+        tiktokOptions={tiktokOptions}
+        onChangeTikTokOptions={handleChangeTikTokOptions}
         exportQuality={settings.exportQuality}
         onChangeExportQuality={handleChangeExportQuality}
         onClose={() => queue.setMultiClipModalOpen(false)}

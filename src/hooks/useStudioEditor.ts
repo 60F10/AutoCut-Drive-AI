@@ -1,5 +1,14 @@
 import { useCallback, useState, type Dispatch, type MutableRefObject, type SetStateAction } from 'react';
-import type { ExportQuality, QueueItem } from '../types';
+import type {
+  AnalyticsRecord,
+  ExportQuality,
+  QueueItem,
+  TikTokEditOptions,
+} from '../types';
+import {
+  calculateSelectedDuration,
+  toLocalDateKey,
+} from '../utils/videoPipeline';
 import {
   renderCutsWithFfmpeg,
   renderMultiClipCutsWithFfmpeg,
@@ -11,7 +20,10 @@ interface UseStudioEditorOptions {
   setItems: Dispatch<SetStateAction<QueueItem[]>>;
   updateQueueItem: (itemId: string, patch: Partial<QueueItem>) => void;
   exportQuality: ExportQuality;
+  tiktokOptions: TikTokEditOptions;
   cacheEditedVideo: (itemId: string, blob: Blob, fileName: string) => Promise<void>;
+  appendAnalyticsRecord: (record: AnalyticsRecord) => void;
+  maybePromptDriveUpload: (itemId: string, fileName: string, sizeBytes: number) => void;
   onError: (message: string | null) => void;
 }
 
@@ -20,7 +32,10 @@ export function useStudioEditor({
   setItems,
   updateQueueItem,
   exportQuality,
+  tiktokOptions,
   cacheEditedVideo,
+  appendAnalyticsRecord,
+  maybePromptDriveUpload,
   onError,
 }: UseStudioEditorOptions) {
   const [selectedStudioId, setSelectedStudioId] = useState<string | null>(null);
@@ -65,6 +80,90 @@ export function useStudioEditor({
     [setItems]
   );
 
+  const handleReorderCut = useCallback(
+    (itemId: string, cutId: string, direction: -1 | 1) => {
+      setItems((prev) =>
+        prev.map((item) => {
+          if (item.id !== itemId || !item.analysis) return item;
+          const cortes = [...item.analysis.cortes];
+          const idx = cortes.findIndex((c) => c.id === cutId);
+          const targetIdx = idx + direction;
+          if (idx < 0 || targetIdx < 0 || targetIdx >= cortes.length) return item;
+          const temp = cortes[idx];
+          cortes[idx] = cortes[targetIdx];
+          cortes[targetIdx] = temp;
+          return {
+            ...item,
+            analysis: {
+              ...item.analysis,
+              cortes,
+            },
+          };
+        })
+      );
+    },
+    [setItems]
+  );
+
+  const handleUpdateCutTiming = useCallback(
+    (itemId: string, cutId: string, patch: { start_sec?: number; end_sec?: number }) => {
+      setItems((prev) =>
+        prev.map((item) => {
+          if (item.id !== itemId || !item.analysis) return item;
+          return {
+            ...item,
+            analysis: {
+              ...item.analysis,
+              cortes: item.analysis.cortes.map((cut) => {
+                if (cut.id !== cutId) return cut;
+                const clipMax = item.isMultiClip
+                  ? item.sourceClips?.[cut.clip_index]?.durationSec
+                  : item.durationSec;
+
+                let nextStart =
+                  typeof patch.start_sec === 'number' && Number.isFinite(patch.start_sec)
+                    ? patch.start_sec
+                    : cut.start_sec;
+                let nextEnd =
+                  typeof patch.end_sec === 'number' && Number.isFinite(patch.end_sec)
+                    ? patch.end_sec
+                    : cut.end_sec;
+
+                nextStart = Math.max(0, Math.round(nextStart * 10) / 10);
+                nextEnd = Math.max(0.2, Math.round(nextEnd * 10) / 10);
+
+                if (clipMax && clipMax > 0.2) {
+                  nextEnd = Math.min(nextEnd, Math.round(clipMax * 10) / 10);
+                  nextStart = Math.min(nextStart, Math.max(0, Math.round((clipMax - 0.2) * 10) / 10));
+                }
+
+                if (patch.start_sec !== undefined && nextStart >= nextEnd - 0.2) {
+                  nextStart = Math.max(0, Math.round((nextEnd - 0.2) * 10) / 10);
+                } else if (patch.end_sec !== undefined && nextEnd <= nextStart + 0.2) {
+                  nextEnd = Math.round((nextStart + 0.2) * 10) / 10;
+                  if (clipMax && clipMax > 0.2) {
+                    nextEnd = Math.min(nextEnd, Math.round(clipMax * 10) / 10);
+                  }
+                }
+
+                if (nextEnd <= nextStart) {
+                  return cut;
+                }
+
+                return {
+                  ...cut,
+                  start_sec: nextStart,
+                  end_sec: nextEnd,
+                };
+              }),
+            },
+          };
+        })
+      );
+    },
+    [setItems]
+  );
+
   const handleRerenderItem = useCallback(
     async (itemId: string) => {
       const target = itemsRef.current.find((i) => i.id === itemId);
@@ -79,19 +178,33 @@ export function useStudioEditor({
 
       if (!isMulti && !target.rawBlob) return;
 
+      const isFirstRender = !target.completedAt;
       onError(null);
       setIsStudioRendering(true);
-      setStudioRenderProgress({ percent: 5, message: 'Preparando re-renderizado...' });
+      setStudioRenderProgress({
+        percent: 5,
+        message: isFirstRender
+          ? 'Iniciando renderizado final TikTok...'
+          : 'Preparando re-renderizado...',
+      });
 
       try {
         const activeQuality = exportQuality;
+        const effectiveTikTokOptions: TikTokEditOptions = { ...tiktokOptions };
+        const renderConfig = {
+          tiktokOptions: effectiveTikTokOptions,
+          subtitles: target.analysis.subtitulos,
+          preserveOrder: true,
+        };
+
         updateQueueItem(itemId, {
           exportQuality: activeQuality,
+          tiktokOptions: effectiveTikTokOptions,
           stage: 'rendering',
           stageDetail:
             activeQuality === 'mobile_fast'
-              ? 'Re-renderizando cortes en 720p móvil...'
-              : 'Re-renderizando cortes en 1080p HD...',
+              ? 'Renderizando vídeo final en 720p móvil...'
+              : 'Renderizando vídeo final en 1080p HD TikTok...',
           progress: 5,
         });
 
@@ -110,7 +223,8 @@ export function useStudioEditor({
                   progress: progress.percent,
                 });
               },
-              activeQuality
+              activeQuality,
+              renderConfig
             )
           : await renderCutsWithFfmpeg(
               target.rawBlob!,
@@ -124,7 +238,8 @@ export function useStudioEditor({
                   progress: progress.percent,
                 });
               },
-              activeQuality
+              activeQuality,
+              renderConfig
             );
 
         const editedUrl = URL.createObjectURL(editedBlob);
@@ -133,6 +248,7 @@ export function useStudioEditor({
         }
 
         const fileName = target.outputFileName || `${target.originalName}_EDITADO.mp4`;
+        const completedAt = Date.now();
 
         updateQueueItem(itemId, {
           editedBlob,
@@ -140,25 +256,52 @@ export function useStudioEditor({
           editedSizeBytes: editedBlob.size,
           cachedInIndexedDb: true,
           stage: 'completed',
-          stageDetail: 'Nuevo render guardado en caché local y listo para subir a Drive',
+          stageDetail: 'Vídeo final renderizado y guardado en caché local (Galería y Estudio)',
           progress: 100,
+          completedAt: target.completedAt ?? completedAt,
         });
 
         await cacheEditedVideo(itemId, editedBlob, fileName);
+
+        const finalDuration = calculateSelectedDuration(target.analysis.cortes);
+        appendAnalyticsRecord({
+          id: `ana-${itemId}`,
+          dateKey: toLocalDateKey(target.completedAt ?? completedAt),
+          processedAt: target.completedAt ?? completedAt,
+          etiqueta: target.analysis.etiqueta,
+          rawDurationSec: target.durationSec || finalDuration,
+          editedDurationSec: finalDuration,
+          isMultiClip: Boolean(target.isMultiClip),
+          clipCount: target.isMultiClip ? target.sourceClips?.length ?? 2 : 1,
+        });
+
+        if (isFirstRender) {
+          maybePromptDriveUpload(itemId, fileName, editedBlob.size);
+        }
       } catch (err) {
         const message =
-          err instanceof Error ? err.message : 'Error al re-renderizar los cortes.';
+          err instanceof Error ? err.message : 'Error al renderizar los cortes.';
         onError(message);
         updateQueueItem(itemId, {
-          stage: 'error',
+          stage: target.completedAt ? 'completed' : 'review',
           errorMessage: message,
+          stageDetail: message,
         });
       } finally {
         setIsStudioRendering(false);
         setStudioRenderProgress(null);
       }
     },
-    [itemsRef, exportQuality, updateQueueItem, cacheEditedVideo, onError]
+    [
+      itemsRef,
+      exportQuality,
+      tiktokOptions,
+      updateQueueItem,
+      cacheEditedVideo,
+      appendAnalyticsRecord,
+      maybePromptDriveUpload,
+      onError,
+    ]
   );
 
   return {
@@ -168,6 +311,8 @@ export function useStudioEditor({
     studioRenderProgress,
     handleToggleCut,
     handleSelectAllCuts,
+    handleReorderCut,
+    handleUpdateCutTiming,
     handleRerenderItem,
   };
 }

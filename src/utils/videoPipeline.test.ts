@@ -1,13 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  DEFAULT_TIKTOK_OPTIONS,
   EDIT_STYLE_PRESETS,
   MOBILE_RAM_WARNING_BYTES,
+  buildAssSubtitles,
   buildCombinedEditedFilename,
   buildEditedFilename,
   buildFfmpegFilterComplex,
   buildGeminiSystemPrompt,
   buildMultiClipFfmpegFilterComplex,
+  buildSrtSubtitles,
   calculateSelectedDuration,
   computeQueueAnalytics,
   detectDefaultExportQuality,
@@ -15,15 +18,18 @@ import {
   evaluateHeavyVideoWarning,
   exceedsMobileRamThreshold,
   extractDriveFolderId,
+  filterEditedCuts,
   formatBytes,
   formatDurationHuman,
   formatSeconds,
   normalizeStylePreset,
+  normalizeTikTokOptions,
   parseGeminiEditPlan,
+  remapSubtitlesToFinalTimeline,
   sanitizeEtiqueta,
   toLocalDateKey,
 } from './videoPipeline';
-import type { AnalyticsRecord, DriveFileMeta, VideoCut } from '../types';
+import type { AnalyticsRecord, DriveFileMeta, SubtitleBlock, VideoCut } from '../types';
 
 test('extractDriveFolderId parses raw IDs and full Google Drive URLs', () => {
   assert.equal(
@@ -294,6 +300,138 @@ test('evaluateHeavyVideoWarning detects heavy size, 4K resolution, and long dura
   assert.equal(heavy4k.reasons.length, 3);
   assert.ok(heavy4k.message?.includes('4K'));
   assert.ok(heavy4k.message?.includes('720p móvil'));
+});
+
+test('TikTok pipeline defaults have subtitles OFF, silence trim ON, loudnorm ON, and center_crop framing', () => {
+  assert.equal(DEFAULT_TIKTOK_OPTIONS.subtitlesEnabled, false);
+  assert.equal(DEFAULT_TIKTOK_OPTIONS.silenceTrimEnabled, true);
+  assert.equal(DEFAULT_TIKTOK_OPTIONS.audioNormalizeEnabled, true);
+  assert.equal(DEFAULT_TIKTOK_OPTIONS.framingMode, 'center_crop');
+
+  const normalized = normalizeTikTokOptions({ framingMode: 'blur_pad', subtitlesEnabled: true });
+  assert.equal(normalized.framingMode, 'blur_pad');
+  assert.equal(normalized.subtitlesEnabled, true);
+  assert.equal(normalized.silenceTrimEnabled, true);
+  assert.equal(normalized.audioNormalizeEnabled, true);
+});
+
+test('Gemini prompt and parser skip subtitles when OFF and include interest scores + subtitles when ON', () => {
+  const promptNoSubs = buildGeminiSystemPrompt('single', 'funny_jumpcut', '', {
+    subtitlesEnabled: false,
+    silenceTrimEnabled: true,
+  });
+  assert.ok(promptNoSubs.includes('puntuacion_interes'));
+  assert.ok(!promptNoSubs.includes('SUBTÍTULOS AUTOMÁTICOS ACTIVADOS'));
+
+  const promptWithSubs = buildGeminiSystemPrompt('single', 'funny_jumpcut', '', {
+    subtitlesEnabled: true,
+    silenceTrimEnabled: true,
+  });
+  assert.ok(promptWithSubs.includes('SUBTÍTULOS AUTOMÁTICOS ACTIVADOS'));
+  assert.ok(promptWithSubs.includes('"subtitulos"'));
+
+  const mockGeminiResponse = JSON.stringify({
+    etiqueta: 'COCINA',
+    titulo_interno: 'Fail épico con batidora',
+    duracion_objetivo_seg: 25,
+    cortes: [
+      { clip_index: 0, start_sec: 1.0, end_sec: 6.0, motivo: 'Gancho', puntuacion_interes: 9 },
+      { clip_index: 0, start_sec: 12.0, end_sec: 18.0, motivo: 'Remate', puntuacion_interes: 10 },
+    ],
+    subtitulos: [
+      { clip_index: 0, start_sec: 1.5, end_sec: 3.5, text: 'Mira esto' },
+      { clip_index: 0, start_sec: 13.0, end_sec: 16.0, text: 'Se explotó todo' },
+    ],
+  });
+
+  // With subtitles OFF: completely strips/skips subtitles
+  const planNoSubs = parseGeminiEditPlan(mockGeminiResponse, { subtitlesEnabled: false });
+  assert.equal(planNoSubs.subtitulos, undefined);
+  assert.equal(planNoSubs.cortes[0].puntuacion_interes, 9);
+  assert.equal(planNoSubs.cortes[1].puntuacion_interes, 10);
+
+  // With subtitles ON: preserves structured subtitles
+  const planWithSubs = parseGeminiEditPlan(mockGeminiResponse, { subtitlesEnabled: true });
+  assert.equal(planWithSubs.subtitulos?.length, 2);
+  assert.equal(planWithSubs.subtitulos?.[1].text, 'Se explotó todo');
+});
+
+test('filterEditedCuts and remapSubtitlesToFinalTimeline respect user-disabled, trimmed, and reordered EDL cuts', () => {
+  const userEditedCuts: VideoCut[] = [
+    // User moved Cut 2 BEFORE Cut 1 and disabled Cut 3
+    { id: 'c2', clip_index: 0, start_sec: 20.0, end_sec: 25.0, motivo: 'Remate al inicio', puntuacion_interes: 10, enabled: true },
+    { id: 'c3', clip_index: 0, start_sec: 30.0, end_sec: 34.0, motivo: 'Descartado por usuario', puntuacion_interes: 5, enabled: false },
+    { id: 'c1', clip_index: 0, start_sec: 2.0, end_sec: 6.0, motivo: 'Contexto después', puntuacion_interes: 8, enabled: true },
+    { id: 'c-bad', clip_index: 0, start_sec: 8.0, end_sec: 8.05, motivo: 'Demasiado corto', enabled: true },
+  ];
+
+  const active = filterEditedCuts(userEditedCuts, true);
+  assert.deepEqual(
+    active.map((c) => c.id),
+    ['c2', 'c1']
+  );
+
+  const rawSubs: SubtitleBlock[] = [
+    { id: 's1', clip_index: 0, start_sec: 2.5, end_sec: 5.5, text: 'Contexto' },
+    { id: 's2', clip_index: 0, start_sec: 21.0, end_sec: 24.0, text: 'Remate' },
+    { id: 's3', clip_index: 0, start_sec: 31.0, end_sec: 33.0, text: 'No debe aparecer' },
+  ];
+
+  const remapped = remapSubtitlesToFinalTimeline(rawSubs, active);
+  assert.equal(remapped.length, 2);
+  // First cut in EDL is 20..25 (5s), so s2 (21..24) maps to 1..4s
+  assert.equal(remapped[0].text, 'Remate');
+  assert.equal(remapped[0].start_sec, 1);
+  assert.equal(remapped[0].end_sec, 4);
+  // Second cut in EDL starts at offset 5s (raw 2..6), so s1 (2.5..5.5) maps to 5.5..8.5s
+  assert.equal(remapped[1].text, 'Contexto');
+  assert.equal(remapped[1].start_sec, 5.5);
+  assert.equal(remapped[1].end_sec, 8.5);
+
+  const srt = buildSrtSubtitles(remapped);
+  assert.ok(srt.includes('00:00:01,000 --> 00:00:04,000'));
+  assert.ok(srt.includes('Remate'));
+  assert.ok(!srt.includes('No debe aparecer'));
+
+  const ass = buildAssSubtitles(remapped, 1080, 1920);
+  assert.ok(ass.includes('PlayResX: 1080'));
+  assert.ok(ass.includes('Dialogue: 0,0:00:01.00,0:00:04.00,TikTok'));
+});
+
+test('FFmpeg pipeline applies framingMode, silence trim, -14 LUFS loudnorm, and optional burned subtitles', () => {
+  const cuts: VideoCut[] = [
+    { id: 'c2', clip_index: 0, start_sec: 15.0, end_sec: 20.0, motivo: 'Gancho', enabled: true },
+    { id: 'c1', clip_index: 0, start_sec: 2.0, end_sec: 6.0, motivo: 'Desarrollo', enabled: true },
+  ];
+
+  // Subtitles OFF + blur_pad + loudnorm + silence trim + preserve user EDL order
+  const noSubsBlur = buildFfmpegFilterComplex(cuts, 'in.mp4', 'out.mp4', true, 'high_1080p', {
+    framingMode: 'blur_pad',
+    silenceTrimEnabled: true,
+    audioNormalizeEnabled: true,
+    preserveOrder: true,
+  });
+  assert.ok(noSubsBlur.filterComplex.startsWith('[0:v]trim=start=15.000:end=20.000'));
+  assert.ok(noSubsBlur.filterComplex.includes('boxblur=24:4'));
+  assert.ok(noSubsBlur.filterComplex.includes('overlay=(W-w)/2:(H-h)/2'));
+  assert.ok(noSubsBlur.filterComplex.includes('silenceremove=start_periods=1'));
+  assert.ok(noSubsBlur.filterComplex.includes('loudnorm=I=-14:TP=-1.5:LRA=11[outa_norm]'));
+  assert.ok(!noSubsBlur.filterComplex.includes('subtitles='));
+  assert.equal(noSubsBlur.args[noSubsBlur.args.indexOf('-map') + 1], '[outv]');
+
+  // Subtitles ON + center_crop + no loudnorm + no silence trim
+  const withSubsCrop = buildFfmpegFilterComplex(cuts, 'in.mp4', 'out.mp4', true, 'mobile_fast', {
+    framingMode: 'center_crop',
+    silenceTrimEnabled: false,
+    audioNormalizeEnabled: false,
+    subtitleFileName: 'subs_job1.ass',
+    preserveOrder: true,
+  });
+  assert.ok(withSubsCrop.filterComplex.includes('scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280'));
+  assert.ok(withSubsCrop.filterComplex.includes('[outv]subtitles=subs_job1.ass[outv_sub]'));
+  assert.ok(!withSubsCrop.filterComplex.includes('silenceremove='));
+  assert.ok(!withSubsCrop.filterComplex.includes('loudnorm='));
+  assert.equal(withSubsCrop.args[withSubsCrop.args.indexOf('-map') + 1], '[outv_sub]');
 });
 
 test('formatSeconds, formatDurationHuman, and formatBytes produce clean deterministic labels', () => {

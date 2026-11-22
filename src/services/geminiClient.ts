@@ -15,6 +15,7 @@ async function consumeAnalyzeStream(
         clipCount?: number;
         clipDurationsSec?: number[];
         preserveOrder?: boolean;
+        subtitlesEnabled?: boolean;
       }
     | undefined,
   onStatusUpdate?: (message: string, progress: number) => void
@@ -99,6 +100,8 @@ async function consumeAnalyzeStream(
 export interface AnalyzeStyleOptions {
   stylePreset?: EditStylePreset;
   customInstruction?: string;
+  subtitlesEnabled?: boolean;
+  silenceTrimEnabled?: boolean;
 }
 
 export async function analyzeVideoWithGemini(
@@ -122,6 +125,8 @@ export async function analyzeVideoWithGemini(
   if (styleOptions?.customInstruction?.trim()) {
     formData.append('customInstruction', styleOptions.customInstruction.trim());
   }
+  formData.append('subtitlesEnabled', String(Boolean(styleOptions?.subtitlesEnabled)));
+  formData.append('silenceTrimEnabled', String(styleOptions?.silenceTrimEnabled !== false));
 
   onStatusUpdate?.('Enviando vídeo al servidor para Gemini Files API...', 12);
 
@@ -130,7 +135,14 @@ export async function analyzeVideoWithGemini(
     body: formData,
   });
 
-  return consumeAnalyzeStream(response, durationSec, onStatusUpdate);
+  return consumeAnalyzeStream(
+    response,
+    {
+      maxDurationSec: durationSec,
+      subtitlesEnabled: Boolean(styleOptions?.subtitlesEnabled),
+    },
+    onStatusUpdate
+  );
 }
 
 export interface MultiClipInput {
@@ -166,6 +178,8 @@ export async function analyzeMultiClipWithGemini(
   if (styleOptions?.customInstruction?.trim()) {
     formData.append('customInstruction', styleOptions.customInstruction.trim());
   }
+  formData.append('subtitlesEnabled', String(Boolean(styleOptions?.subtitlesEnabled)));
+  formData.append('silenceTrimEnabled', String(styleOptions?.silenceTrimEnabled !== false));
 
   onStatusUpdate?.(`Enviando ${clips.length} clips al servidor para Gemini Files API...`, 8);
 
@@ -180,6 +194,7 @@ export async function analyzeMultiClipWithGemini(
       clipCount: clips.length,
       clipDurationsSec: clips.map((c) => c.durationSec ?? 0),
       preserveOrder: true,
+      subtitlesEnabled: Boolean(styleOptions?.subtitlesEnabled),
     },
     onStatusUpdate
   );

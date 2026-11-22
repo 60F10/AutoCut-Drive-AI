@@ -80,9 +80,8 @@ async function waitForGeminiFileActive(
   return fileInfo;
 }
 
-const CUT_RESPONSE_SCHEMA = {
-  type: Type.OBJECT,
-  properties: {
+function buildCutResponseSchema(includeSubtitles: boolean) {
+  const properties: Record<string, unknown> = {
     etiqueta: {
       type: Type.STRING,
       description:
@@ -118,13 +117,55 @@ const CUT_RESPONSE_SCHEMA = {
             type: Type.STRING,
             description: 'Motivo breve por el que se conserva este fragmento.',
           },
+          puntuacion_interes: {
+            type: Type.INTEGER,
+            description: 'Puntuación de interés/gancho del 1 al 10 para TikTok/Reels.',
+          },
         },
-        required: ['clip_index', 'start_sec', 'end_sec', 'motivo'],
+        required: ['clip_index', 'start_sec', 'end_sec', 'motivo', 'puntuacion_interes'],
       },
     },
-  },
-  required: ['etiqueta', 'titulo_interno', 'duracion_objetivo_seg', 'cortes'],
-};
+  };
+
+  const required = ['etiqueta', 'titulo_interno', 'duracion_objetivo_seg', 'cortes'];
+
+  if (includeSubtitles) {
+    properties.subtitulos = {
+      type: Type.ARRAY,
+      description:
+        'Bloques breves de subtítulos (2-5 palabras) sincronizados con el habla dentro de los cortes seleccionados.',
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          clip_index: {
+            type: Type.INTEGER,
+            description: 'Índice entero del clip de vídeo de origen.',
+          },
+          start_sec: {
+            type: Type.NUMBER,
+            description: 'Segundo de inicio exacto de la frase en el vídeo bruto.',
+          },
+          end_sec: {
+            type: Type.NUMBER,
+            description: 'Segundo de fin exacto de la frase en el vídeo bruto.',
+          },
+          text: {
+            type: Type.STRING,
+            description: 'Texto breve y legible del subtítulo (2 a 5 palabras).',
+          },
+        },
+        required: ['clip_index', 'start_sec', 'end_sec', 'text'],
+      },
+    };
+    required.push('subtitulos');
+  }
+
+  return {
+    type: Type.OBJECT,
+    properties,
+    required,
+  };
+}
 
 async function startServer() {
   const app = express();
@@ -151,6 +192,8 @@ async function startServer() {
       typeof req.body?.customInstruction === 'string'
         ? req.body.customInstruction.trim().slice(0, 400)
         : '';
+    const subtitlesEnabled = req.body?.subtitlesEnabled === 'true';
+    const silenceTrimEnabled = req.body?.silenceTrimEnabled !== 'false';
     const durationSec = Number(req.body?.durationSec) || 0;
     const originalName = typeof req.body?.fileName === 'string' ? req.body.fileName : tempFile.originalname;
     const mimeType =
@@ -220,7 +263,10 @@ async function startServer() {
 Usa siempre "clip_index": 0 en cada corte.
 Selecciona los mejores momentos siguiendo el estilo indicado en las instrucciones del sistema y respetando estrictamente el esquema JSON.${instructionNote}`;
 
-      const systemInstruction = buildGeminiSystemPrompt('single', stylePreset, customInstruction);
+      const systemInstruction = buildGeminiSystemPrompt('single', stylePreset, customInstruction, {
+        subtitlesEnabled,
+        silenceTrimEnabled,
+      });
 
       const response = await ai.models.generateContent({
         model,
@@ -231,7 +277,7 @@ Selecciona los mejores momentos siguiendo el estilo indicado en las instruccione
         config: {
           systemInstruction,
           responseMimeType: 'application/json',
-          responseSchema: CUT_RESPONSE_SCHEMA,
+          responseSchema: buildCutResponseSchema(subtitlesEnabled),
         },
       });
 
@@ -305,6 +351,8 @@ Selecciona los mejores momentos siguiendo el estilo indicado en las instruccione
       typeof req.body?.customInstruction === 'string'
         ? req.body.customInstruction.trim().slice(0, 400)
         : '';
+    const subtitlesEnabled = req.body?.subtitlesEnabled === 'true';
+    const silenceTrimEnabled = req.body?.silenceTrimEnabled !== 'false';
     const projectName = typeof req.body?.projectName === 'string' ? req.body.projectName.trim() : '';
 
     let clipMetadata: Array<{ name?: string; durationSec?: number }> = [];
@@ -422,7 +470,10 @@ Selecciona los mejores momentos siguiendo el estilo indicado en las instruccione
           `Recuerda devolver "clip_index" (0 a ${activeParts.length - 1}), "start_sec", "end_sec" y "motivo" en cada corte.${instructionNote}`
       );
 
-      const systemInstruction = buildGeminiSystemPrompt('multi', stylePreset, customInstruction);
+      const systemInstruction = buildGeminiSystemPrompt('multi', stylePreset, customInstruction, {
+        subtitlesEnabled,
+        silenceTrimEnabled,
+      });
 
       const response = await ai.models.generateContent({
         model,
@@ -430,7 +481,7 @@ Selecciona los mejores momentos siguiendo el estilo indicado en las instruccione
         config: {
           systemInstruction,
           responseMimeType: 'application/json',
-          responseSchema: CUT_RESPONSE_SCHEMA,
+          responseSchema: buildCutResponseSchema(subtitlesEnabled),
         },
       });
 

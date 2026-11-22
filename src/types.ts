@@ -8,10 +8,20 @@ export type EditStylePreset = 'funny_jumpcut' | 'agile_vlog' | 'express_summary'
 
 export type ExportQuality = 'mobile_fast' | 'high_1080p';
 
+export type FramingMode = 'center_crop' | 'blur_pad';
+
+export interface TikTokEditOptions {
+  subtitlesEnabled: boolean;
+  silenceTrimEnabled: boolean;
+  audioNormalizeEnabled: boolean;
+  framingMode: FramingMode;
+}
+
 export type QueueStage =
   | 'pending'
   | 'downloading'
   | 'analyzing'
+  | 'review'
   | 'rendering'
   | 'uploading'
   | 'completed'
@@ -42,7 +52,16 @@ export interface VideoCut {
   start_sec: number;
   end_sec: number;
   motivo: string;
+  puntuacion_interes?: number;
   enabled: boolean;
+}
+
+export interface SubtitleBlock {
+  id: string;
+  clip_index: number;
+  start_sec: number;
+  end_sec: number;
+  text: string;
 }
 
 export interface GeminiEditPlan {
@@ -50,6 +69,7 @@ export interface GeminiEditPlan {
   titulo_interno: string;
   duracion_objetivo_seg: number;
   cortes: VideoCut[];
+  subtitulos?: SubtitleBlock[];
 }
 
 export interface SourceClipRef {
@@ -91,6 +111,7 @@ export interface QueueItem {
   stylePreset?: EditStylePreset;
   customInstruction?: string;
   exportQuality?: ExportQuality;
+  tiktokOptions?: TikTokEditOptions;
   isMultiClip?: boolean;
   projectName?: string;
   sourceClips?: SourceClipRef[];

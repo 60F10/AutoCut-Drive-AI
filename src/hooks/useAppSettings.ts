@@ -1,10 +1,17 @@
 import { useCallback, useState } from 'react';
-import type { AppSettings, EditStylePreset, ExportQuality } from '../types';
+import type {
+  AppSettings,
+  EditStylePreset,
+  ExportQuality,
+  TikTokEditOptions,
+} from '../types';
 import {
+  DEFAULT_TIKTOK_OPTIONS,
   detectDefaultExportQuality,
   extractDriveFolderId,
   normalizeExportQuality,
   normalizeStylePreset,
+  normalizeTikTokOptions,
 } from '../utils/videoPipeline';
 import {
   MAX_CACHED_VIDEOS,
@@ -14,6 +21,7 @@ import {
 
 const SETTINGS_STORAGE_KEY = 'autocut_drive_ai_settings_v1';
 const STYLE_PRESET_STORAGE_KEY = 'autocut_drive_ai_style_preset_v1';
+const TIKTOK_OPTIONS_STORAGE_KEY = 'autocut_drive_ai_tiktok_options_v1';
 
 export function createDefaultSettings(): AppSettings {
   return {
@@ -66,10 +74,22 @@ function loadInitialStylePreset(): EditStylePreset {
   }
 }
 
+function loadInitialTikTokOptions(): TikTokEditOptions {
+  try {
+    const raw = window.localStorage.getItem(TIKTOK_OPTIONS_STORAGE_KEY);
+    if (!raw) return { ...DEFAULT_TIKTOK_OPTIONS };
+    const parsed = JSON.parse(raw) as Partial<TikTokEditOptions>;
+    return normalizeTikTokOptions(parsed);
+  } catch {
+    return { ...DEFAULT_TIKTOK_OPTIONS };
+  }
+}
+
 export function useAppSettings() {
   const [settings, setSettings] = useState<AppSettings>(loadInitialSettings);
   const [stylePreset, setStylePreset] = useState<EditStylePreset>(loadInitialStylePreset);
   const [customInstruction, setCustomInstruction] = useState('');
+  const [tiktokOptions, setTikTokOptions] = useState<TikTokEditOptions>(loadInitialTikTokOptions);
   const [cacheStats, setCacheStats] = useState<VideoCacheStats>({
     count: 0,
     totalBytes: 0,
@@ -104,6 +124,18 @@ export function useAppSettings() {
     }
   }, []);
 
+  const handleChangeTikTokOptions = useCallback((patch: Partial<TikTokEditOptions>) => {
+    setTikTokOptions((prev) => {
+      const next = normalizeTikTokOptions({ ...prev, ...patch });
+      try {
+        window.localStorage.setItem(TIKTOK_OPTIONS_STORAGE_KEY, JSON.stringify(next));
+      } catch {
+        // Ignore storage quota errors
+      }
+      return next;
+    });
+  }, []);
+
   const handleChangeExportQuality = useCallback(
     (quality: ExportQuality) => {
       persistSettings({
@@ -122,6 +154,8 @@ export function useAppSettings() {
     handleChangeStylePreset,
     customInstruction,
     setCustomInstruction,
+    tiktokOptions,
+    handleChangeTikTokOptions,
     handleChangeExportQuality,
     cacheStats,
     refreshCacheStats,

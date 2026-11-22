@@ -19,6 +19,7 @@ export function createDemoQueueItems(): QueueItem[] {
         start_sec: 1.2,
         end_sec: 5.8,
         motivo: 'Gancho inicial rápido enseñando el plátano y prometiendo el mejor batido en 10 segundos',
+        puntuacion_interes: 9,
         enabled: true,
       },
       {
@@ -27,6 +28,7 @@ export function createDemoQueueItems(): QueueItem[] {
         start_sec: 14.4,
         end_sec: 19.6,
         motivo: 'Comentario espontáneo mientras cae media bolsa de avena fuera del vaso',
+        puntuacion_interes: 8,
         enabled: true,
       },
       {
@@ -35,6 +37,7 @@ export function createDemoQueueItems(): QueueItem[] {
         start_sec: 32.1,
         end_sec: 38.9,
         motivo: 'Momento fail: enciende la batidora sin encajar bien la tapa y pega un salto',
+        puntuacion_interes: 10,
         enabled: true,
       },
       {
@@ -43,6 +46,7 @@ export function createDemoQueueItems(): QueueItem[] {
         start_sec: 54.0,
         end_sec: 61.5,
         motivo: 'Risa incrédula limpiando la salpicadura de la cámara y queja cómica',
+        puntuacion_interes: 8,
         enabled: true,
       },
       {
@@ -51,8 +55,15 @@ export function createDemoQueueItems(): QueueItem[] {
         start_sec: 78.3,
         end_sec: 84.1,
         motivo: 'Remate final probando el batido con cara seria: "Bueno, al menos está brutal"',
+        puntuacion_interes: 9,
         enabled: true,
       },
+    ],
+    subtitulos: [
+      { id: 'demo-sub-1', clip_index: 0, start_sec: 1.4, end_sec: 4.5, text: 'El mejor batido en 10 segundos' },
+      { id: 'demo-sub-2', clip_index: 0, start_sec: 15.0, end_sec: 18.8, text: 'Vale, se me fue la avena' },
+      { id: 'demo-sub-3', clip_index: 0, start_sec: 33.2, end_sec: 37.5, text: 'LA TAPA NO ESTABA PUESTA' },
+      { id: 'demo-sub-4', clip_index: 0, start_sec: 79.0, end_sec: 83.6, text: 'Bueno, al menos está brutal' },
     ],
   };
 
@@ -67,6 +78,7 @@ export function createDemoQueueItems(): QueueItem[] {
         start_sec: 2.4,
         end_sec: 8.6,
         motivo: 'Gancho desde el coche presumiendo de que no va a llover ni una gota',
+        puntuacion_interes: 9,
         enabled: true,
       },
       {
@@ -75,6 +87,7 @@ export function createDemoQueueItems(): QueueItem[] {
         start_sec: 1.0,
         end_sec: 9.2,
         motivo: 'Corte seco a tormenta torrencial dos minutos después corriendo con paraguas roto',
+        puntuacion_interes: 10,
         enabled: true,
       },
       {
@@ -83,6 +96,7 @@ export function createDemoQueueItems(): QueueItem[] {
         start_sec: 41.5,
         end_sec: 49.0,
         motivo: 'Queja cómica intentando secarse con servilletas del coche',
+        puntuacion_interes: 8,
         enabled: true,
       },
       {
@@ -91,6 +105,7 @@ export function createDemoQueueItems(): QueueItem[] {
         start_sec: 35.8,
         end_sec: 45.4,
         motivo: 'Remate brindando con café de máquina mientras sale el sol justo al volver',
+        puntuacion_interes: 9,
         enabled: true,
       },
     ],

@@ -1,6 +1,11 @@
 import { useEffect, useState } from 'react';
 import { AlertTriangle, ArrowDown, ArrowUp, Layers, Sparkles, X } from 'lucide-react';
-import type { EditStylePreset, ExportQuality, QueueItem } from '../types';
+import type {
+  EditStylePreset,
+  ExportQuality,
+  QueueItem,
+  TikTokEditOptions,
+} from '../types';
 import {
   exceedsMobileRamThreshold,
   formatBytes,
@@ -15,6 +20,8 @@ interface MultiClipComposerModalProps {
   onChangeStylePreset: (preset: EditStylePreset) => void;
   customInstruction: string;
   onChangeCustomInstruction: (value: string) => void;
+  tiktokOptions: TikTokEditOptions;
+  onChangeTikTokOptions: (patch: Partial<TikTokEditOptions>) => void;
   exportQuality: ExportQuality;
   onChangeExportQuality: (quality: ExportQuality) => void;
   onClose: () => void;
@@ -34,6 +41,8 @@ export function MultiClipComposerModal({
   onChangeStylePreset,
   customInstruction,
   onChangeCustomInstruction,
+  tiktokOptions,
+  onChangeTikTokOptions,
   exportQuality,
   onChangeExportQuality,
   onClose,
@@ -147,12 +156,14 @@ export function MultiClipComposerModal({
             </p>
           </div>
 
-          {/* Style Preset, Quick Instruction & 720p/1080p Quality */}
+          {/* Style Preset, TikTok Options, Quick Instruction & 720p/1080p Quality */}
           <EditStyleControls
             stylePreset={stylePreset}
             onChangeStylePreset={onChangeStylePreset}
             customInstruction={customInstruction}
             onChangeCustomInstruction={onChangeCustomInstruction}
+            tiktokOptions={tiktokOptions}
+            onChangeTikTokOptions={onChangeTikTokOptions}
             exportQuality={exportQuality}
             onChangeExportQuality={onChangeExportQuality}
             compact
