@@ -80,6 +80,80 @@ export function sanitizeModelName(model, fallback = 'gemini-3.8-flash') {
   return cleaned;
 }
 
+export function normalizeWhisperDevice(raw, fallback = 'cpu') {
+  const cleaned = String(raw || '').trim().toLowerCase();
+  if (cleaned === 'auto' || cleaned === 'cuda' || cleaned === 'cpu') {
+    return cleaned;
+  }
+  return fallback;
+}
+
+export function buildTranscriptCacheFilename(driveFileId, modifiedTime = '') {
+  const safeId = String(driveFileId || 'unknown').replace(/[^A-Za-z0-9_-]/g, '_');
+  const safeMod = String(modifiedTime || 'nomod').replace(/[^A-Za-z0-9_-]/g, '_');
+  return `transcript_${safeId}_${safeMod}.json`;
+}
+
+/**
+ * Atomic double-read job claim shared by `pc-worker.mjs` and `cloud-worker.mjs`:
+ * 1. Re-read the manifest and verify `status === "pending"` (and optional `canClaim`).
+ * 2. Write `status: "processing"`, `claimedBy: "pc" | "cloud"`, and `claimedAt` (ISO).
+ * 3. Re-read the manifest and confirm `claimedBy` and `claimedAt` match before proceeding.
+ */
+export async function claimJobAtomically({
+  readManifest,
+  writeManifest,
+  workerId,
+  canClaim,
+  extraPatch,
+  nowIso,
+}) {
+  const latest = await readManifest();
+  if (!latest || typeof latest !== 'object') {
+    return { claimed: false, manifest: latest ?? null };
+  }
+  if (latest.status !== 'pending') {
+    return { claimed: false, manifest: latest };
+  }
+  if (typeof canClaim === 'function' && !canClaim(latest)) {
+    return { claimed: false, manifest: latest };
+  }
+
+  const claimedAt =
+    typeof nowIso === 'function'
+      ? nowIso()
+      : typeof nowIso === 'string' && nowIso.trim()
+      ? nowIso.trim()
+      : new Date().toISOString();
+
+  const candidate = {
+    ...latest,
+    ...(extraPatch && typeof extraPatch === 'object' ? extraPatch : {}),
+    status: 'processing',
+    claimedBy: workerId,
+    claimedAt,
+    errorMessage: undefined,
+  };
+  delete candidate.errorMessage;
+
+  await writeManifest(candidate);
+
+  const confirmed = await readManifest();
+  const matched = Boolean(
+    confirmed &&
+      typeof confirmed === 'object' &&
+      confirmed.status === 'processing' &&
+      confirmed.claimedBy === workerId &&
+      confirmed.claimedAt === claimedAt
+  );
+
+  return {
+    claimed: matched,
+    manifest: confirmed ?? null,
+    claimedAt,
+  };
+}
+
 /**
  * Splits a Whisper transcript JSON into sentence units with deterministic IDs `C{clip}-F{nnn}`.
  * Cuts a sentence after `.`, `?`, `!` or whenever the silence gap between consecutive words > 0.7 s.
@@ -313,9 +387,13 @@ export async function runWhisperTranscription({
   wavPath,
   outJsonPath,
   whisperModel = 'small',
+  whisperDevice = normalizeWhisperDevice(process.env.WHISPER_DEVICE, 'cpu'),
+  whisperComputeType = '',
   lang = 'es',
+  onWhisperFallbackCpu,
 }) {
-  const res = await runProcess(pythonBin, [
+  const device = normalizeWhisperDevice(whisperDevice, 'cpu');
+  const args = [
     scriptPath,
     '--in',
     wavPath,
@@ -325,7 +403,19 @@ export async function runWhisperTranscription({
     whisperModel,
     '--lang',
     lang,
-  ]);
+    '--device',
+    device,
+  ];
+  if (whisperComputeType && String(whisperComputeType).trim()) {
+    args.push('--compute-type', String(whisperComputeType).trim());
+  }
+
+  const res = await runProcess(pythonBin, args);
+  if (typeof res.stderr === 'string' && res.stderr.includes('fallback-cpu')) {
+    if (typeof onWhisperFallbackCpu === 'function') {
+      await onWhisperFallbackCpu();
+    }
+  }
   if (res.code !== 0) {
     throw new Error(`Fallo en Whisper (${whisperModel}): ${summarizeFfmpegError(res.stderr)}`);
   }
@@ -1101,7 +1191,7 @@ Devuelve JSON con:
   });
 }
 
-// ---------- Full Orchestrator (used by worker/cloud-worker.mjs) ----------
+// ---------- Full Orchestrator (shared by worker/cloud-worker.mjs and worker/pc-worker.mjs) ----------
 
 export async function analyzeCloudJob({
   manifest,
@@ -1113,12 +1203,17 @@ export async function analyzeCloudJob({
   pythonBin = process.env.AUTOCUT_PYTHON_BIN || 'python3',
   transcribeScriptPath,
   whisperModel = 'small',
+  whisperDevice = normalizeWhisperDevice(process.env.WHISPER_DEVICE, 'cpu'),
+  whisperComputeType = '',
   getCachedTranscript,
   saveCachedTranscript,
   onProgress,
+  onWhisperFallbackCpu,
 }) {
   if (!apiKey) {
-    throw new Error('[Análisis IA] Falta el secreto GEMINI_API_KEY en GitHub Actions.');
+    throw new Error(
+      '[Análisis IA] Falta la clave GEMINI_API_KEY (configúrala en worker/.env.local o en GitHub Secrets).'
+    );
   }
 
   const options = manifest.options || {};
@@ -1180,7 +1275,10 @@ export async function analyzeCloudJob({
           wavPath,
           outJsonPath: jsonPath,
           whisperModel,
+          whisperDevice,
+          whisperComputeType,
           lang: 'es',
+          onWhisperFallbackCpu,
         });
         await fsp.rm(wavPath, { force: true }).catch(() => {});
       }
@@ -1335,4 +1433,147 @@ export async function analyzeCloudJob({
     },
     cortes: converted.cortes,
   };
+}
+
+export const analyzeJob = analyzeCloudJob;
+
+/**
+ * Shared analyze job lifecycle orchestration used by both `cloud-worker.mjs` and `pc-worker.mjs`:
+ * validates inputs, resolves/downloads sources, runs Whisper + Gemini Phases A/B/C, updates progress,
+ * and writes either `status: "analyzed"` with `plan` or `status: "error"` with `errorMessage`.
+ */
+export async function orchestrateAnalyzeJob({
+  manifest,
+  target = 'cloud',
+  workDir,
+  apiKey,
+  missingApiKeyMessage,
+  ffmpegBin = 'ffmpeg',
+  ffprobeBin = resolveFfprobeBin(ffmpegBin),
+  pythonBin = process.env.AUTOCUT_PYTHON_BIN || 'python3',
+  transcribeScriptPath,
+  whisperModel = 'small',
+  whisperDevice = 'cpu',
+  progressThrottleMs = 10_000,
+  prepareSourcePaths,
+  getCachedTranscript,
+  saveCachedTranscript,
+  patchManifest,
+  onLog,
+  onWhisperFallbackCpu,
+}) {
+  const jobId = String(manifest.jobId || 'unknown').slice(0, 48);
+  const tJobStart = Date.now();
+  let lastProgressWriteMs = 0;
+  let lastStage = '';
+
+  const workingManifest = {
+    ...manifest,
+    kind: 'analyze',
+    target,
+    status: 'processing',
+    stage: 'descarga',
+    progress: 5,
+  };
+  delete workingManifest.errorMessage;
+
+  const writeProgress = async (stage, progress, force = false) => {
+    const now = Date.now();
+    const stageChanged = Boolean(stage && stage !== lastStage);
+    workingManifest.stage = stage || workingManifest.stage;
+    workingManifest.progress = Math.max(0, Math.min(100, Math.round(progress)));
+    if (!force && !stageChanged && now - lastProgressWriteMs < progressThrottleMs) {
+      return;
+    }
+    lastStage = workingManifest.stage;
+    lastProgressWriteMs = now;
+    await patchManifest(workingManifest);
+  };
+
+  onLog?.('INFO', 'analyze_started', {
+    jobId,
+    kind: 'analyze',
+    clips: manifest.sourceFiles?.length ?? 0,
+    whisperModel,
+    whisperDevice,
+  });
+
+  try {
+    await writeProgress('descarga', 5, true);
+
+    if (!apiKey) {
+      throw new Error(
+        missingApiKeyMessage ||
+          '[Análisis IA] Falta la clave GEMINI_API_KEY (configúrala en worker/.env.local o en GitHub Secrets).'
+      );
+    }
+
+    if (!Array.isArray(manifest.sourceFiles) || manifest.sourceFiles.length === 0) {
+      throw new Error('[Drive] El manifiesto de análisis no contiene archivos fuente.');
+    }
+
+    const sourcePaths = await prepareSourcePaths({
+      manifest,
+      workDir,
+      writeProgress,
+    });
+
+    const plan = await analyzeCloudJob({
+      manifest,
+      sourcePaths,
+      workDir,
+      apiKey,
+      ffmpegBin,
+      ffprobeBin,
+      pythonBin,
+      transcribeScriptPath,
+      whisperModel,
+      whisperDevice,
+      getCachedTranscript,
+      saveCachedTranscript,
+      onWhisperFallbackCpu,
+      onProgress: async ({ stage, progress }) => {
+        await writeProgress(stage, progress, false);
+        onLog?.('INFO', 'analyze_progress', { jobId, stage, progress });
+      },
+    });
+
+    workingManifest.status = 'analyzed';
+    workingManifest.stage = 'revision';
+    workingManifest.progress = 100;
+    workingManifest.plan = plan;
+    workingManifest.finishedAt = new Date().toISOString();
+    delete workingManifest.errorMessage;
+
+    await patchManifest(workingManifest);
+    onLog?.('INFO', 'analyze_completed', {
+      jobId,
+      kind: 'analyze',
+      cuts: plan.cortes.length,
+      coherent: Boolean(plan.revision?.coherente),
+      sec: Number(((Date.now() - tJobStart) / 1000).toFixed(1)),
+      progress: 100,
+    });
+    return plan;
+  } catch (err) {
+    const rawMsg = err instanceof Error ? err.message : String(err);
+    const message = rawMsg.startsWith('[') ? rawMsg : `[Análisis IA] ${rawMsg}`;
+    onLog?.('ERROR', 'analyze_failed', {
+      jobId,
+      kind: 'analyze',
+      stage: workingManifest.stage,
+      sec: Number(((Date.now() - tJobStart) / 1000).toFixed(1)),
+    });
+    try {
+      await patchManifest({
+        ...workingManifest,
+        status: 'error',
+        errorMessage: message.slice(0, 480),
+        finishedAt: new Date().toISOString(),
+      });
+    } catch {
+      onLog?.('ERROR', 'analyze_error_patch_failed', { jobId });
+    }
+    throw err;
+  }
 }

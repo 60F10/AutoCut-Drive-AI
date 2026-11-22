@@ -1,26 +1,26 @@
 # AutoCut Drive AI
 
-Aplicación web progresiva (**PWA**) en React + TypeScript que convierte automáticamente vídeos brutos almacenados en **Google Drive** (o en tu móvil) en piezas verticales **9:16** listas para **TikTok, Instagram Reels y YouTube Shorts**, usando **transcripción real con Whisper**, **análisis multimodal de vídeo y audio con Gemini** y **renderizado nativo en la nube con GitHub Actions a coste 0 €** (sin PC encendido y sin tarjeta).
+Aplicación web progresiva (**PWA**) en React + TypeScript que convierte automáticamente vídeos brutos almacenados en **Google Drive** (o en tu móvil) en piezas verticales **9:16** listas para **TikTok, Instagram Reels y YouTube Shorts**, usando **tu PC Windows con GPU NVIDIA como motor principal** (Whisper CUDA + Gemini + FFmpeg NVENC) y **GitHub Actions como respaldo automático en la nube** cuando el PC esté apagado — todo a **coste 0 €**.
 
 ---
 
 ## Propuesta de valor
 
-- **Historias con principio, nudo y final (sin inventar subtítulos)**: el análisis multimodal se ejecuta en **GitHub Actions** con **faster-whisper** (transcripción real palabra a palabra en español) + **Gemini viendo el vídeo con audio** en 3 fases (A por clip, B guion global, C revisión de coherencia), con sub-cortes automáticos en pausas y subtítulos sincronizados al milisegundo.
-- **Coste 0 € y sin límites de RAM de iOS**: tanto el análisis multimodal como el renderizado pesado con **FFmpeg nativo** (sincronía exacta A/V, HDR→SDR BT.709, `-14 LUFS` en 2 pasadas) corren en **GitHub Actions** directamente desde el móvil (gratis e ilimitado en repositorio público con 4 vCPU / 16 GB RAM, o 2.000 min/mes en repositorio privado).
-- **Alternativas siempre disponibles**:
-  - **Análisis rápido (sin audio)**: análisis instantáneo en el navegador extrayendo 12–16 fotogramas ligeros (`< 2 MB`, sin subir el vídeo bruto al servidor ni provocar errores 413).
-  - **Render secundario**: **worker local de PC Windows** (`h264_nvenc` / `libx264`) y **FFmpeg.wasm en el móvil** para clips cortos.
-- **Control creativo total antes de renderizar**: el Estudio muestra el título, gancho, resumen de historia, notas de revisión, función narrativa y texto hablado real de cada corte, con botones **«Ver guion completo»** y **«Rehacer historia»** (reutilizando la transcripción en caché de Drive).
+- **PC primero + Nube como respaldo automático (0 €)**: la PWA lee el latido del PC (`_AutoCut_Jobs/_worker_status.json`). Si el PC está **En línea**, tanto el análisis multimodal como el renderizado se ejecutan en tu GPU NVIDIA en segundos; si el PC está **Apagado**, el modo **Automático** redirige sin fricción a **GitHub Actions**.
+- **Historias con principio, nudo y final (sin inventar subtítulos)**: transcripción real palabra a palabra con **faster-whisper** (CUDA `float16` en PC, `int8` en nube, con caché compartida en Drive) + **Gemini viendo el vídeo con audio** en 3 fases (A por clip, B guion global, C revisión de coherencia), con sub-cortes automáticos en pausas y subtítulos sincronizados al milisegundo.
+- **Calidad nativa sin límites de RAM de iOS**: tanto el PC (`h264_nvenc` / `libx264`) como GitHub Actions (`libx264`) comparten el mismo motor **FFmpeg nativo** (`worker/render-core.mjs`: sincronía exacta A/V, HDR→SDR BT.709, `-14 LUFS` en 2 pasadas y ASS real).
+- **Control total y fallback manual**: desde **Ajustes → Motor de proceso** puedes elegir **Automático (recomendado)**, **Solo PC** o **Solo nube**. Si un trabajo enviado al PC queda pendiente cuando el PC se apaga o tarda más de 3 min, aparece el botón **«Enviar a la nube»** para redirigirlo con un toque.
+- **Alternativas locales en el móvil**: **Análisis rápido (sin audio)** con 12–16 fotogramas ligeros (`< 2 MB`) y **FFmpeg.wasm** para clips cortos.
 
 ---
 
-## Arquitectura híbrida: Analizar → Revisar → Renderizar (0 €)
+## Arquitectura híbrida: PC Principal + Respaldo Nube (0 €)
 
 ```text
                        ┌────────────────────────────────────────────────┐
                        │                  GOOGLE DRIVE                  │
                        │  • Brutos originales (.mp4/.mov/.webm)         │
+                       │  • _AutoCut_Jobs/_worker_status.json (latido)  │
                        │  • _AutoCut_Jobs/analyze_<id>.json (análisis)  │
                        │  • _AutoCut_Jobs/job_<id>.json     (render)    │
                        │  • _AutoCut_Jobs/_cache/transcript_*.json      │
@@ -28,32 +28,29 @@ Aplicación web progresiva (**PWA**) en React + TypeScript que convierte automá
                        │  • _AutoCut_Output/ (MP4 terminados)           │
                        └──────────┬───────────────────────▲─────────────┘
                                   │                       │
-            Escaneo, lectura,     │                       │  Streaming a disco +
-            manifiestos y temp    ▼                       │  caché Whisper + 8 MB
+            Escaneo, lectura,     │                       │  Reclamación atómica
+            manifiestos y temp    ▼                       │  (claimedBy: pc|cloud)
 ┌───────────────────────────────────────────┐   ┌─────────┴─────────────────────────────┐
-│          MÓVIL / NAVEGADOR (PWA)          │   │  GITHUB ACTIONS (Principal · 0 €)     │
-│                                           │   │  .github/workflows/cloud-render.yml   │
-│ 1. Analizar en la nube (recomendado):     │   │  worker/cloud-worker.mjs              │
-│    sube analyze_<id>.json + dispatch      ├──►│                                       │
-│    (o «Análisis rápido» local < 2 MB)     │   │ [kind: "analyze"] (~3–7 min / 10 min) │
-│                                           │   │  1. Descarga + orden cronológico      │
-│ 2. Estudio interactivo de cortes (EDL):   │   │  2. faster-whisper int8 + caché Drive │
-│    • Gancho, historia, guion y revisión   │   │  3. Proxy 640p 2fps → Gemini A/B/C    │
-│    • «Rehacer historia» sin re-transcribir│   │  4. Sub-cortes en silencios > 0.45 s  │
-│    • Activar, reordenar y afinar tiempos  │   │  5. Guarda plan (status: "analyzed")  │
-│                                           │   │                                       │
-│ 3. Renderizar en la nube (recomendado):   ├──►│ [kind: "render"]                      │
-│    sube job_<id>.json + dispatch          │   │  1. FFmpeg nativo 9:16 + HDR→SDR      │
-│    • Otras opciones: PC Windows / móvil   │   │  2. Loudnorm 2 pasadas + ASS real     │
-└───────────────────────────────────────────┘   │  3. Sube MP4 a _AutoCut_Output/       │
-                                                └───────────────────────────────────────┘
+│          MÓVIL / NAVEGADOR (PWA)          │   │ 1) PC WINDOWS (Principal · GPU · 0 €) │
+│                                           │   │    worker/pc-worker.mjs (arranque Win)│
+│ 1. Analizar [PC | NUBE]:                  ├──►│    • Whisper CUDA float16 + caché     │
+│    • Auto: PC si latido < 3 min, si no    │   │    • Gemini Fases A/B/C               │
+│      GitHub Actions                       │   │    • FFmpeg NVENC 9:16 + HDR→SDR      │
+│    • O «Análisis rápido» local (< 2 MB)   │   ├───────────────────────────────────────┤
+│                                           │   │ 2) GITHUB ACTIONS (Respaldo · 0 €)    │
+│ 2. Estudio interactivo de cortes (EDL):   │   │    .github/workflows/cloud-render.yml │
+│    • Gancho, historia, guion y revisión   ├──►│    worker/cloud-worker.mjs            │
+│    • «Rehacer historia» sin re-transcribir│   │    • Whisper CPU int8 + caché Drive   │
+│                                           │   │    • Gemini Fases A/B/C               │
+│ 3. Renderizar [PC | NUBE]:                │   │    • FFmpeg libx264 9:16 + HDR→SDR    │
+│    • Otras opciones: forzar PC/nube/móvil │   └───────────────────────────────────────┘
+└───────────────────────────────────────────┘
 ```
 
 ### Cuándo usar cada modo
-- **Análisis en la nube — Whisper + Gemini (Principal · ~3–7 min para 10 min de bruto)**: recomendado para vlogs, vídeos hablados y **Multi-Clip** donde importa que el montaje cuente una historia real con subtítulos fieles al audio. Ver guía en **[`worker/CLOUD_SETUP.md`](./worker/CLOUD_SETUP.md)**.
-- **Análisis rápido (sin audio)**: útil para clips muy cortos o visuales donde quieres una propuesta instantánea en el navegador sin lanzar GitHub Actions.
-- **Render en la nube — GitHub Actions (Principal · 0 €)**: ideal para vídeos largos, >100 MB, HDR de iPhone y Multi-Clip en 1080p/720p sin encender el PC ni agotar la RAM de iOS.
-- **Worker PC Windows (`Otras opciones → Enviar a PC`)**: alternativa local con aceleración GPU NVIDIA (`h264_nvenc`). Ignora automáticamente los trabajos de análisis (`kind: "analyze"`). Ver **[`worker/README.md`](./worker/README.md)**.
+- **PC Windows — Motor principal (GPU NVIDIA · 0 €)**: el más rápido y preciso (`faster-whisper` `medium` en CUDA + `h264_nvenc`). Sigue la guía paso a paso en **[`worker/README.md`](./worker/README.md)** (instalación de CUDA, `.env.local` y arranque automático con `install-autostart.ps1`).
+- **GitHub Actions — Respaldo automático en la nube (0 €, sin PC)**: entra automáticamente cuando el PC está apagado o si seleccionas **Solo nube** / **«Enviar a la nube»**. Ver **[`worker/CLOUD_SETUP.md`](./worker/CLOUD_SETUP.md)**.
+- **Análisis rápido (sin audio)**: propuesta instantánea en el navegador con 12–16 fotogramas (`< 2 MB`) para clips muy cortos.
 - **Móvil / PWA (`Otras opciones → Renderizar en este móvil`)**: útil para clips individuales cortos con `@ffmpeg/core@0.12.6` (`dist/esm` single-thread) e IndexedDB.
 
 ---
@@ -179,15 +176,17 @@ No hace falta modificar código:
 │   └── cloud-render.yml           # Workflow GitHub Actions (Python + faster-whisper + FFmpeg + Node)
 ├── public/                        # Iconos PWA optimizados, manifest.json y favicon
 ├── worker/
-│   ├── transcribe.py              # CLI faster-whisper (int8 CPU, word timestamps + VAD)
-│   ├── analyze-core.mjs           # Motor multimodal (proxy 640p, Gemini Files API, Fases A/B/C, sub-cortes)
+│   ├── transcribe.py              # CLI faster-whisper (CUDA float16 con fallback automático a CPU int8)
+│   ├── analyze-core.mjs           # Motor multimodal compartido (proxy 640p, Gemini A/B/C, claim atómico, sub-cortes)
 │   ├── render-core.mjs            # Núcleo compartido FFmpeg (sincronía A/V, HDR→SDR, ASS, loudnorm 2p)
-│   ├── cloud-worker.mjs           # Dispatcher GitHub Actions (kind: "analyze" vs "render", caché Drive, logs privados)
-│   ├── pc-worker.mjs              # Worker nativo PC Windows (NVENC / libx264, ignora cloud y analyze)
+│   ├── pc-worker.mjs              # Worker principal PC Windows (análisis + render NVENC, heartbeat y logs rotativos)
+│   ├── cloud-worker.mjs           # Worker respaldo GitHub Actions (análisis + render, caché Drive, logs privados)
 │   ├── worker.test.mjs            # Tests unitarios offline de render-core, analyze-core, pc-worker y cloud-worker
-│   ├── CLOUD_SETUP.md             # Guía completa para activar análisis y render en la nube (0 €)
-│   ├── start-worker.example.ps1   # Plantilla PowerShell para arranque en Windows
-│   └── README.md                  # Guía del worker opcional para Windows 11
+│   ├── .env.example               # Plantilla sin secretos para worker/.env.local
+│   ├── install-autostart.ps1      # Instalador automático de tarea programada en Windows
+│   ├── uninstall-autostart.ps1    # Desinstalador de la tarea programada en Windows
+│   ├── CLOUD_SETUP.md             # Guía completa para activar respaldo en la nube (0 €)
+│   └── README.md                  # Guía de instalación paso a paso del worker principal en PC Windows
 ├── server.ts                      # Proxy Express seguro (Gemini rápido < 2 MB + /api/cloud-render/dispatch)
 ├── src/
 │   ├── App.tsx                    # Layout principal, navegación y gestión de errores

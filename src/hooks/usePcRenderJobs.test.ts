@@ -5,15 +5,20 @@ import {
   BASE_REMOTE_POLL_INTERVAL_MS,
   CLOUD_WORKFLOW_FAILED_MESSAGE,
   MAX_REMOTE_POLL_BACKOFF_MS,
+  PC_HEARTBEAT_ONLINE_THRESHOLD_MS,
+  PC_JOB_FALLBACK_THRESHOLD_MS,
   RemoteJobsPoller,
   STUCK_CLOUD_JOB_THRESHOLD_MS,
+  canFallbackPcJobToCloud,
   computeNextPollBackoffMs,
   findMatchingWorkflowRun,
   hasActiveRemoteJobs,
   inspectStuckCloudJobs,
   isBackoffTriggerHttpStatus,
+  isPcWorkerOnline,
   isSafeGitHubRunUrl,
   isValidJobFileId,
+  resolveProcessTarget,
   type CloudWorkflowFailureRecord,
 } from '../utils/remoteJobsSync';
 
@@ -386,3 +391,122 @@ test('findMatchingWorkflowRun matches display_title by jobFileId and enforces sa
   );
   assert.deepEqual(missing, { status: null, conclusion: null, htmlUrl: null });
 });
+
+test('PC heartbeat detection (< 3 min), processEngine routing (auto/pc/cloud), and PC-to-cloud manual fallback', () => {
+  const nowMs = Date.parse('2026-11-22T15:00:00.000Z');
+  assert.equal(PC_HEARTBEAT_ONLINE_THRESHOLD_MS, 180_000);
+  assert.equal(PC_JOB_FALLBACK_THRESHOLD_MS, 180_000);
+
+  // Online when lastSeen is 90 s ago
+  assert.equal(
+    isPcWorkerOnline(
+      {
+        lastSeen: new Date(nowMs - 90_000).toISOString(),
+        version: '2.0',
+        encoder: 'h264_nvenc',
+        whisperDevice: 'cuda',
+        whisperModel: 'medium',
+        busy: false,
+      },
+      nowMs
+    ),
+    true
+  );
+
+  // Offline when lastSeen is >= 3 min ago or missing
+  assert.equal(
+    isPcWorkerOnline(
+      {
+        lastSeen: new Date(nowMs - 180_001).toISOString(),
+        version: '2.0',
+        encoder: 'h264_nvenc',
+        whisperDevice: 'cuda',
+        whisperModel: 'medium',
+        busy: false,
+      },
+      nowMs
+    ),
+    false
+  );
+  assert.equal(isPcWorkerOnline(null, nowMs), false);
+
+  // Auto mode routes to PC when online, cloud when offline; explicit modes override
+  assert.equal(resolveProcessTarget({ processEngine: 'auto', pcOnline: true }), 'pc');
+  assert.equal(resolveProcessTarget({ processEngine: 'auto', pcOnline: false }), 'cloud');
+  assert.equal(resolveProcessTarget({ processEngine: 'pc', pcOnline: false }), 'pc');
+  assert.equal(resolveProcessTarget({ processEngine: 'cloud', pcOnline: true }), 'cloud');
+
+  // Manual fallback button visibility for pending PC jobs:
+  // Shown ONLY when cloud render is configured, PC is offline, job is pending for PC, and waited > 3 min
+  assert.equal(
+    canFallbackPcJobToCloud({
+      target: 'pc',
+      status: 'pending',
+      createdAt: new Date(nowMs - 185_000).toISOString(),
+      pcOnline: false,
+      cloudRenderConfigured: true,
+      nowMs,
+    }),
+    true
+  );
+  // Hidden if waited <= 3 min
+  assert.equal(
+    canFallbackPcJobToCloud({
+      target: 'pc',
+      status: 'pending',
+      createdAt: new Date(nowMs - 30_000).toISOString(),
+      pcOnline: false,
+      cloudRenderConfigured: true,
+      nowMs,
+    }),
+    false
+  );
+  // Hidden if PC is online even after > 3 min
+  assert.equal(
+    canFallbackPcJobToCloud({
+      target: 'pc',
+      status: 'pending',
+      createdAt: new Date(nowMs - 185_000).toISOString(),
+      pcOnline: true,
+      cloudRenderConfigured: true,
+      nowMs,
+    }),
+    false
+  );
+  // Hidden if cloud render is not configured
+  assert.equal(
+    canFallbackPcJobToCloud({
+      target: 'pc',
+      status: 'pending',
+      createdAt: new Date(nowMs - 300_000).toISOString(),
+      pcOnline: false,
+      cloudRenderConfigured: false,
+      nowMs,
+    }),
+    false
+  );
+  // Never shown for already-processing or cloud jobs
+  assert.equal(
+    canFallbackPcJobToCloud({
+      target: 'pc',
+      status: 'processing',
+      createdAt: new Date(nowMs - 300_000).toISOString(),
+      pcOnline: false,
+      cloudRenderConfigured: true,
+      nowMs,
+    }),
+    false
+  );
+  assert.equal(
+    canFallbackPcJobToCloud({
+      target: 'cloud',
+      status: 'pending',
+      createdAt: new Date(nowMs - 300_000).toISOString(),
+      pcOnline: false,
+      cloudRenderConfigured: true,
+      nowMs,
+    }),
+    false
+  );
+});
+

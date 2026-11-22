@@ -175,6 +175,7 @@ export default function App() {
     accessToken,
     isDriveConnected,
     cloudRenderConfigured,
+    processEngine: settings.processEngine,
     geminiModel: settings.model,
     whisperModel: settings.whisperModel,
     stylePreset,
@@ -208,6 +209,7 @@ export default function App() {
       settings: {
         model: settings.model,
         exportQuality: settings.exportQuality,
+        processEngine: settings.processEngine,
         autoWatchEnabled: settings.autoWatchEnabled,
         watchIntervalSec: settings.watchIntervalSec,
         autoUploadEnabled: settings.autoUploadEnabled,
@@ -443,6 +445,8 @@ export default function App() {
               pcJobs={pcRender.pcJobs}
               pcOutputs={pcRender.pcOutputs}
               cloudRenderConfigured={cloudRenderConfigured}
+              isPcOnline={pcRender.isPcOnline}
+              resolvedTarget={pcRender.resolvedTarget}
               sendingAnalyzeId={pcRender.sendingAnalyzeId}
               cloudUploadProgress={pcRender.cloudUploadProgress}
               isSyncingPcJobs={pcRender.isSyncingPcJobs}
@@ -451,11 +455,15 @@ export default function App() {
               pcOutputPreviewUrls={pcRender.pcOutputPreviewUrls}
               failedDispatchJobFileIds={pcRender.failedDispatchJobFileIds}
               retryingDispatchJobFileId={pcRender.retryingDispatchJobFileId}
+              fallingBackJobFileId={pcRender.fallingBackJobFileId}
               onSyncPcJobs={() => void pcRender.syncPcJobs(false)}
               onDownloadPcOutput={(file, triggerSave) =>
                 void pcRender.downloadPcOutputVideo(file, triggerSave)
               }
               onRetryCloudDispatch={(jobFileId) => void pcRender.retryCloudDispatch(jobFileId)}
+              onFallbackPcJobToCloud={(jobFileId, kind) =>
+                void pcRender.fallbackPcJobToCloud(jobFileId, kind)
+              }
             />
           )}
 
@@ -474,17 +482,22 @@ export default function App() {
               pcJobs={pcRender.pcJobs}
               pcOutputs={pcRender.pcOutputs}
               cloudRenderConfigured={cloudRenderConfigured}
+              isPcOnline={pcRender.isPcOnline}
               isSyncingPcJobs={pcRender.isSyncingPcJobs}
               lastPcSyncTime={pcRender.lastPcSyncTime}
               downloadingOutputId={pcRender.downloadingOutputId}
               pcOutputPreviewUrls={pcRender.pcOutputPreviewUrls}
               failedDispatchJobFileIds={pcRender.failedDispatchJobFileIds}
               retryingDispatchJobFileId={pcRender.retryingDispatchJobFileId}
+              fallingBackJobFileId={pcRender.fallingBackJobFileId}
               onSyncPcJobs={() => void pcRender.syncPcJobs(false)}
               onDownloadPcOutput={(file, triggerSave) =>
                 void pcRender.downloadPcOutputVideo(file, triggerSave)
               }
               onRetryCloudDispatch={(jobFileId) => void pcRender.retryCloudDispatch(jobFileId)}
+              onFallbackPcJobToCloud={(jobFileId, kind) =>
+                void pcRender.fallbackPcJobToCloud(jobFileId, kind)
+              }
             />
           )}
 
@@ -498,11 +511,17 @@ export default function App() {
               onReorderCut={studio.handleReorderCut}
               onUpdateCutTiming={studio.handleUpdateCutTiming}
               onRerenderItem={studio.handleRerenderItem}
+              onRenderRemote={(itemId) => void pcRender.sendItemToRender(itemId)}
               onSendToCloud={(itemId) => void pcRender.sendItemToCloud(itemId)}
               onSendToPc={(itemId) => void pcRender.sendItemToPc(itemId)}
               onRedoStory={(itemId, instruction) => void pcRender.redoCloudStory(itemId, instruction)}
               onRetryCloudDispatch={(jobFileId) => void pcRender.retryCloudDispatch(jobFileId)}
+              onFallbackPcJobToCloud={(jobFileId, kind) =>
+                void pcRender.fallbackPcJobToCloud(jobFileId, kind)
+              }
               cloudRenderConfigured={cloudRenderConfigured}
+              isPcOnline={pcRender.isPcOnline}
+              resolvedTarget={pcRender.resolvedTarget}
               isSendingToPc={Boolean(pcRender.sendingToPcId)}
               isSendingAnalyze={Boolean(pcRender.sendingAnalyzeId)}
               sendingTarget={pcRender.sendingTarget}
@@ -510,6 +529,7 @@ export default function App() {
               lastSentPcJob={pcRender.lastSentPcJob}
               failedDispatchJobFileIds={pcRender.failedDispatchJobFileIds}
               retryingDispatchJobFileId={pcRender.retryingDispatchJobFileId}
+              fallingBackJobFileId={pcRender.fallingBackJobFileId}
               onRequestDriveUpload={queue.handleRequestDriveUpload}
               exportQuality={settings.exportQuality}
               onChangeExportQuality={handleChangeExportQuality}
@@ -535,6 +555,11 @@ export default function App() {
               onGoogleLogout={handleGoogleLogout}
               geminiConfigured={geminiConfigured}
               cloudRenderConfigured={cloudRenderConfigured}
+              pcWorkerStatus={pcRender.pcWorkerStatus}
+              isPcOnline={pcRender.isPcOnline}
+              resolvedTarget={pcRender.resolvedTarget}
+              isSyncingPcJobs={pcRender.isSyncingPcJobs}
+              onSyncPcJobs={() => void pcRender.syncPcJobs(false)}
               cacheStats={cacheStats}
               isClearingCache={queue.isClearingCache}
               onClearVideoCache={queue.handleClearVideoCache}
@@ -568,6 +593,7 @@ export default function App() {
           void pcRender.sendMultiClipToCloudAnalyze(orderedIds, projectName, preset, instruction)
         }
         cloudRenderConfigured={cloudRenderConfigured}
+        resolvedTarget={pcRender.resolvedTarget}
         canUseCloud={Boolean(isDriveConnected && settings.folderId)}
         isProcessing={queue.isProcessingAny || Boolean(pcRender.sendingAnalyzeId)}
       />

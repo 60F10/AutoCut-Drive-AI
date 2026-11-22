@@ -18,6 +18,17 @@ export type FramingMode = 'center_crop' | 'blur_pad';
 
 export type WhisperModelId = 'small' | 'medium';
 
+export type ProcessEngineMode = 'auto' | 'pc' | 'cloud';
+
+export interface PcWorkerStatus {
+  lastSeen: string;
+  version?: string;
+  encoder?: string;
+  whisperDevice?: string;
+  whisperModel?: string;
+  busy?: boolean;
+}
+
 export type PlanCutFunction =
   | 'gancho'
   | 'contexto'
@@ -52,6 +63,7 @@ export interface AppSettings {
   folderId: string;
   model: GeminiModelId;
   whisperModel: WhisperModelId;
+  processEngine: ProcessEngineMode;
   watchIntervalSec: WatchIntervalSec;
   autoWatchEnabled: boolean;
   autoUploadEnabled: boolean;
@@ -189,14 +201,17 @@ export interface QueueItem {
   pcJobStatus?: RenderJobStatus;
   pcJobProgress?: number;
   pcJobError?: string;
+  pcJobCreatedAt?: string;
   pcOutputDriveId?: string;
   pcOutputWebViewLink?: string;
   analyzeJobId?: string;
   analyzeJobFileId?: string;
+  analyzeJobTarget?: RenderJobTarget;
   analyzeJobStatus?: AnalyzeJobStatus;
   analyzeJobStage?: AnalyzeJobStage;
   analyzeJobProgress?: number;
   analyzeJobError?: string;
+  analyzeJobCreatedAt?: string;
   cloudWorkflowRunUrl?: string | null;
   completedAt?: number;
   lastUpdated: number;
@@ -261,6 +276,8 @@ export interface RenderJobManifest {
   createdAt: string;
   updatedAt?: string;
   finishedAt?: string;
+  claimedBy?: RenderJobTarget;
+  claimedAt?: string;
   status: RenderJobStatus;
   progress: number;
   outputFileName: string;
@@ -297,10 +314,12 @@ export interface AnalyzeJobOptions {
 export interface AnalyzeJobManifest {
   jobId: string;
   kind: 'analyze';
-  target?: 'cloud';
+  target?: RenderJobTarget;
   createdAt: string;
   updatedAt?: string;
   finishedAt?: string;
+  claimedBy?: RenderJobTarget;
+  claimedAt?: string;
   status: AnalyzeJobStatus;
   progress: number;
   stage?: AnalyzeJobStage;

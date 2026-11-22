@@ -1321,6 +1321,15 @@ export function normalizeWhisperModel(raw: unknown): WhisperModelId {
   return raw === 'medium' ? 'medium' : 'small';
 }
 
+export const DEFAULT_PROCESS_ENGINE: import('../types').ProcessEngineMode = 'auto';
+
+export function normalizeProcessEngine(raw: unknown): import('../types').ProcessEngineMode {
+  if (raw === 'pc' || raw === 'cloud' || raw === 'auto') {
+    return raw;
+  }
+  return DEFAULT_PROCESS_ENGINE;
+}
+
 export function getDefaultTargetDurationForPreset(preset: EditStylePreset): number {
   switch (preset) {
     case 'express_summary':
@@ -1336,16 +1345,24 @@ export function getDefaultTargetDurationForPreset(preset: EditStylePreset): numb
 export function formatAnalyzeStageLabel(
   stage?: AnalyzeJobStage,
   status?: AnalyzeJobStatus,
-  progress = 0
+  progress = 0,
+  target?: import('../types').RenderJobTarget
 ): string {
   const pct = Math.max(0, Math.min(100, Math.round(Number(progress) || 0)));
+  const isPc = target === 'pc';
   if (status === 'analyzed') return 'Historia lista para revisar';
-  if (status === 'error') return 'Error en análisis en la nube';
-  if (status === 'pending') return 'En cola nube (análisis)...';
+  if (status === 'error') {
+    return isPc ? 'Error en análisis en PC' : 'Error en análisis en la nube';
+  }
+  if (status === 'pending') {
+    return isPc ? 'En cola PC (análisis)...' : 'En cola nube (análisis)...';
+  }
 
   switch (stage) {
     case 'descarga':
-      return `Descargando clips en la nube (${pct}%)...`;
+      return isPc
+        ? `Cargando clips en PC (${pct}%)...`
+        : `Descargando clips en la nube (${pct}%)...`;
     case 'transcripcion':
       return `Transcribiendo audio (${pct}%)...`;
     case 'vision':
@@ -1355,7 +1372,7 @@ export function formatAnalyzeStageLabel(
     case 'revision':
       return `Revisando coherencia del guion (${pct}%)...`;
     default:
-      return `Analizando en la nube (${pct}%)...`;
+      return isPc ? `Analizando en PC (${pct}%)...` : `Analizando en la nube (${pct}%)...`;
   }
 }
 
@@ -1367,7 +1384,7 @@ export function generatePcRenderJobId(nowMs = Date.now()): string {
 
 /**
  * Builds the canonical `analyze_<jobId>.json` manifest (`kind: "analyze"`) consumed by
- * GitHub Actions `worker/cloud-worker.mjs` for Whisper + multimodal Gemini story analysis.
+ * `worker/pc-worker.mjs` (`target: "pc"`) or GitHub Actions `worker/cloud-worker.mjs` (`target: "cloud"`).
  */
 export function buildAnalyzeJobManifest(input: {
   sourceFiles: AnalyzeJobSourceFile[];
@@ -1377,6 +1394,7 @@ export function buildAnalyzeJobManifest(input: {
   customInstruction?: string;
   targetDurationSec?: number;
   tiktokOptions: TikTokEditOptions;
+  target?: import('../types').RenderJobTarget;
   queueItemId?: string;
   projectName?: string;
   isMultiClip?: boolean;
@@ -1384,7 +1402,7 @@ export function buildAnalyzeJobManifest(input: {
   createdAt?: string;
 }): AnalyzeJobManifest {
   if (!Array.isArray(input.sourceFiles) || input.sourceFiles.length === 0) {
-    throw new Error('Se necesita al menos un clip fuente para lanzar el análisis en la nube.');
+    throw new Error('Se necesita al menos un clip fuente para lanzar el análisis remoto.');
   }
 
   const normalizedOpts = normalizeTikTokOptions(input.tiktokOptions);
@@ -1393,11 +1411,12 @@ export function buildAnalyzeJobManifest(input: {
     Math.round(Number(input.targetDurationSec) || getDefaultTargetDurationForPreset(input.stylePreset))
   );
   const createdAt = input.createdAt || new Date().toISOString();
+  const target: import('../types').RenderJobTarget = input.target === 'pc' ? 'pc' : 'cloud';
 
   return {
     jobId: input.jobId || generatePcRenderJobId(),
     kind: 'analyze',
-    target: 'cloud',
+    target,
     createdAt,
     updatedAt: createdAt,
     status: 'pending',

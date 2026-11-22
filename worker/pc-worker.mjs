@@ -1,12 +1,22 @@
 #!/usr/bin/env node
 /**
- * AutoCut Drive AI — Local Native PC Render Worker (0 € Hybrid Mode)
+ * AutoCut Drive AI — Local Native PC Analysis & Render Worker (Primary Engine · 0 €)
  *
- * Watches `<AUTOCUT_DRIVE_DIR>/_AutoCut_Jobs/job_*.json` every 3 seconds,
- * ignores cloud-targeted jobs (`target === "cloud"`), renders pending PC jobs
- * using shared `worker/render-core.mjs` (auto-detecting NVIDIA `h264_nvenc`
- * with `libx264 -preset fast` fallback), and writes the finished MP4 to
- * `<AUTOCUT_DRIVE_DIR>/_AutoCut_Output/`.
+ * Watches `<AUTOCUT_DRIVE_DIR>/_AutoCut_Jobs/` every 3 seconds:
+ * 1. `analyze_<id>.json` (`kind: "analyze"`, `target: "pc"`):
+ *    Runs shared `worker/analyze-core.mjs` (Whisper with GPU CUDA + CPU fallback,
+ *    local `_AutoCut_Jobs/_cache/` transcript reuse, Gemini multimodal Phases A/B/C)
+ *    and writes `plan` + `status: "analyzed"`.
+ * 2. `job_<id>.json` (render, `target: "pc"` or omitted):
+ *    Renders via `worker/render-core.mjs` (`h264_nvenc` GPU NVIDIA / `libx264 -preset fast` CPU)
+ *    and writes finished MP4 to `<AUTOCUT_DRIVE_DIR>/_AutoCut_Output/`.
+ *
+ * Heartbeat:
+ * - Writes `<AUTOCUT_DRIVE_DIR>/_AutoCut_Jobs/_worker_status.json` every 60 s (and on start / busy changes).
+ *
+ * Privacy & Rotating Logs:
+ * - Writes strictly sanitized telemetry logs to `worker/logs/pc-worker.log` (5 files × 5 MB).
+ * - NEVER logs tokens, API keys, transcripts, Drive IDs, paths, or user filenames.
  */
 
 import fs from 'node:fs';
@@ -23,63 +33,255 @@ import {
   sanitizeOutputFilename,
   sliceSubtitlesForSegment,
 } from './render-core.mjs';
+import {
+  buildTranscriptCacheFilename,
+  claimJobAtomically,
+  normalizeWhisperDevice,
+  orchestrateAnalyzeJob,
+} from './analyze-core.mjs';
 
 export { buildAssFileContent, escapePathForFfmpegFilter, sliceSubtitlesForSegment };
 
+const WORKER_VERSION = '2.0.0';
 const JOBS_DIR_NAME = '_AutoCut_Jobs';
 const OUTPUT_DIR_NAME = '_AutoCut_Output';
+const CACHE_DIR_NAME = '_cache';
+const SOURCES_DIR_NAME = '_sources';
+const WORKER_STATUS_FILENAME = '_worker_status.json';
 const DEFAULT_POLL_INTERVAL_MS = 3000;
+const HEARTBEAT_INTERVAL_MS = 60_000;
+const DEFAULT_LOG_MAX_BYTES = 5 * 1024 * 1024; // 5 MB
+const DEFAULT_LOG_MAX_FILES = 5;
 
-function log(level, message, details) {
+const SAFE_PC_LOG_KEYS = new Set([
+  'jobId',
+  'kind',
+  'clips',
+  'cuts',
+  'clip',
+  'cutIndex',
+  'totalCuts',
+  'mb',
+  'sec',
+  'http',
+  'stage',
+  'progress',
+  'encoder',
+  'quality',
+  'jobsFound',
+  'cacheHit',
+  'whisperModel',
+  'whisperDevice',
+  'fallbackCpu',
+  'coherent',
+  'claimedBy',
+  'busy',
+  'pollMs',
+  'zscaleAvailable',
+  'count',
+  'version',
+]);
+
+const FORBIDDEN_VALUE_PATTERN =
+  /(ya29\.[0-9A-Za-z._-]+|AIza[0-9A-Za-z_-]{16,}|gh[pousr]_[0-9A-Za-z]{12,}|github_pat_[0-9A-Za-z_]{12,}|Bearer\s+|api[_-]?key|access[_-]?token|refresh[_-]?token|\.(?:mp4|mov|webm|m4v|mkv|avi|wav|mp3|json|ass|srt|log|env)\b|[\\/])/i;
+
+/**
+ * Formats a privacy-safe log line strictly whitelisting structural/numeric telemetry.
+ * Guarantees NO tokens, API keys, paths, or user filenames can ever appear in logs.
+ */
+export function formatSafePcLog(level, stage, metrics = {}) {
   const ts = new Date().toISOString().slice(11, 23);
-  const suffix = details ? ` ${JSON.stringify(details)}` : '';
-  const line = `[${ts}] [${level}] ${message}${suffix}`;
-  if (level === 'ERROR') {
-    console.error(line);
-  } else {
-    console.log(line);
+  const safeLevel = level === 'ERROR' || level === 'WARN' ? level : 'INFO';
+  const safeStage = String(stage || 'event')
+    .replace(FORBIDDEN_VALUE_PATTERN, '[redacted]')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 80);
+
+  const safe = {};
+  for (const [k, v] of Object.entries(metrics || {})) {
+    if (!SAFE_PC_LOG_KEYS.has(k) || v === undefined || v === null) continue;
+    if (typeof v === 'number' && Number.isFinite(v)) {
+      safe[k] = v;
+    } else if (typeof v === 'boolean') {
+      safe[k] = v;
+    } else if (typeof v === 'string') {
+      const trimmed = v.trim();
+      if (trimmed.length > 0 && trimmed.length <= 48 && !FORBIDDEN_VALUE_PATTERN.test(trimmed)) {
+        safe[k] = trimmed;
+      }
+    }
   }
+  const suffix = Object.keys(safe).length > 0 ? ` ${JSON.stringify(safe)}` : '';
+  return `[${ts}] [${safeLevel}] [pc-worker] ${safeStage}${suffix}`;
 }
 
 /**
- * PC worker claims pending render jobs whose target is NOT `"cloud"` and whose kind is NOT `"analyze"`
- * (backward-compatible with manifests that omit `target` or `kind`).
+ * Lightweight rotating file logger: keeps up to `maxFiles` (default 5) files of `maxBytes` (default 5 MB).
+ */
+export class RotatingFileLogger {
+  constructor({
+    logFilePath,
+    maxBytes = DEFAULT_LOG_MAX_BYTES,
+    maxFiles = DEFAULT_LOG_MAX_FILES,
+    mirrorConsole = true,
+  }) {
+    this.logFilePath = logFilePath;
+    this.maxBytes = Math.max(1024, Number(maxBytes) || DEFAULT_LOG_MAX_BYTES);
+    this.maxFiles = Math.max(1, Math.round(Number(maxFiles) || DEFAULT_LOG_MAX_FILES));
+    this.mirrorConsole = mirrorConsole;
+    this.dirReady = false;
+  }
+
+  rotateIfNeeded(incomingBytes) {
+    try {
+      if (!fs.existsSync(this.logFilePath)) return;
+      const stat = fs.statSync(this.logFilePath);
+      if (stat.size + incomingBytes <= this.maxBytes) return;
+
+      // Keep total of maxFiles: base file + (maxFiles - 1) numbered backups (.1 .. .(maxFiles-1))
+      const oldestIdx = this.maxFiles - 1;
+      if (oldestIdx >= 1) {
+        const oldestPath = `${this.logFilePath}.${oldestIdx}`;
+        if (fs.existsSync(oldestPath)) {
+          fs.unlinkSync(oldestPath);
+        }
+        for (let i = oldestIdx - 1; i >= 1; i -= 1) {
+          const src = `${this.logFilePath}.${i}`;
+          const dst = `${this.logFilePath}.${i + 1}`;
+          if (fs.existsSync(src)) {
+            fs.renameSync(src, dst);
+          }
+        }
+        fs.renameSync(this.logFilePath, `${this.logFilePath}.1`);
+      } else {
+        fs.truncateSync(this.logFilePath, 0);
+      }
+    } catch {
+      // Never crash worker on log rotation error
+    }
+  }
+
+  write(level, stage, metrics = {}) {
+    const line = formatSafePcLog(level, stage, metrics);
+    if (this.mirrorConsole) {
+      if (level === 'ERROR') {
+        console.error(line);
+      } else {
+        console.log(line);
+      }
+    }
+    if (!this.logFilePath) return line;
+
+    try {
+      if (!this.dirReady) {
+        fs.mkdirSync(path.dirname(this.logFilePath), { recursive: true });
+        this.dirReady = true;
+      }
+      const payload = `${line}\n`;
+      this.rotateIfNeeded(Buffer.byteLength(payload, 'utf8'));
+      fs.appendFileSync(this.logFilePath, payload, 'utf8');
+    } catch {
+      // Ignore filesystem log write errors
+    }
+    return line;
+  }
+}
+
+const workerDir = path.dirname(fileURLToPath(import.meta.url));
+const defaultLogPath = path.join(workerDir, 'logs', 'pc-worker.log');
+let activeLogger = new RotatingFileLogger({ logFilePath: defaultLogPath });
+
+function logSafe(level, stage, metrics) {
+  return activeLogger.write(level, stage, metrics);
+}
+
+/**
+ * Loads KEY=VALUE pairs from `worker/.env.local` without overwriting non-empty existing env vars.
+ */
+export function loadLocalEnvFile(envFilePath, targetEnv = process.env) {
+  if (!envFilePath || !fs.existsSync(envFilePath)) return {};
+  const loaded = {};
+  let raw = '';
+  try {
+    raw = fs.readFileSync(envFilePath, 'utf8');
+  } catch {
+    return loaded;
+  }
+
+  for (const rawLine of raw.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const eqIdx = line.indexOf('=');
+    if (eqIdx <= 0) continue;
+    const key = line.slice(0, eqIdx).trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+    let val = line.slice(eqIdx + 1).trim();
+    if (
+      (val.startsWith('"') && val.endsWith('"')) ||
+      (val.startsWith("'") && val.endsWith("'"))
+    ) {
+      val = val.slice(1, -1);
+    }
+    if (!targetEnv[key]) {
+      targetEnv[key] = val;
+      loaded[key] = true;
+    }
+  }
+  return loaded;
+}
+
+/**
+ * PC worker claims:
+ * - `kind: "analyze"` ONLY when `status === "pending"` AND `target === "pc"` (ignores `target: "cloud"` and omitted target).
+ * - Render jobs (`kind !== "analyze"`) when `status === "pending"` AND `target !== "cloud"` (backward-compatible with omitted target).
  */
 export function shouldPcWorkerClaimJob(manifest) {
   if (!manifest || typeof manifest !== 'object') return false;
-  if (manifest.kind === 'analyze') return false;
   if (manifest.status !== 'pending') return false;
-  if (manifest.target === 'cloud') return false;
-  return true;
+  if (manifest.kind === 'analyze') {
+    return manifest.target === 'pc';
+  }
+  return manifest.target !== 'cloud';
+}
+
+export function isAnalyzeJobManifest(manifest) {
+  return Boolean(manifest && typeof manifest === 'object' && manifest.kind === 'analyze');
 }
 
 export function printHelp() {
   console.log(`
-AutoCut Drive AI — Worker nativo de renderizado en PC (FFmpeg, coste 0 €)
+AutoCut Drive AI — PC Worker (análisis Whisper GPU + Gemini y render FFmpeg NVENC · 0 €)
 
 Uso:
-  node worker/pc-worker.mjs --dir "G:\\Mi unidad\\AutoCut"
-  npm run worker -- --dir "G:\\Mi unidad\\AutoCut"
+  node worker/pc-worker.mjs --dir "G:\\Mi unidad\\AutoCut_Videos"
+  npm run worker -- --dir "G:\\Mi unidad\\AutoCut_Videos"
 
 Opciones:
-  --dir, -d <ruta>       Ruta local de la carpeta sincronizada de Google Drive
-                         (también puede definirse con la variable AUTOCUT_DRIVE_DIR)
+  --dir, -d <ruta>       Ruta local sincronizada de Google Drive
+                         (o AUTOCUT_DRIVE_DIR en worker/.env.local)
   --interval <ms>        Intervalo de vigilancia en milisegundos (por defecto: 3000)
-  --ffmpeg <ruta>        Ruta personalizada al binario de ffmpeg (por defecto: ffmpeg)
+  --ffmpeg <ruta>        Ruta al binario de ffmpeg (por defecto: ffmpeg)
+  --python <ruta>        Ruta a Python con faster-whisper (por defecto: python/python3)
   --cpu                  Forzar codificación por CPU (libx264) aunque exista GPU NVIDIA
   --once                 Procesar los trabajos pendientes una sola vez y salir
   --help, -h             Mostrar esta ayuda
 
-Nota: este worker ignora automáticamente los trabajos con target="cloud"
-(que se procesan en GitHub Actions).
+Variables en worker/.env.local:
+  GEMINI_API_KEY, AUTOCUT_DRIVE_DIR, WHISPER_MODEL (defecto: medium),
+  WHISPER_DEVICE (defecto: auto)
 `);
 }
 
 export function parseCliArgs(argv, env = process.env) {
+  const defaultPython = process.platform === 'win32' ? 'python' : 'python3';
   const opts = {
     driveDir: env.AUTOCUT_DRIVE_DIR || '',
     pollIntervalMs: Number(env.AUTOCUT_POLL_INTERVAL_MS) || DEFAULT_POLL_INTERVAL_MS,
     ffmpegBin: env.AUTOCUT_FFMPEG_BIN || 'ffmpeg',
+    pythonBin: env.AUTOCUT_PYTHON_BIN || defaultPython,
+    whisperModel: env.WHISPER_MODEL === 'small' ? 'small' : 'medium',
+    whisperDevice: normalizeWhisperDevice(env.WHISPER_DEVICE, 'auto'),
     forceCpu: env.AUTOCUT_FORCE_CPU === '1' || env.AUTOCUT_FORCE_CPU === 'true',
     once: false,
     help: false,
@@ -111,6 +313,11 @@ export function parseCliArgs(argv, env = process.env) {
       i += 1;
     } else if (arg.startsWith('--ffmpeg=')) {
       opts.ffmpegBin = arg.slice('--ffmpeg='.length);
+    } else if (arg === '--python' && argv[i + 1]) {
+      opts.pythonBin = argv[i + 1];
+      i += 1;
+    } else if (arg.startsWith('--python=')) {
+      opts.pythonBin = arg.slice('--python='.length);
     }
   }
 
@@ -122,8 +329,27 @@ async function resolveSourceFilePath(driveDir, fileName) {
   if (fs.existsSync(direct)) return direct;
 
   const targetLower = fileName.toLowerCase();
-  const skipDirs = new Set([JOBS_DIR_NAME.toLowerCase(), OUTPUT_DIR_NAME.toLowerCase()]);
 
+  // Check `_AutoCut_Jobs/_sources/` for temporary clips uploaded from phone
+  const sourcesDir = path.join(driveDir, JOBS_DIR_NAME, SOURCES_DIR_NAME);
+  if (fs.existsSync(sourcesDir)) {
+    try {
+      const sourceEntries = await fsp.readdir(sourcesDir, { withFileTypes: true });
+      const exactOrSuffix = sourceEntries.find(
+        (entry) =>
+          entry.isFile() &&
+          (entry.name.toLowerCase() === targetLower ||
+            entry.name.toLowerCase().endsWith(`_${targetLower}`))
+      );
+      if (exactOrSuffix) {
+        return path.join(sourcesDir, exactOrSuffix.name);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  const skipDirs = new Set([JOBS_DIR_NAME.toLowerCase(), OUTPUT_DIR_NAME.toLowerCase()]);
   const queue = [{ dir: driveDir, depth: 0 }];
   while (queue.length > 0) {
     const { dir, depth } = queue.shift();
@@ -147,6 +373,12 @@ async function resolveSourceFilePath(driveDir, fileName) {
   return null;
 }
 
+async function readJobManifestFile(jobFilePath) {
+  const raw = await fsp.readFile(jobFilePath, 'utf8');
+  if (!raw.trim()) return null;
+  return JSON.parse(raw);
+}
+
 async function writeJobManifest(jobFilePath, manifest) {
   const payload = JSON.stringify(
     {
@@ -159,7 +391,160 @@ async function writeJobManifest(jobFilePath, manifest) {
   await fsp.writeFile(jobFilePath, payload, 'utf8');
 }
 
-async function processJob({
+export async function writeWorkerHeartbeat({
+  jobsDir,
+  encoder,
+  whisperDevice,
+  whisperModel,
+  busy,
+}) {
+  const statusPath = path.join(jobsDir, WORKER_STATUS_FILENAME);
+  const payload = {
+    lastSeen: new Date().toISOString(),
+    version: WORKER_VERSION,
+    encoder: typeof encoder === 'string' ? encoder : encoder?.codec || 'libx264',
+    whisperDevice: whisperDevice || 'auto',
+    whisperModel: whisperModel || 'medium',
+    busy: Boolean(busy),
+  };
+  try {
+    await fsp.writeFile(statusPath, JSON.stringify(payload, null, 2), 'utf8');
+  } catch {
+    logSafe('WARN', 'heartbeat_write_failed', { busy: Boolean(busy) });
+  }
+  return payload;
+}
+
+async function readLocalCachedTranscript(cacheDir, driveFileId, modifiedTime) {
+  const cacheName = buildTranscriptCacheFilename(driveFileId, modifiedTime);
+  const cachePath = path.join(cacheDir, cacheName);
+  try {
+    const raw = await fsp.readFile(cachePath, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (parsed && Array.isArray(parsed.segments)) {
+      return parsed;
+    }
+  } catch {
+    // cache miss
+  }
+  return null;
+}
+
+async function writeLocalCachedTranscript(cacheDir, driveFileId, modifiedTime, transcriptObj) {
+  const cacheName = buildTranscriptCacheFilename(driveFileId, modifiedTime);
+  const cachePath = path.join(cacheDir, cacheName);
+  try {
+    await fsp.mkdir(cacheDir, { recursive: true });
+    await fsp.writeFile(cachePath, JSON.stringify(transcriptObj), 'utf8');
+  } catch {
+    logSafe('WARN', 'transcript_cache_write_failed');
+  }
+}
+
+async function processAnalyzeJob({
+  jobFilePath,
+  manifest,
+  driveDir,
+  jobsDir,
+  ffmpegBin,
+  pythonBin,
+  defaultWhisperModel,
+  whisperDeviceState,
+  onHeartbeatRefresh,
+}) {
+  const jobId = String(manifest.jobId || 'unknown').slice(0, 48);
+
+  const claimResult = await claimJobAtomically({
+    workerId: 'pc',
+    canClaim: shouldPcWorkerClaimJob,
+    readManifest: () => readJobManifestFile(jobFilePath),
+    writeManifest: (nextManifest) => writeJobManifest(jobFilePath, nextManifest),
+    extraPatch: {
+      kind: 'analyze',
+      target: 'pc',
+      stage: 'descarga',
+      progress: 5,
+    },
+  });
+
+  if (!claimResult.claimed || !claimResult.manifest) {
+    logSafe('INFO', 'analyze_claim_skipped', {
+      jobId,
+      kind: 'analyze',
+      claimedBy: claimResult.manifest?.claimedBy || 'other',
+    });
+    return;
+  }
+
+  const claimedManifest = claimResult.manifest;
+  const tempWorkDir = await fsp.mkdtemp(path.join(os.tmpdir(), `autocut_pc_analyze_${jobId}_`));
+  const cacheDir = path.join(jobsDir, CACHE_DIR_NAME);
+  const transcribeScriptPath = path.join(workerDir, 'transcribe.py');
+  const geminiApiKey = (process.env.GEMINI_API_KEY || '').trim();
+  const whisperModel =
+    claimedManifest.options?.whisperModel === 'medium'
+      ? 'medium'
+      : claimedManifest.options?.whisperModel === 'small'
+      ? 'small'
+      : defaultWhisperModel || 'medium';
+
+  try {
+    await orchestrateAnalyzeJob({
+      manifest: claimedManifest,
+      target: 'pc',
+      workDir: tempWorkDir,
+      apiKey: geminiApiKey,
+      missingApiKeyMessage:
+        '[Análisis IA] Falta GEMINI_API_KEY en worker/.env.local del PC.',
+      ffmpegBin,
+      pythonBin,
+      transcribeScriptPath,
+      whisperModel,
+      whisperDevice: whisperDeviceState.current,
+      progressThrottleMs: 3000,
+      prepareSourcePaths: async ({ manifest: current, writeProgress }) => {
+        const resolvedPaths = [];
+        const totalClips = current.sourceFiles.length;
+        for (let i = 0; i < totalClips; i += 1) {
+          const src = current.sourceFiles[i];
+          const found = await resolveSourceFilePath(driveDir, src.name);
+          if (!found) {
+            throw new Error(
+              `[Drive] No se encontró el clip ${i + 1} en la carpeta sincronizada de Google Drive. Verifica que el archivo esté disponible sin conexión.`
+            );
+          }
+          resolvedPaths.push(found);
+          const pct = 5 + Math.round(((i + 1) / totalClips) * 15);
+          await writeProgress('descarga', pct, i === totalClips - 1);
+        }
+        return resolvedPaths;
+      },
+      getCachedTranscript: async (driveFileId, modifiedTime) => {
+        const hit = await readLocalCachedTranscript(cacheDir, driveFileId, modifiedTime);
+        logSafe('INFO', 'transcript_cache_lookup', { jobId, cacheHit: Boolean(hit) });
+        return hit;
+      },
+      saveCachedTranscript: async (driveFileId, modifiedTime, transcriptObj) => {
+        await writeLocalCachedTranscript(cacheDir, driveFileId, modifiedTime, transcriptObj);
+      },
+      patchManifest: (nextManifest) => writeJobManifest(jobFilePath, nextManifest),
+      onLog: (level, stage, metrics) => logSafe(level, stage, metrics),
+      onWhisperFallbackCpu: async () => {
+        whisperDeviceState.current = 'cpu';
+        logSafe('WARN', 'whisper_fallback_cpu', { jobId, fallbackCpu: true, whisperDevice: 'cpu' });
+        if (onHeartbeatRefresh) {
+          await onHeartbeatRefresh();
+        }
+      },
+    });
+  } catch {
+    // Error already persisted to manifest and logged by orchestrateAnalyzeJob
+  } finally {
+    await fsp.rm(tempWorkDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+async function processRenderJob({
   jobFilePath,
   manifest,
   driveDir,
@@ -168,47 +553,73 @@ async function processJob({
   encoder,
   zscaleAvailable,
 }) {
-  const jobId = manifest.jobId || path.basename(jobFilePath, '.json');
+  const jobId = String(manifest.jobId || path.basename(jobFilePath, '.json')).slice(0, 48);
+
+  const claimResult = await claimJobAtomically({
+    workerId: 'pc',
+    canClaim: shouldPcWorkerClaimJob,
+    readManifest: () => readJobManifestFile(jobFilePath),
+    writeManifest: (nextManifest) => writeJobManifest(jobFilePath, nextManifest),
+    extraPatch: {
+      progress: 5,
+      encoderUsed: encoder.codec,
+    },
+  });
+
+  if (!claimResult.claimed || !claimResult.manifest) {
+    logSafe('INFO', 'render_claim_skipped', {
+      jobId,
+      kind: 'render',
+      claimedBy: claimResult.manifest?.claimedBy || 'other',
+    });
+    return;
+  }
+
+  const claimedManifest = claimResult.manifest;
   const tempWorkDir = await fsp.mkdtemp(path.join(os.tmpdir(), `autocut_job_${jobId}_`));
+  const tJobStart = Date.now();
   const workingManifest = {
-    ...manifest,
+    ...claimedManifest,
     status: 'processing',
     progress: 5,
-    errorMessage: undefined,
     encoderUsed: encoder.codec,
   };
+  delete workingManifest.errorMessage;
 
-  log('INFO', `Iniciando trabajo ${jobId}`, {
-    output: manifest.outputFileName,
-    clips: manifest.sourceFiles?.length ?? 0,
-    cortes: manifest.cuts?.length ?? 0,
-    calidad: manifest.options?.quality ?? '1080p',
-    encoder: encoder.label,
+  logSafe('INFO', 'render_started', {
+    jobId,
+    kind: 'render',
+    clips: claimedManifest.sourceFiles?.length ?? 0,
+    cuts: claimedManifest.cuts?.length ?? 0,
+    quality: claimedManifest.options?.quality ?? '1080p',
+    encoder: encoder.codec,
   });
 
   try {
     await writeJobManifest(jobFilePath, workingManifest);
 
-    if (!Array.isArray(manifest.sourceFiles) || manifest.sourceFiles.length === 0) {
+    if (!Array.isArray(claimedManifest.sourceFiles) || claimedManifest.sourceFiles.length === 0) {
       throw new Error('El manifiesto no contiene archivos fuente (sourceFiles).');
     }
-    if (!Array.isArray(manifest.cuts) || manifest.cuts.length === 0) {
+    if (!Array.isArray(claimedManifest.cuts) || claimedManifest.cuts.length === 0) {
       throw new Error('El manifiesto no contiene cortes activos (cuts).');
     }
 
     const resolvedPaths = [];
-    for (const src of manifest.sourceFiles) {
+    for (let i = 0; i < claimedManifest.sourceFiles.length; i += 1) {
+      const src = claimedManifest.sourceFiles[i];
       const found = await resolveSourceFilePath(driveDir, src.name);
       if (!found) {
         throw new Error(
-          `No se encontró el vídeo fuente "${src.name}" en "${driveDir}". Asegúrate de que Google Drive para ordenador haya sincronizado el archivo.`
+          `No se encontró el vídeo fuente del clip ${i + 1} en la carpeta sincronizada de Google Drive. Asegúrate de que esté sincronizado.`
         );
       }
       resolvedPaths.push(found);
     }
 
+    // Preserve exact render-core.mjs invocation and encoder args (NVENC / libx264)
     const tempFinalPath = await renderJob({
-      manifest,
+      manifest: claimedManifest,
       sourcePaths: resolvedPaths,
       workDir: tempWorkDir,
       ffmpegBin,
@@ -218,15 +629,17 @@ async function processJob({
         workingManifest.progress = Math.max(5, Math.min(92, Math.round(evt.percent)));
         await writeJobManifest(jobFilePath, workingManifest);
         if (evt.stage === 'segment') {
-          log('INFO', `Renderizando corte ${evt.cutIndex + 1}/${evt.totalCuts}`, {
+          logSafe('INFO', 'render_segment', {
             jobId,
+            cutIndex: evt.cutIndex + 1,
+            totalCuts: evt.totalCuts,
             clip: (evt.clipIndex ?? 0) + 1,
           });
         }
       },
     });
 
-    const finalFileName = sanitizeOutputFilename(manifest.outputFileName, jobId);
+    const finalFileName = sanitizeOutputFilename(claimedManifest.outputFileName, jobId);
     workingManifest.progress = 96;
     await writeJobManifest(jobFilePath, workingManifest);
 
@@ -242,24 +655,30 @@ async function processJob({
     delete workingManifest.errorMessage;
     await writeJobManifest(jobFilePath, workingManifest);
 
-    log('INFO', `Trabajo ${jobId} completado correctamente`, {
-      archivo: destinationPath,
-      pesoMB: Number((outStat.size / (1024 * 1024)).toFixed(2)),
+    logSafe('INFO', 'render_completed', {
+      jobId,
+      kind: 'render',
+      mb: Number((outStat.size / (1024 * 1024)).toFixed(2)),
+      sec: Number(((Date.now() - tJobStart) / 1000).toFixed(1)),
       encoder: encoder.codec,
+      progress: 100,
     });
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : String(err);
-    log('ERROR', `Trabajo ${jobId} falló`, { error: errorMsg });
+    logSafe('ERROR', 'render_failed', {
+      jobId,
+      kind: 'render',
+      sec: Number(((Date.now() - tJobStart) / 1000).toFixed(1)),
+    });
     try {
       await writeJobManifest(jobFilePath, {
         ...workingManifest,
         status: 'error',
-        errorMessage: errorMsg,
+        errorMessage: errorMsg.slice(0, 480),
+        finishedAt: new Date().toISOString(),
       });
-    } catch (writeErr) {
-      log('ERROR', `No se pudo guardar el estado de error en ${jobFilePath}`, {
-        error: writeErr instanceof Error ? writeErr.message : String(writeErr),
-      });
+    } catch {
+      logSafe('ERROR', 'render_error_patch_failed', { jobId });
     }
   } finally {
     await fsp.rm(tempWorkDir, { recursive: true, force: true }).catch(() => {});
@@ -271,8 +690,12 @@ async function scanAndProcessPending({
   outputDir,
   driveDir,
   ffmpegBin,
+  pythonBin,
   encoder,
   zscaleAvailable,
+  defaultWhisperModel,
+  whisperDeviceState,
+  setBusyState,
 }) {
   let entries;
   try {
@@ -283,12 +706,11 @@ async function scanAndProcessPending({
 
   const pendingJobs = [];
   for (const entry of entries) {
-    if (!entry.isFile() || !/^job_.*\.json$/i.test(entry.name)) continue;
+    if (!entry.isFile()) continue;
+    if (!/^(?:job|analyze)_.*\.json$/i.test(entry.name)) continue;
     const jobFilePath = path.join(jobsDir, entry.name);
     try {
-      const raw = await fsp.readFile(jobFilePath, 'utf8');
-      if (!raw.trim()) continue;
-      const manifest = JSON.parse(raw);
+      const manifest = await readJobManifestFile(jobFilePath);
       if (shouldPcWorkerClaimJob(manifest)) {
         pendingJobs.push({ jobFilePath, manifest });
       }
@@ -303,38 +725,63 @@ async function scanAndProcessPending({
     return aMs - bMs;
   });
 
-  for (const job of pendingJobs) {
-    await processJob({
-      ...job,
-      driveDir,
-      outputDir,
-      ffmpegBin,
-      encoder,
-      zscaleAvailable,
-    });
+  if (pendingJobs.length === 0) return 0;
+
+  if (setBusyState) {
+    await setBusyState(true);
+  }
+  try {
+    for (const job of pendingJobs) {
+      if (isAnalyzeJobManifest(job.manifest)) {
+        await processAnalyzeJob({
+          ...job,
+          driveDir,
+          jobsDir,
+          ffmpegBin,
+          pythonBin,
+          defaultWhisperModel,
+          whisperDeviceState,
+          onHeartbeatRefresh: setBusyState ? () => setBusyState(true) : undefined,
+        });
+      } else {
+        await processRenderJob({
+          ...job,
+          driveDir,
+          outputDir,
+          ffmpegBin,
+          encoder,
+          zscaleAvailable,
+        });
+      }
+    }
+  } finally {
+    if (setBusyState) {
+      await setBusyState(false);
+    }
   }
 
   return pendingJobs.length;
 }
 
 async function main() {
-  const cli = parseCliArgs(process.argv.slice(2));
+  // Load worker/.env.local before parsing CLI / env defaults
+  loadLocalEnvFile(path.join(workerDir, '.env.local'), process.env);
+
+  const cli = parseCliArgs(process.argv.slice(2), process.env);
   if (cli.help) {
     printHelp();
     process.exit(0);
   }
 
   if (!cli.driveDir || !cli.driveDir.trim()) {
-    console.error(
-      'Error: Debes indicar la carpeta local sincronizada de Google Drive con --dir "<ruta>" o la variable AUTOCUT_DRIVE_DIR.\n'
-    );
+    logSafe('ERROR', 'missing_drive_dir');
     printHelp();
     process.exit(1);
   }
 
   const driveDir = path.resolve(cli.driveDir.trim());
   if (!fs.existsSync(driveDir)) {
-    console.error(`Error: La carpeta indicada no existe: "${driveDir}"`);
+    logSafe('ERROR', 'drive_dir_not_found');
     process.exit(1);
   }
 
@@ -346,17 +793,30 @@ async function main() {
   const encoder = await detectVideoEncoder(cli.ffmpegBin, cli.forceCpu);
   const zscaleAvailable = await hasZscaleFilter(cli.ffmpegBin);
   if (!zscaleAvailable) {
-    log(
-      'WARN',
-      'El filtro zscale no está disponible en el FFmpeg local; los clips HDR se procesarán sin tonemap HDR->SDR.'
-    );
+    logSafe('WARN', 'zscale_unavailable', { zscaleAvailable: false });
   }
 
-  log('INFO', 'AutoCut Drive AI — PC Worker iniciado', {
-    driveDir,
-    jobsDir,
-    outputDir,
-    encoder: encoder.label,
+  const whisperDeviceState = { current: cli.whisperDevice };
+  let isBusy = false;
+
+  const publishHeartbeat = async (busyOverride = isBusy) => {
+    isBusy = Boolean(busyOverride);
+    await writeWorkerHeartbeat({
+      jobsDir,
+      encoder: encoder.codec,
+      whisperDevice: whisperDeviceState.current,
+      whisperModel: cli.whisperModel,
+      busy: isBusy,
+    });
+  };
+
+  await publishHeartbeat(false);
+
+  logSafe('INFO', 'worker_started', {
+    version: WORKER_VERSION,
+    encoder: encoder.codec,
+    whisperDevice: whisperDeviceState.current,
+    whisperModel: cli.whisperModel,
     zscaleAvailable,
     pollMs: cli.pollIntervalMs,
   });
@@ -367,39 +827,52 @@ async function main() {
       outputDir,
       driveDir,
       ffmpegBin: cli.ffmpegBin,
+      pythonBin: cli.pythonBin,
       encoder,
       zscaleAvailable,
+      defaultWhisperModel: cli.whisperModel,
+      whisperDeviceState,
+      setBusyState: publishHeartbeat,
     });
-    log('INFO', `Modo --once finalizado (${count} trabajo(s) procesados).`);
+    logSafe('INFO', 'once_finished', { count });
     return;
   }
 
-  let busy = false;
+  let polling = false;
   const tick = async () => {
-    if (busy) return;
-    busy = true;
+    if (polling) return;
+    polling = true;
     try {
       await scanAndProcessPending({
         jobsDir,
         outputDir,
         driveDir,
         ffmpegBin: cli.ffmpegBin,
+        pythonBin: cli.pythonBin,
         encoder,
         zscaleAvailable,
+        defaultWhisperModel: cli.whisperModel,
+        whisperDeviceState,
+        setBusyState: publishHeartbeat,
       });
     } finally {
-      busy = false;
+      polling = false;
     }
   };
 
   await tick();
-  const intervalId = setInterval(() => {
+  const pollIntervalId = setInterval(() => {
     void tick();
   }, cli.pollIntervalMs);
 
+  const heartbeatIntervalId = setInterval(() => {
+    void publishHeartbeat(isBusy);
+  }, HEARTBEAT_INTERVAL_MS);
+
   const shutdown = () => {
-    log('INFO', 'Deteniendo PC Worker...');
-    clearInterval(intervalId);
+    logSafe('INFO', 'worker_stopping');
+    clearInterval(pollIntervalId);
+    clearInterval(heartbeatIntervalId);
     process.exit(0);
   };
 
@@ -411,8 +884,8 @@ const isMainModule =
   process.argv[1] && path.resolve(fileURLToPath(import.meta.url)) === path.resolve(process.argv[1]);
 
 if (isMainModule) {
-  main().catch((err) => {
-    log('ERROR', err instanceof Error ? err.message : String(err));
+  main().catch(() => {
+    logSafe('ERROR', 'fatal_unhandled_error');
     process.exit(1);
   });
 }

@@ -38,15 +38,18 @@ interface GalleryViewProps {
   pcJobs: PcJobSyncEntry[];
   pcOutputs: DriveFileMeta[];
   cloudRenderConfigured: boolean;
+  isPcOnline: boolean;
   isSyncingPcJobs: boolean;
   lastPcSyncTime: number | null;
   downloadingOutputId: string | null;
   pcOutputPreviewUrls: Record<string, string>;
   failedDispatchJobFileIds: Record<string, string>;
   retryingDispatchJobFileId: string | null;
+  fallingBackJobFileId: string | null;
   onSyncPcJobs: () => void;
   onDownloadPcOutput: (outputFile: DriveFileMeta, triggerSave?: boolean) => void;
   onRetryCloudDispatch: (jobFileId: string) => void;
+  onFallbackPcJobToCloud: (jobFileId: string, kind: 'render' | 'analyze') => void;
 }
 
 export function GalleryView({
@@ -63,15 +66,18 @@ export function GalleryView({
   pcJobs,
   pcOutputs,
   cloudRenderConfigured,
+  isPcOnline,
   isSyncingPcJobs,
   lastPcSyncTime,
   downloadingOutputId,
   pcOutputPreviewUrls,
   failedDispatchJobFileIds,
   retryingDispatchJobFileId,
+  fallingBackJobFileId,
   onSyncPcJobs,
   onDownloadPcOutput,
   onRetryCloudDispatch,
+  onFallbackPcJobToCloud,
 }: GalleryViewProps) {
   const [selectedTag, setSelectedTag] = useState<string>('ALL');
   const [query, setQuery] = useState('');
@@ -126,15 +132,18 @@ export function GalleryView({
           isDriveConnected={isDriveConnected}
           folderId={folderId}
           cloudRenderConfigured={cloudRenderConfigured}
+          isPcOnline={isPcOnline}
           isSyncing={isSyncingPcJobs}
           lastSyncTime={lastPcSyncTime}
           downloadingOutputId={downloadingOutputId}
           previewUrls={pcOutputPreviewUrls}
           failedDispatchJobFileIds={failedDispatchJobFileIds}
           retryingDispatchJobFileId={retryingDispatchJobFileId}
+          fallingBackJobFileId={fallingBackJobFileId}
           onSync={onSyncPcJobs}
           onDownloadOutput={onDownloadPcOutput}
           onRetryCloudDispatch={onRetryCloudDispatch}
+          onFallbackPcJobToCloud={onFallbackPcJobToCloud}
           onGoToSettings={onGoToSettings}
         />
 
@@ -179,15 +188,18 @@ export function GalleryView({
         isDriveConnected={isDriveConnected}
         folderId={folderId}
         cloudRenderConfigured={cloudRenderConfigured}
+        isPcOnline={isPcOnline}
         isSyncing={isSyncingPcJobs}
         lastSyncTime={lastPcSyncTime}
         downloadingOutputId={downloadingOutputId}
         previewUrls={pcOutputPreviewUrls}
         failedDispatchJobFileIds={failedDispatchJobFileIds}
         retryingDispatchJobFileId={retryingDispatchJobFileId}
+        fallingBackJobFileId={fallingBackJobFileId}
         onSync={onSyncPcJobs}
         onDownloadOutput={onDownloadPcOutput}
         onRetryCloudDispatch={onRetryCloudDispatch}
+        onFallbackPcJobToCloud={onFallbackPcJobToCloud}
         onGoToSettings={onGoToSettings}
       />
       {/* Toolbar: Tag Filters + Search */}

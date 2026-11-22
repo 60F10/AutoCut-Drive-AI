@@ -11,6 +11,7 @@ import {
   FolderOpen,
   Layers,
   Loader2,
+  Monitor,
   Play,
   RefreshCw,
   RotateCw,
@@ -29,6 +30,7 @@ import type {
   PcJobSyncEntry,
   QueueItem,
   QueueStage,
+  RenderJobTarget,
   TikTokEditOptions,
 } from '../types';
 import {
@@ -38,6 +40,7 @@ import {
   formatPcJobStatusLabel,
   formatSeconds,
 } from '../utils/videoPipeline';
+import { canFallbackPcJobToCloud } from '../utils/remoteJobsSync';
 import { QueueAnalyticsPanel } from './QueueAnalyticsPanel';
 import { EditStyleControls } from './EditStyleControls';
 import { PcJobsPanel } from './PcJobsPanel';
@@ -78,6 +81,8 @@ interface QueueViewProps {
   pcJobs: PcJobSyncEntry[];
   pcOutputs: DriveFileMeta[];
   cloudRenderConfigured: boolean;
+  isPcOnline: boolean;
+  resolvedTarget: RenderJobTarget;
   sendingAnalyzeId: string | null;
   cloudUploadProgress: {
     clipIndex: number;
@@ -91,9 +96,11 @@ interface QueueViewProps {
   pcOutputPreviewUrls: Record<string, string>;
   failedDispatchJobFileIds: Record<string, string>;
   retryingDispatchJobFileId: string | null;
+  fallingBackJobFileId: string | null;
   onSyncPcJobs: () => void;
   onDownloadPcOutput: (outputFile: DriveFileMeta, triggerSave?: boolean) => void;
   onRetryCloudDispatch: (jobFileId: string) => void;
+  onFallbackPcJobToCloud: (jobFileId: string, kind: 'render' | 'analyze') => void;
 }
 
 const STAGE_ORDER: QueueStage[] = [
@@ -165,6 +172,8 @@ export function QueueView({
   pcJobs,
   pcOutputs,
   cloudRenderConfigured,
+  isPcOnline,
+  resolvedTarget,
   sendingAnalyzeId,
   cloudUploadProgress,
   isSyncingPcJobs,
@@ -173,9 +182,11 @@ export function QueueView({
   pcOutputPreviewUrls,
   failedDispatchJobFileIds,
   retryingDispatchJobFileId,
+  fallingBackJobFileId,
   onSyncPcJobs,
   onDownloadPcOutput,
   onRetryCloudDispatch,
+  onFallbackPcJobToCloud,
 }: QueueViewProps) {
   const [filter, setFilter] = useState<StatusFilter>('all');
   const [query, setQuery] = useState('');
@@ -332,7 +343,7 @@ export function QueueView({
       {/* Analytics Dashboard (Recharts daily videos, total saved footage, Gemini tags breakdown) */}
       <QueueAnalyticsPanel records={analyticsRecords} />
 
-      {/* Remote Render Jobs Panel (Cloud GitHub Actions & PC Worker) */}
+      {/* Remote Render Jobs Panel (PC Worker & Cloud GitHub Actions) */}
       <PcJobsPanel
         mode="queue"
         pcJobs={pcJobs}
@@ -340,15 +351,18 @@ export function QueueView({
         isDriveConnected={isDriveConnected}
         folderId={folderId}
         cloudRenderConfigured={cloudRenderConfigured}
+        isPcOnline={isPcOnline}
         isSyncing={isSyncingPcJobs}
         lastSyncTime={lastPcSyncTime}
         downloadingOutputId={downloadingOutputId}
         previewUrls={pcOutputPreviewUrls}
         failedDispatchJobFileIds={failedDispatchJobFileIds}
         retryingDispatchJobFileId={retryingDispatchJobFileId}
+        fallingBackJobFileId={fallingBackJobFileId}
         onSync={onSyncPcJobs}
         onDownloadOutput={onDownloadPcOutput}
         onRetryCloudDispatch={onRetryCloudDispatch}
+        onFallbackPcJobToCloud={onFallbackPcJobToCloud}
         onGoToSettings={onGoToSettings}
       />
 
@@ -649,17 +663,52 @@ export function QueueView({
                             className={`inline-flex items-center gap-1.5 rounded-sm border px-2 py-0.5 font-mono text-[11px] font-semibold ${
                               item.analyzeJobStatus === 'error'
                                 ? 'border-[#ff2a85]/45 bg-[#ff2a85]/12 text-[#ff85b8]'
+                                : item.analyzeJobTarget === 'pc'
+                                ? 'border-[#00f0ff]/45 bg-[#00f0ff]/10 text-[#00f0ff]'
                                 : 'border-[#fcee0a]/45 bg-[#fcee0a]/10 text-[#fcee0a]'
                             }`}
                           >
-                            <Cloud className="h-3 w-3 shrink-0" />
+                            {item.analyzeJobTarget === 'pc' ? (
+                              <Monitor className="h-3 w-3 shrink-0" />
+                            ) : (
+                              <Cloud className="h-3 w-3 shrink-0" />
+                            )}
                             {formatAnalyzeStageLabel(
                               item.analyzeJobStage,
                               item.analyzeJobStatus,
-                              item.analyzeJobProgress
+                              item.analyzeJobProgress,
+                              item.analyzeJobTarget
                             )}
                           </p>
                           {item.analyzeJobFileId &&
+                            item.analyzeJobTarget === 'pc' &&
+                            cloudRenderConfigured &&
+                            canFallbackPcJobToCloud({
+                              target: 'pc',
+                              status: item.analyzeJobStatus,
+                              createdAt: item.analyzeJobCreatedAt,
+                              pcOnline: isPcOnline,
+                              cloudRenderConfigured,
+                            }) && (
+                              <button
+                                type="button"
+                                data-testid={`queue-fallback-cloud-analyze-${item.id}`}
+                                disabled={fallingBackJobFileId === item.analyzeJobFileId}
+                                onClick={() =>
+                                  onFallbackPcJobToCloud(item.analyzeJobFileId!, 'analyze')
+                                }
+                                className="inline-flex h-6 items-center gap-1 rounded-sm border border-[#ff2a85]/55 bg-[#ff2a85]/15 px-2 font-mono text-[10px] font-semibold text-[#ffd1e3] hover:bg-[#ff2a85]/25 disabled:opacity-45"
+                              >
+                                {fallingBackJobFileId === item.analyzeJobFileId ? (
+                                  <Loader2 className="h-3 w-3 animate-spin" />
+                                ) : (
+                                  <Cloud className="h-3 w-3" />
+                                )}
+                                Enviar a la nube
+                              </button>
+                            )}
+                          {item.analyzeJobFileId &&
+                            item.analyzeJobTarget !== 'pc' &&
                             item.analyzeJobStatus === 'pending' &&
                             failedDispatchJobFileIds[item.analyzeJobFileId] && (
                               <button
@@ -691,24 +740,26 @@ export function QueueView({
                                 <ExternalLink className="h-2.5 w-2.5" />
                               </a>
                             )}
-                          {item.analyzeJobFileId && item.analyzeJobStatus === 'error' && (
-                            <button
-                              type="button"
-                              data-testid={`queue-retry-cloud-${item.id}`}
-                              disabled={retryingDispatchJobFileId === item.analyzeJobFileId}
-                              onClick={() => onRetryCloudDispatch(item.analyzeJobFileId!)}
-                              className="inline-flex h-6 items-center gap-1 rounded-sm border border-[#ff2a85]/55 bg-[#ff2a85]/15 px-2 font-mono text-[10px] font-semibold text-[#ffd1e3] hover:bg-[#ff2a85]/25 disabled:opacity-45"
-                            >
-                              <RotateCw
-                                className={`h-3 w-3 ${
-                                  retryingDispatchJobFileId === item.analyzeJobFileId
-                                    ? 'animate-spin'
-                                    : ''
-                                }`}
-                              />
-                              Reintentar
-                            </button>
-                          )}
+                          {item.analyzeJobFileId &&
+                            item.analyzeJobTarget !== 'pc' &&
+                            item.analyzeJobStatus === 'error' && (
+                              <button
+                                type="button"
+                                data-testid={`queue-retry-cloud-${item.id}`}
+                                disabled={retryingDispatchJobFileId === item.analyzeJobFileId}
+                                onClick={() => onRetryCloudDispatch(item.analyzeJobFileId!)}
+                                className="inline-flex h-6 items-center gap-1 rounded-sm border border-[#ff2a85]/55 bg-[#ff2a85]/15 px-2 font-mono text-[10px] font-semibold text-[#ffd1e3] hover:bg-[#ff2a85]/25 disabled:opacity-45"
+                              >
+                                <RotateCw
+                                  className={`h-3 w-3 ${
+                                    retryingDispatchJobFileId === item.analyzeJobFileId
+                                      ? 'animate-spin'
+                                      : ''
+                                  }`}
+                                />
+                                Reintentar
+                              </button>
+                            )}
                         </div>
                       )}
 
@@ -728,6 +779,31 @@ export function QueueView({
                               item.pcJobTarget
                             )}
                           </p>
+                          {item.pcJobFileId &&
+                            item.pcJobTarget !== 'cloud' &&
+                            cloudRenderConfigured &&
+                            canFallbackPcJobToCloud({
+                              target: 'pc',
+                              status: item.pcJobStatus,
+                              createdAt: item.pcJobCreatedAt,
+                              pcOnline: isPcOnline,
+                              cloudRenderConfigured,
+                            }) && (
+                              <button
+                                type="button"
+                                data-testid={`queue-fallback-cloud-render-${item.id}`}
+                                disabled={fallingBackJobFileId === item.pcJobFileId}
+                                onClick={() => onFallbackPcJobToCloud(item.pcJobFileId!, 'render')}
+                                className="inline-flex h-6 items-center gap-1 rounded-sm border border-[#ff2a85]/55 bg-[#ff2a85]/15 px-2 font-mono text-[10px] font-semibold text-[#ffd1e3] hover:bg-[#ff2a85]/25 disabled:opacity-45"
+                              >
+                                {fallingBackJobFileId === item.pcJobFileId ? (
+                                  <Loader2 className="h-3 w-3 animate-spin" />
+                                ) : (
+                                  <Cloud className="h-3 w-3" />
+                                )}
+                                Enviar a la nube
+                              </button>
+                            )}
                           {item.pcJobStatus === 'error' &&
                             item.pcJobTarget === 'cloud' &&
                             isSafeHttpsUrl(item.cloudWorkflowRunUrl) && (
@@ -832,27 +908,37 @@ export function QueueView({
                           data-testid={`queue-cloud-analyze-${item.id}`}
                           onClick={() => onCloudAnalyzeItem(item.id)}
                           disabled={
-                            !cloudRenderConfigured ||
+                            (resolvedTarget === 'cloud' && !cloudRenderConfigured) ||
                             !isDriveConnected ||
                             !folderId ||
                             isProcessingAny ||
                             Boolean(sendingAnalyzeId)
                           }
                           title={
-                            !cloudRenderConfigured
-                              ? 'Configura GitHub Actions y GEMINI_API_KEY (ver Ajustes)'
+                            resolvedTarget === 'cloud' && !cloudRenderConfigured
+                              ? 'Enciende el PC o configura GitHub Actions en Ajustes'
                               : !isDriveConnected || !folderId
                               ? 'Conecta Google Drive y configura tu carpeta en Ajustes'
+                              : resolvedTarget === 'pc'
+                              ? 'Transcripción Whisper GPU + Gemini en tu PC Windows'
                               : 'Transcripción real con Whisper + Gemini viendo vídeo y audio en GitHub Actions'
                           }
                           className="cyber-btn-primary inline-flex h-10 sm:h-9 items-center gap-1.5 px-3 text-xs disabled:opacity-45 whitespace-nowrap"
                         >
                           {sendingAnalyzeId === item.id ? (
                             <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : resolvedTarget === 'pc' ? (
+                            <Monitor className="h-3.5 w-3.5" />
                           ) : (
                             <Cloud className="h-3.5 w-3.5" />
                           )}
-                          Analizar en la nube (recomendado)
+                          <span>Analizar</span>
+                          <span
+                            data-testid="queue-analyze-target-badge"
+                            className="rounded-sm border border-black/30 bg-black/25 px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wider"
+                          >
+                            {resolvedTarget === 'pc' ? 'PC' : 'NUBE'}
+                          </span>
                         </button>
 
                         <button

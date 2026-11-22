@@ -30,7 +30,14 @@ import {
   renderJob,
   sanitizeOutputFilename,
 } from './render-core.mjs';
-import { analyzeCloudJob } from './analyze-core.mjs';
+import {
+  buildTranscriptCacheFilename,
+  claimJobAtomically,
+  normalizeWhisperDevice,
+  orchestrateAnalyzeJob,
+} from './analyze-core.mjs';
+
+export { buildTranscriptCacheFilename };
 
 const DRIVE_API_BASE = 'https://www.googleapis.com/drive/v3';
 const DRIVE_UPLOAD_BASE = 'https://www.googleapis.com/upload/drive/v3';
@@ -58,6 +65,8 @@ const SAFE_LOG_KEYS = new Set([
   'jobsFound',
   'cacheHit',
   'whisperModel',
+  'whisperDevice',
+  'claimedBy',
   'coherent',
 ]);
 
@@ -112,14 +121,10 @@ export function getCloudJobRoute(manifest) {
 export function shouldCloudWorkerClaimJob(manifest) {
   if (!manifest || typeof manifest !== 'object') return false;
   if (manifest.status !== 'pending') return false;
-  if (manifest.kind === 'analyze') return true;
+  if (manifest.kind === 'analyze') {
+    return manifest.target !== 'pc';
+  }
   return manifest.target === 'cloud';
-}
-
-export function buildTranscriptCacheFilename(driveFileId, modifiedTime = '') {
-  const safeId = String(driveFileId || 'unknown').replace(/[^A-Za-z0-9_-]/g, '_');
-  const safeMod = String(modifiedTime || 'nomod').replace(/[^A-Za-z0-9_-]/g, '_');
-  return `transcript_${safeId}_${safeMod}.json`;
 }
 
 export function parseCloudCliArgs(argv) {
@@ -536,103 +541,86 @@ async function listPendingCloudJobs(tokenManager, jobsFolderId) {
  */
 async function processAnalyzeJob({ tokenManager, jobFileId, manifest, jobsFolderId }) {
   const jobId = String(manifest.jobId || 'unknown').slice(0, 48);
+
+  const claimResult = await claimJobAtomically({
+    workerId: 'cloud',
+    canClaim: shouldCloudWorkerClaimJob,
+    readManifest: () => readJobManifestById(tokenManager, jobFileId),
+    writeManifest: (nextManifest) => patchJobManifest(tokenManager, jobFileId, nextManifest),
+    extraPatch: {
+      kind: 'analyze',
+      target: 'cloud',
+      stage: 'descarga',
+      progress: 5,
+    },
+  });
+
+  if (!claimResult.claimed || !claimResult.manifest) {
+    logSafe('INFO', 'analyze_claim_skipped', {
+      jobId,
+      kind: 'analyze',
+      claimedBy: claimResult.manifest?.claimedBy || 'other',
+    });
+    return;
+  }
+
+  const claimedManifest = claimResult.manifest;
   const workDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'autocut_analyze_'));
-  const tJobStart = Date.now();
   const whisperModel =
-    manifest.options?.whisperModel === 'medium'
+    claimedManifest.options?.whisperModel === 'medium'
       ? 'medium'
-      : manifest.options?.whisperModel === 'small'
+      : claimedManifest.options?.whisperModel === 'small'
       ? 'small'
       : (process.env.WHISPER_MODEL || 'small').trim() || 'small';
+  const whisperDevice = normalizeWhisperDevice(process.env.WHISPER_DEVICE, 'cpu');
   const geminiApiKey = (process.env.GEMINI_API_KEY || '').trim();
   const workerDir = path.dirname(fileURLToPath(import.meta.url));
   const transcribeScriptPath = path.join(workerDir, 'transcribe.py');
 
-  let lastProgressWriteMs = 0;
-  let lastStage = '';
-  const workingManifest = {
-    ...manifest,
-    kind: 'analyze',
-    target: 'cloud',
-    status: 'processing',
-    stage: 'descarga',
-    progress: 5,
-    errorMessage: undefined,
-  };
-
-  const writeProgress = async (stage, progress, force = false) => {
-    const now = Date.now();
-    const stageChanged = stage && stage !== lastStage;
-    workingManifest.stage = stage || workingManifest.stage;
-    workingManifest.progress = Math.max(0, Math.min(100, Math.round(progress)));
-    if (!force && !stageChanged && now - lastProgressWriteMs < PROGRESS_WRITE_THROTTLE_MS) {
-      return;
-    }
-    lastStage = workingManifest.stage;
-    lastProgressWriteMs = now;
-    await patchJobManifest(tokenManager, jobFileId, workingManifest);
-  };
-
-  logSafe('INFO', 'analyze_started', {
-    jobId,
-    kind: 'analyze',
-    clips: manifest.sourceFiles?.length ?? 0,
-    whisperModel,
-  });
-
   try {
-    await writeProgress('descarga', 5, true);
-
-    if (!geminiApiKey) {
-      throw new PhaseError(
-        'Análisis IA',
-        'Falta el secreto GEMINI_API_KEY en GitHub Actions. Añádelo en Settings > Secrets > Actions.'
-      );
-    }
-
-    if (!Array.isArray(manifest.sourceFiles) || manifest.sourceFiles.length === 0) {
-      throw new PhaseError('Drive', 'El manifiesto de análisis no contiene archivos fuente.');
-    }
-
     const cacheFolderId = await findOrCreateSubfolder(tokenManager, jobsFolderId, CACHE_SUBFOLDER);
 
-    // 1. Stream-download source videos (progress 5 -> 20)
-    const sourcePaths = [];
-    const totalClips = manifest.sourceFiles.length;
-    for (let i = 0; i < totalClips; i += 1) {
-      const src = manifest.sourceFiles[i];
-      if (!src?.driveFileId || typeof src.driveFileId !== 'string') {
-        throw new PhaseError(
-          'Drive',
-          `Falta el identificador driveFileId del clip ${i + 1} en el manifiesto.`
-        );
-      }
-      const localPath = path.join(workDir, `source_${String(i).padStart(3, '0')}.bin`);
-      const dlStats = await streamDownloadDriveFile(tokenManager, src.driveFileId, localPath);
-      sourcePaths.push(localPath);
-
-      const dlPct = 5 + Math.round(((i + 1) / totalClips) * 15);
-      await writeProgress('descarga', dlPct, i === totalClips - 1);
-      logSafe('INFO', 'analyze_source_downloaded', {
-        jobId,
-        clips: i + 1,
-        mb: dlStats.mb,
-        sec: dlStats.sec,
-        http: dlStats.http,
-      });
-    }
-
-    // 2. Run Whisper + Gemini Phases A/B/C
-    const plan = await analyzeCloudJob({
-      manifest,
-      sourcePaths,
+    await orchestrateAnalyzeJob({
+      manifest: claimedManifest,
+      target: 'cloud',
       workDir,
       apiKey: geminiApiKey,
+      missingApiKeyMessage:
+        '[Análisis IA] Falta el secreto GEMINI_API_KEY en GitHub Actions. Añádelo en Settings > Secrets > Actions.',
       ffmpegBin: process.env.AUTOCUT_FFMPEG_BIN || 'ffmpeg',
       ffprobeBin: process.env.AUTOCUT_FFPROBE_BIN || undefined,
       pythonBin: process.env.AUTOCUT_PYTHON_BIN || 'python3',
       transcribeScriptPath,
       whisperModel,
+      whisperDevice,
+      progressThrottleMs: PROGRESS_WRITE_THROTTLE_MS,
+      prepareSourcePaths: async ({ manifest: current, workDir: dir, writeProgress }) => {
+        const sourcePaths = [];
+        const totalClips = current.sourceFiles.length;
+        for (let i = 0; i < totalClips; i += 1) {
+          const src = current.sourceFiles[i];
+          if (!src?.driveFileId || typeof src.driveFileId !== 'string') {
+            throw new PhaseError(
+              'Drive',
+              `Falta el identificador driveFileId del clip ${i + 1} en el manifiesto.`
+            );
+          }
+          const localPath = path.join(dir, `source_${String(i).padStart(3, '0')}.bin`);
+          const dlStats = await streamDownloadDriveFile(tokenManager, src.driveFileId, localPath);
+          sourcePaths.push(localPath);
+
+          const dlPct = 5 + Math.round(((i + 1) / totalClips) * 15);
+          await writeProgress('descarga', dlPct, i === totalClips - 1);
+          logSafe('INFO', 'analyze_source_downloaded', {
+            jobId,
+            clips: i + 1,
+            mb: dlStats.mb,
+            sec: dlStats.sec,
+            http: dlStats.http,
+          });
+        }
+        return sourcePaths;
+      },
       getCachedTranscript: async (driveFileId, modifiedTime) => {
         const cacheName = buildTranscriptCacheFilename(driveFileId, modifiedTime);
         const hit = await readCachedTranscriptFromDrive(tokenManager, cacheFolderId, cacheName);
@@ -643,54 +631,9 @@ async function processAnalyzeJob({ tokenManager, jobFileId, manifest, jobsFolder
         const cacheName = buildTranscriptCacheFilename(driveFileId, modifiedTime);
         await writeCachedTranscriptToDrive(tokenManager, cacheFolderId, cacheName, transcriptObj);
       },
-      onProgress: async ({ stage, progress }) => {
-        await writeProgress(stage, progress, false);
-        logSafe('INFO', 'analyze_progress', { jobId, stage, progress });
-      },
+      patchManifest: (nextManifest) => patchJobManifest(tokenManager, jobFileId, nextManifest),
+      onLog: (level, stage, metrics) => logSafe(level, stage, metrics),
     });
-
-    // 3. Write final CloudEditPlan & mark analyzed
-    workingManifest.status = 'analyzed';
-    workingManifest.stage = 'revision';
-    workingManifest.progress = 100;
-    workingManifest.plan = plan;
-    workingManifest.finishedAt = new Date().toISOString();
-    delete workingManifest.errorMessage;
-
-    await patchJobManifest(tokenManager, jobFileId, workingManifest);
-    logSafe('INFO', 'analyze_completed', {
-      jobId,
-      kind: 'analyze',
-      cuts: plan.cortes.length,
-      coherent: Boolean(plan.revision?.coherente),
-      sec: Number(((Date.now() - tJobStart) / 1000).toFixed(1)),
-      progress: 100,
-    });
-  } catch (err) {
-    const rawMsg = err instanceof Error ? err.message : String(err);
-    const message =
-      err instanceof PhaseError
-        ? err.message
-        : rawMsg.startsWith('[')
-        ? rawMsg
-        : `[Análisis IA] ${rawMsg}`;
-    logSafe('ERROR', 'analyze_failed', {
-      jobId,
-      kind: 'analyze',
-      stage: workingManifest.stage,
-      sec: Number(((Date.now() - tJobStart) / 1000).toFixed(1)),
-    });
-    try {
-      await patchJobManifest(tokenManager, jobFileId, {
-        ...workingManifest,
-        status: 'error',
-        errorMessage: message.slice(0, 480),
-        finishedAt: new Date().toISOString(),
-      });
-    } catch {
-      logSafe('ERROR', 'analyze_error_patch_failed', { jobId });
-    }
-    throw err;
   } finally {
     await fsp.rm(workDir, { recursive: true, force: true }).catch(() => {});
   }
@@ -705,12 +648,35 @@ async function processCloudJob({ tokenManager, jobFileId, manifest, outputFolder
   const qualityKey = manifest.options?.quality === '720p' ? '720p' : '1080p';
   const cpuPreset = getCloudCpuPreset(qualityKey);
   const encoderName = `libx264 (${cpuPreset})`;
+
+  const claimResult = await claimJobAtomically({
+    workerId: 'cloud',
+    canClaim: shouldCloudWorkerClaimJob,
+    readManifest: () => readJobManifestById(tokenManager, jobFileId),
+    writeManifest: (nextManifest) => patchJobManifest(tokenManager, jobFileId, nextManifest),
+    extraPatch: {
+      target: 'cloud',
+      progress: 5,
+      encoderUsed: encoderName,
+    },
+  });
+
+  if (!claimResult.claimed || !claimResult.manifest) {
+    logSafe('INFO', 'job_claim_skipped', {
+      jobId,
+      kind: 'render',
+      claimedBy: claimResult.manifest?.claimedBy || 'other',
+    });
+    return;
+  }
+
+  const claimedManifest = claimResult.manifest;
   const workDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'autocut_cloud_'));
   const tJobStart = Date.now();
 
   let lastProgressWriteMs = 0;
   const workingManifest = {
-    ...manifest,
+    ...claimedManifest,
     target: 'cloud',
     status: 'processing',
     progress: 5,
@@ -731,8 +697,8 @@ async function processCloudJob({ tokenManager, jobFileId, manifest, outputFolder
   logSafe('INFO', 'job_started', {
     jobId,
     kind: 'render',
-    clips: manifest.sourceFiles?.length ?? 0,
-    cuts: manifest.cuts?.length ?? 0,
+    clips: claimedManifest.sourceFiles?.length ?? 0,
+    cuts: claimedManifest.cuts?.length ?? 0,
     quality: qualityKey,
     encoder: 'libx264',
   });

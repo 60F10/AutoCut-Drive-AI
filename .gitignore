@@ -10,6 +10,9 @@ server.js
 .DS_Store
 *.log
 worker/worker.log
+worker/logs/
 worker/start-worker.ps1
+worker/.env.local
 .env*
 !.env.example
+!worker/.env.example

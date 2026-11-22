@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import type { DriveFileMeta, PcJobSyncEntry } from '../types';
 import { formatBytes, formatPcJobStatusLabel } from '../utils/videoPipeline';
+import { canFallbackPcJobToCloud } from '../utils/remoteJobsSync';
 
 function isSafeHttpsUrl(url?: string): url is string {
   return typeof url === 'string' && /^https:\/\//i.test(url.trim());
@@ -26,15 +27,18 @@ interface PcJobsPanelProps {
   isDriveConnected: boolean;
   folderId: string;
   cloudRenderConfigured?: boolean;
+  isPcOnline?: boolean;
   isSyncing: boolean;
   lastSyncTime: number | null;
   downloadingOutputId: string | null;
   previewUrls: Record<string, string>;
   failedDispatchJobFileIds?: Record<string, string>;
   retryingDispatchJobFileId?: string | null;
+  fallingBackJobFileId?: string | null;
   onSync: () => void;
   onDownloadOutput: (outputFile: DriveFileMeta, triggerSave?: boolean) => void;
   onRetryCloudDispatch?: (jobFileId: string) => void;
+  onFallbackPcJobToCloud?: (jobFileId: string, kind: 'render' | 'analyze') => void;
   onGoToSettings?: () => void;
 }
 
@@ -45,15 +49,18 @@ export function PcJobsPanel({
   isDriveConnected,
   folderId,
   cloudRenderConfigured = false,
+  isPcOnline = false,
   isSyncing,
   lastSyncTime,
   downloadingOutputId,
   previewUrls,
   failedDispatchJobFileIds = {},
   retryingDispatchJobFileId = null,
+  fallingBackJobFileId = null,
   onSync,
   onDownloadOutput,
   onRetryCloudDispatch,
+  onFallbackPcJobToCloud,
   onGoToSettings,
 }: PcJobsPanelProps) {
   const canSync = Boolean(isDriveConnected && folderId.trim());
@@ -204,6 +211,18 @@ export function PcJobsPanel({
               manifest.status === 'error' &&
               Boolean(onRetryCloudDispatch) &&
               cloudRenderConfigured;
+            const canFallbackToCloud =
+              !isCloud &&
+              cloudRenderConfigured &&
+              Boolean(onFallbackPcJobToCloud) &&
+              canFallbackPcJobToCloud({
+                target: manifest.target ?? 'pc',
+                status: manifest.status,
+                createdAt: manifest.createdAt,
+                pcOnline: isPcOnline,
+                cloudRenderConfigured,
+              });
+            const isFallingBack = fallingBackJobFileId === entry.jobFileId;
             const safeWorkflowRunUrl = isSafeHttpsUrl(entry.workflowRunUrl ?? undefined)
               ? entry.workflowRunUrl!
               : null;
@@ -326,6 +345,23 @@ export function PcJobsPanel({
                           <RotateCw className="h-3.5 w-3.5" />
                         )}
                         Reintentar envío
+                      </button>
+                    )}
+
+                    {canFallbackToCloud && (
+                      <button
+                        type="button"
+                        data-testid="remote-job-fallback-cloud-btn"
+                        disabled={isFallingBack}
+                        onClick={() => onFallbackPcJobToCloud?.(entry.jobFileId, 'render')}
+                        className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[#ff2a85]/55 bg-[#ff2a85]/16 px-2.5 font-mono text-[11px] font-semibold text-[#ffd1e3] hover:bg-[#ff2a85]/26 transition-colors whitespace-nowrap disabled:opacity-45"
+                      >
+                        {isFallingBack ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Cloud className="h-3.5 w-3.5" />
+                        )}
+                        Enviar a la nube
                       </button>
                     )}
 

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-AutoCut Drive AI — Speech Transcription CLI (faster-whisper on CPU int8)
+AutoCut Drive AI — Speech Transcription CLI (faster-whisper with GPU CUDA / CPU int8)
 
 Usage:
-  python worker/transcribe.py --in audio.wav --out transcript.json --model small --lang es
+  python worker/transcribe.py --in audio.wav --out transcript.json --model medium --lang es --device auto
 
 Outputs JSON:
   {
@@ -25,29 +25,91 @@ import argparse
 import json
 import os
 import sys
-from faster_whisper import WhisperModel
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Transcribe audio WAV with faster-whisper")
     parser.add_argument("--in", dest="input_path", required=True, help="Input 16kHz mono WAV path")
     parser.add_argument("--out", dest="output_path", required=True, help="Output JSON path")
     parser.add_argument("--model", dest="model", default="small", help="Whisper model size (small/medium)")
     parser.add_argument("--lang", dest="lang", default="es", help="Language code (default: es)")
-    return parser.parse_args()
+    parser.add_argument(
+        "--device",
+        dest="device",
+        choices=["auto", "cuda", "cpu"],
+        default="auto",
+        help="Execution device: auto (try cuda/float16 then cpu/int8), cuda, or cpu (default: auto)",
+    )
+    parser.add_argument(
+        "--compute-type",
+        dest="compute_type",
+        default="",
+        help="Optional faster-whisper compute_type (default: float16 on cuda, int8 on cpu)",
+    )
+    return parser.parse_args(argv)
 
 
-def main() -> int:
-    args = parse_args()
+def resolve_compute_type(device: str, requested_compute_type: str = "") -> str:
+    cleaned = (requested_compute_type or "").strip()
+    if cleaned:
+        return cleaned
+    return "float16" if device == "cuda" else "int8"
+
+
+def load_whisper_model(model_name: str, device: str, compute_type: str = "", cpu_threads: int = 4):
+    from faster_whisper import WhisperModel
+
+    requested_device = (device or "auto").strip().lower()
+    if requested_device == "auto":
+        cuda_compute = resolve_compute_type("cuda", compute_type)
+        try:
+            model = WhisperModel(
+                model_name,
+                device="cuda",
+                compute_type=cuda_compute,
+            )
+            return model, "cuda", cuda_compute
+        except Exception:
+            sys.stderr.write("fallback-cpu\n")
+            sys.stderr.flush()
+            cpu_compute = "int8"
+            model = WhisperModel(
+                model_name,
+                device="cpu",
+                compute_type=cpu_compute,
+                cpu_threads=cpu_threads,
+            )
+            return model, "cpu", cpu_compute
+
+    active_compute = resolve_compute_type(requested_device, compute_type)
+    if requested_device == "cuda":
+        model = WhisperModel(
+            model_name,
+            device="cuda",
+            compute_type=active_compute,
+        )
+        return model, "cuda", active_compute
+
+    model = WhisperModel(
+        model_name,
+        device="cpu",
+        compute_type=active_compute,
+        cpu_threads=cpu_threads,
+    )
+    return model, "cpu", active_compute
+
+
+def main(argv=None) -> int:
+    args = parse_args(argv)
     if not os.path.isfile(args.input_path):
         sys.stderr.write("Input audio file not found.\n")
         return 1
 
     cpu_threads = os.cpu_count() or 4
-    model = WhisperModel(
-        args.model,
-        device="cpu",
-        compute_type="int8",
+    model, _active_device, _active_compute = load_whisper_model(
+        model_name=args.model,
+        device=args.device,
+        compute_type=args.compute_type,
         cpu_threads=cpu_threads,
     )
 

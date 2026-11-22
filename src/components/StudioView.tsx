@@ -51,6 +51,7 @@ import {
   remapSubtitlesToFinalTimeline,
   shouldRecommendPcRender,
 } from '../utils/videoPipeline';
+import { canFallbackPcJobToCloud } from '../utils/remoteJobsSync';
 
 interface StudioViewProps {
   items: QueueItem[];
@@ -65,11 +66,15 @@ interface StudioViewProps {
     patch: { start_sec?: number; end_sec?: number }
   ) => void;
   onRerenderItem: (itemId: string, qualityOverride?: ExportQuality) => void;
+  onRenderRemote: (itemId: string) => void;
   onSendToCloud: (itemId: string) => void;
   onSendToPc: (itemId: string) => void;
   onRedoStory: (itemId: string, instruction: string) => void;
   onRetryCloudDispatch: (jobFileId: string) => void;
+  onFallbackPcJobToCloud: (jobFileId: string, kind: 'render' | 'analyze') => void;
   cloudRenderConfigured: boolean;
+  isPcOnline: boolean;
+  resolvedTarget: RenderJobTarget;
   isSendingToPc: boolean;
   isSendingAnalyze: boolean;
   sendingTarget: RenderJobTarget | null;
@@ -88,6 +93,7 @@ interface StudioViewProps {
   } | null;
   failedDispatchJobFileIds: Record<string, string>;
   retryingDispatchJobFileId: string | null;
+  fallingBackJobFileId: string | null;
   onRequestDriveUpload: (itemId: string) => void;
   exportQuality: ExportQuality;
   onChangeExportQuality: (quality: ExportQuality) => void;
@@ -144,11 +150,15 @@ export function StudioView({
   onReorderCut,
   onUpdateCutTiming,
   onRerenderItem,
+  onRenderRemote,
   onSendToCloud,
   onSendToPc,
   onRedoStory,
   onRetryCloudDispatch,
+  onFallbackPcJobToCloud,
   cloudRenderConfigured,
+  isPcOnline,
+  resolvedTarget,
   isSendingToPc,
   isSendingAnalyze,
   sendingTarget,
@@ -156,6 +166,7 @@ export function StudioView({
   lastSentPcJob,
   failedDispatchJobFileIds,
   retryingDispatchJobFileId,
+  fallingBackJobFileId,
   onRequestDriveUpload,
   exportQuality,
   onChangeExportQuality,
@@ -707,12 +718,21 @@ export function StudioView({
               </div>
             </div>
 
-            {/* Primary CTA: Cloud Render via GitHub Actions (0 €, no PC, no iOS RAM limit) */}
+            {/* Primary CTA: Auto-routed Remote Render (PC primary + Cloud fallback) */}
             <div className="rounded-md border border-[#00f0ff]/45 bg-[#00f0ff]/[0.06] p-3 space-y-2.5">
               <div className="flex flex-wrap items-center justify-between gap-1.5">
                 <span className="inline-flex items-center gap-1.5 font-mono text-[10px] font-semibold uppercase tracking-wider text-[#00f0ff]">
-                  <Cloud className="h-3.5 w-3.5" />
-                  GitHub Actions · 0 € · Sin PC
+                  {resolvedTarget === 'pc' ? (
+                    <>
+                      <Monitor className="h-3.5 w-3.5" />
+                      PC Windows · GPU local · 0 €
+                    </>
+                  ) : (
+                    <>
+                      <Cloud className="h-3.5 w-3.5" />
+                      GitHub Actions · Respaldo nube · 0 €
+                    </>
+                  )}
                 </span>
                 {isPcRenderRecommended && (
                   <span
@@ -727,43 +747,57 @@ export function StudioView({
               <button
                 type="button"
                 data-testid="studio-render-cloud-btn"
-                onClick={() => onSendToCloud(currentItem.id)}
+                onClick={() => onRenderRemote(currentItem.id)}
                 disabled={
-                  !cloudRenderConfigured ||
+                  (resolvedTarget === 'cloud' && !cloudRenderConfigured) ||
                   isSendingToPc ||
                   enabledCuts.length === 0 ||
                   !canUploadToDrive
                 }
                 title={
-                  !cloudRenderConfigured
-                    ? 'Configura GITHUB_DISPATCH_TOKEN y GITHUB_REPO en Secrets (ver Ajustes)'
+                  resolvedTarget === 'cloud' && !cloudRenderConfigured
+                    ? 'Enciende tu PC o configura GITHUB_DISPATCH_TOKEN y GITHUB_REPO en Secrets (ver Ajustes)'
                     : !canUploadToDrive
-                    ? 'Conecta Google Drive y configura tu carpeta en Ajustes para renderizar en la nube'
+                    ? 'Conecta Google Drive y configura tu carpeta en Ajustes para lanzar el render remoto'
+                    : resolvedTarget === 'pc'
+                    ? 'Renderiza con FFmpeg nativo y GPU en tu PC Windows'
                     : 'Renderiza con FFmpeg nativo en GitHub Actions sin gastar RAM del móvil'
                 }
                 className="cyber-btn-primary flex min-h-[46px] w-full items-center justify-center gap-2 px-3.5 py-2 text-xs sm:text-sm font-semibold disabled:opacity-45 transition-colors"
               >
-                {!cloudRenderConfigured ? (
+                {resolvedTarget === 'cloud' && !cloudRenderConfigured ? (
                   <>
                     <Settings className="h-4 w-4 shrink-0" />
                     Configura el render en la nube (ver Ajustes)
                   </>
-                ) : isSendingCloud ? (
+                ) : isSendingToPc ? (
                   <>
                     <Loader2 className="h-4 w-4 animate-spin shrink-0" />
                     {cloudUploadProgress
                       ? `Subiendo clip ${cloudUploadProgress.clipIndex}/${cloudUploadProgress.totalClips} (${cloudUploadProgress.percent}%)...`
+                      : sendingTarget === 'pc'
+                      ? 'Enviando al PC...'
                       : 'Enviando a la nube...'}
                   </>
                 ) : (
                   <>
-                    <Cloud className="h-4 w-4 shrink-0" />
-                    Renderizar en la nube (recomendado)
+                    {resolvedTarget === 'pc' ? (
+                      <Monitor className="h-4 w-4 shrink-0" />
+                    ) : (
+                      <Cloud className="h-4 w-4 shrink-0" />
+                    )}
+                    <span>Renderizar</span>
+                    <span
+                      data-testid="studio-render-target-badge"
+                      className="rounded-sm border border-black/30 bg-black/25 px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wider"
+                    >
+                      {resolvedTarget === 'pc' ? 'PC' : 'NUBE'}
+                    </span>
                   </>
                 )}
               </button>
 
-              {!cloudRenderConfigured && (
+              {resolvedTarget === 'cloud' && !cloudRenderConfigured && (
                 <button
                   type="button"
                   data-testid="studio-open-cloud-settings-btn"
@@ -818,6 +852,33 @@ export function StudioView({
                   <p className="font-mono text-[10px] text-[#8EA2BD] truncate">
                     job_{activePcJobId}.json → {targetOutputName}
                   </p>
+                  {activePcTarget === 'pc' &&
+                    activeJobFileId &&
+                    cloudRenderConfigured &&
+                    canFallbackPcJobToCloud({
+                      target: 'pc',
+                      status: activePcStatus,
+                      createdAt: currentItem.pcJobCreatedAt,
+                      pcOnline: isPcOnline,
+                      cloudRenderConfigured,
+                    }) && (
+                      <div className="pt-1">
+                        <button
+                          type="button"
+                          data-testid="studio-fallback-cloud-btn"
+                          disabled={fallingBackJobFileId === activeJobFileId}
+                          onClick={() => onFallbackPcJobToCloud(activeJobFileId, 'render')}
+                          className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[#ff2a85]/60 bg-[#ff2a85]/18 px-2.5 font-mono text-[11px] font-semibold text-[#ffd1e3] hover:bg-[#ff2a85]/28 disabled:opacity-45"
+                        >
+                          {fallingBackJobFileId === activeJobFileId ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <Cloud className="h-3.5 w-3.5" />
+                          )}
+                          Enviar a la nube
+                        </button>
+                      </div>
+                    )}
                   {activePcStatus === 'error' && (
                     <div className="pt-1 space-y-1.5">
                       {currentItem.pcJobError && (
@@ -899,7 +960,7 @@ export function StudioView({
               )}
             </div>
 
-            {/* Collapsible Secondary Render Options: PC Worker & Local Mobile FFmpeg.wasm */}
+            {/* Collapsible Secondary Render Options: Explicit PC / Cloud & Local Mobile FFmpeg.wasm */}
             <div
               data-testid="studio-other-render-options"
               className="rounded-md border border-[#00f0ff]/22 bg-[#05060a]/85 overflow-hidden"
@@ -911,7 +972,7 @@ export function StudioView({
                 onClick={() => setShowOtherRenderOptions((prev) => !prev)}
                 className="flex min-h-[40px] w-full items-center justify-between gap-2 px-3 py-2 font-mono text-xs font-medium text-[#C8D7EC] hover:bg-[#00f0ff]/[0.06] hover:text-[#00f0ff] transition-colors"
               >
-                <span>Otras opciones (PC / móvil)</span>
+                <span>Otras opciones (PC / nube / móvil)</span>
                 {showOtherRenderOptions ? (
                   <ChevronUp className="h-4 w-4 text-[#00f0ff]" />
                 ) : (
@@ -941,10 +1002,33 @@ export function StudioView({
                     ) : (
                       <>
                         <Monitor className="h-4 w-4 text-[#00f0ff] shrink-0" />
-                        Enviar a PC ({enabledCuts.length} cortes)
+                        Forzar envío a PC ({enabledCuts.length} cortes)
                       </>
                     )}
                   </button>
+
+                  {cloudRenderConfigured && (
+                    <button
+                      type="button"
+                      data-testid="studio-force-cloud-btn"
+                      onClick={() => onSendToCloud(currentItem.id)}
+                      disabled={isSendingToPc || enabledCuts.length === 0 || !canUploadToDrive}
+                      title="Dispara el render directamente en GitHub Actions aunque el PC esté en línea"
+                      className="flex min-h-[42px] w-full items-center justify-center gap-2 rounded-md border border-[#ff2a85]/45 bg-[#ff2a85]/10 px-3 py-2 text-xs font-semibold text-[#EEF5FF] hover:bg-[#ff2a85]/20 hover:border-[#ff2a85] disabled:opacity-45 transition-colors"
+                    >
+                      {isSendingCloud ? (
+                        <>
+                          <Loader2 className="h-4 w-4 animate-spin text-[#ff2a85] shrink-0" />
+                          Enviando a la nube...
+                        </>
+                      ) : (
+                        <>
+                          <Cloud className="h-4 w-4 text-[#ff85b8] shrink-0" />
+                          Forzar envío a la nube ({enabledCuts.length} cortes)
+                        </>
+                      )}
+                    </button>
+                  )}
 
                   {multiClipMobileGuard.shouldWarn && (
                     <div

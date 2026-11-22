@@ -6,6 +6,7 @@ import {
   Check,
   Cloud,
   Layers,
+  Monitor,
   X,
   Zap,
 } from 'lucide-react';
@@ -13,6 +14,7 @@ import type {
   EditStylePreset,
   ExportQuality,
   QueueItem,
+  RenderJobTarget,
   TikTokEditOptions,
 } from '../types';
 import {
@@ -49,6 +51,7 @@ interface MultiClipComposerModalProps {
     customInstruction: string
   ) => void;
   cloudRenderConfigured: boolean;
+  resolvedTarget: RenderJobTarget;
   canUseCloud: boolean;
   isProcessing: boolean;
 }
@@ -68,6 +71,7 @@ export function MultiClipComposerModal({
   onStartCombine,
   onStartCloudAnalyze,
   cloudRenderConfigured,
+  resolvedTarget,
   canUseCloud,
   isProcessing,
 }: MultiClipComposerModalProps) {
@@ -141,10 +145,12 @@ export function MultiClipComposerModal({
     );
   };
 
+  const canRunRemoteAnalyze = canUseCloud && (resolvedTarget === 'pc' || cloudRenderConfigured);
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (orderedClips.length < 2) return;
-    if (cloudRenderConfigured && canUseCloud) {
+    if (canRunRemoteAnalyze) {
       launchCloudAnalyze();
       return;
     }
@@ -418,23 +424,27 @@ export function MultiClipComposerModal({
                 type="button"
                 data-testid="modal-start-cloud-analyze-btn"
                 onClick={launchCloudAnalyze}
-                disabled={
-                  !cloudRenderConfigured ||
-                  !canUseCloud ||
-                  isProcessing ||
-                  orderedClips.length < 2
-                }
+                disabled={!canRunRemoteAnalyze || isProcessing || orderedClips.length < 2}
                 title={
-                  !cloudRenderConfigured
-                    ? 'Configura GitHub Actions y GEMINI_API_KEY (ver Ajustes)'
+                  resolvedTarget === 'cloud' && !cloudRenderConfigured
+                    ? 'Enciende el PC o configura GitHub Actions en Ajustes'
                     : !canUseCloud
                     ? 'Conecta Google Drive y configura tu carpeta en Ajustes'
+                    : resolvedTarget === 'pc'
+                    ? 'Whisper GPU + Gemini multimodal en tu PC Windows'
                     : 'Whisper + Gemini multimodal viendo vídeo y audio en GitHub Actions'
                 }
                 className="inline-flex h-11 items-center justify-center gap-2 cyber-btn-primary px-4 text-xs font-semibold disabled:opacity-45 whitespace-nowrap"
               >
-                <Cloud className="h-3.5 w-3.5" />
-                Analizar en la nube ({orderedClips.length})
+                {resolvedTarget === 'pc' ? (
+                  <Monitor className="h-3.5 w-3.5" />
+                ) : (
+                  <Cloud className="h-3.5 w-3.5" />
+                )}
+                <span>Analizar ({orderedClips.length})</span>
+                <span className="rounded-sm border border-black/30 bg-black/25 px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wider">
+                  {resolvedTarget === 'pc' ? 'PC' : 'NUBE'}
+                </span>
               </button>
             </div>
           )}

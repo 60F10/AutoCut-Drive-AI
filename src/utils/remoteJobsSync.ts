@@ -2,13 +2,70 @@ import type {
   AnalyzeJobSyncEntry,
   CloudWorkflowRunStatus,
   PcJobSyncEntry,
+  PcWorkerStatus,
+  ProcessEngineMode,
+  RenderJobTarget,
 } from '../types';
 
 export const BASE_REMOTE_POLL_INTERVAL_MS = 15_000;
 export const MAX_REMOTE_POLL_BACKOFF_MS = 120_000;
 export const STUCK_CLOUD_JOB_THRESHOLD_MS = 3 * 60 * 1000; // 3 minutes
 export const STUCK_CLOUD_JOB_MAX_PROGRESS = 5;
+export const PC_HEARTBEAT_ONLINE_THRESHOLD_MS = 3 * 60 * 1000; // 3 minutes
+export const PC_JOB_FALLBACK_THRESHOLD_MS = 3 * 60 * 1000; // 3 minutes
 export const CLOUD_WORKFLOW_FAILED_MESSAGE = '[GitHub] El workflow falló. Revisa Actions.';
+
+/**
+ * Considers the PC worker online if `_worker_status.json` has a `lastSeen` timestamp < 3 minutes old.
+ */
+export function isPcWorkerOnline(
+  workerStatus: PcWorkerStatus | null | undefined,
+  nowMs = Date.now(),
+  thresholdMs = PC_HEARTBEAT_ONLINE_THRESHOLD_MS
+): boolean {
+  if (!workerStatus || typeof workerStatus.lastSeen !== 'string') return false;
+  const lastSeenMs = Date.parse(workerStatus.lastSeen);
+  if (!Number.isFinite(lastSeenMs)) return false;
+  const ageMs = nowMs - lastSeenMs;
+  return ageMs < thresholdMs && ageMs >= -60_000;
+}
+
+/**
+ * Resolves the target engine ('pc' | 'cloud') for a new analysis or render job
+ * based on user preference (`processEngine`) and PC heartbeat status (`pcOnline`).
+ */
+export function resolveProcessTarget(params: {
+  processEngine: ProcessEngineMode;
+  pcOnline: boolean;
+}): RenderJobTarget {
+  if (params.processEngine === 'pc') return 'pc';
+  if (params.processEngine === 'cloud') return 'cloud';
+  return params.pcOnline ? 'pc' : 'cloud';
+}
+
+/**
+ * Returns true if a pending PC job has waited > 3 minutes while the PC heartbeat is expired/offline,
+ * enabling the manual "Enviar a la nube" fallback button.
+ */
+export function canFallbackPcJobToCloud(params: {
+  target?: RenderJobTarget;
+  status?: string;
+  createdAt?: string;
+  pcOnline: boolean;
+  cloudRenderConfigured: boolean;
+  nowMs?: number;
+  thresholdMs?: number;
+}): boolean {
+  if (!params.cloudRenderConfigured) return false;
+  if (params.pcOnline) return false;
+  if (params.target === 'cloud') return false;
+  if (params.status !== 'pending') return false;
+  const createdMs = Date.parse(params.createdAt || '');
+  if (!Number.isFinite(createdMs)) return false;
+  const nowMs = params.nowMs ?? Date.now();
+  const thresholdMs = params.thresholdMs ?? PC_JOB_FALLBACK_THRESHOLD_MS;
+  return nowMs - createdMs > thresholdMs;
+}
 
 export const JOB_FILE_ID_REGEX = /^[A-Za-z0-9_-]{10,128}$/;
 
@@ -403,6 +460,7 @@ export async function inspectStuckCloudJobs(params: {
     }
 
     for (const entry of analyzeJobs) {
+      if (entry.manifest.target === 'pc') continue;
       if (nextFailures[entry.jobFileId]) continue;
       const dispatchedAtMs = resolveJobDispatchedAtMs(
         dispatchedAtByJobFileId[entry.jobFileId],

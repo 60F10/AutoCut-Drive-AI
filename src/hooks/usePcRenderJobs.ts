@@ -16,6 +16,8 @@ import type {
   EditStylePreset,
   ExportQuality,
   PcJobSyncEntry,
+  PcWorkerStatus,
+  ProcessEngineMode,
   QueueItem,
   RenderJobManifest,
   RenderJobSourceFile,
@@ -33,6 +35,7 @@ import {
   ensureCloudSourcesSubfolder,
   fetchCloudWorkflowStatus,
   listPcRenderJobsAndOutputs,
+  patchDriveJsonFile,
   uploadAnalyzeJobManifest,
   uploadRenderJobManifest,
   uploadSourceVideoResumable8MB,
@@ -55,6 +58,8 @@ import {
   hasActiveRemoteJobs,
   inspectStuckCloudJobs,
   isBackoffTriggerHttpStatus,
+  isPcWorkerOnline,
+  resolveProcessTarget,
   type CloudWorkflowFailureRecord,
 } from '../utils/remoteJobsSync';
 import { logError, logInfo, logWarn } from '../services/debugLogger';
@@ -64,6 +69,7 @@ interface UsePcRenderJobsParams {
   accessToken: string | null;
   isDriveConnected: boolean;
   cloudRenderConfigured: boolean;
+  processEngine: ProcessEngineMode;
   geminiModel: string;
   whisperModel: WhisperModelId;
   stylePreset: EditStylePreset;
@@ -110,6 +116,7 @@ export function usePcRenderJobs({
   accessToken,
   isDriveConnected,
   cloudRenderConfigured,
+  processEngine,
   geminiModel,
   whisperModel,
   stylePreset,
@@ -128,6 +135,7 @@ export function usePcRenderJobs({
   const [pcJobs, setPcJobs] = useState<PcJobSyncEntry[]>([]);
   const [analyzeJobs, setAnalyzeJobs] = useState<AnalyzeJobSyncEntry[]>([]);
   const [pcOutputs, setPcOutputs] = useState<DriveFileMeta[]>([]);
+  const [pcWorkerStatus, setPcWorkerStatus] = useState<PcWorkerStatus | null>(null);
   const [isSyncingPcJobs, setIsSyncingPcJobs] = useState(false);
   const [lastPcSyncTime, setLastPcSyncTime] = useState<number | null>(null);
   const [sendingToPcId, setSendingToPcId] = useState<string | null>(null);
@@ -139,12 +147,19 @@ export function usePcRenderJobs({
     {}
   );
   const [retryingDispatchJobFileId, setRetryingDispatchJobFileId] = useState<string | null>(null);
+  const [fallingBackJobFileId, setFallingBackJobFileId] = useState<string | null>(null);
   const [downloadingOutputId, setDownloadingOutputId] = useState<string | null>(null);
   const [pcOutputPreviewUrls, setPcOutputPreviewUrls] = useState<Record<string, string>>({});
   const [pollIntervalMs, setPollIntervalMs] = useState<number>(BASE_REMOTE_POLL_INTERVAL_MS);
   const [isPageVisible, setIsPageVisible] = useState<boolean>(() =>
     typeof document === 'undefined' ? true : document.visibilityState === 'visible'
   );
+
+  const isPcOnline = isPcWorkerOnline(pcWorkerStatus);
+  const resolvedTarget: RenderJobTarget = resolveProcessTarget({
+    processEngine,
+    pcOnline: isPcOnline,
+  });
 
   const previewUrlsRef = useRef<Record<string, string>>({});
   const syncingRef = useRef(false);
@@ -372,6 +387,7 @@ export function usePcRenderJobs({
         setPcJobs(effectiveJobs);
         setAnalyzeJobs(effectiveAnalyzeJobs);
         setPcOutputs(snapshot.outputs);
+        setPcWorkerStatus(snapshot.pcWorkerStatus);
         setLastPcSyncTime(nowMs);
 
         const currentItems = itemsRef.current;
@@ -441,6 +457,7 @@ export function usePcRenderJobs({
             pcJobId: manifest.jobId,
             pcJobFileId: entry.jobFileId,
             pcJobTarget: target,
+            pcJobCreatedAt: manifest.createdAt,
             pcJobStatus: manifest.status,
             pcJobProgress: manifest.progress,
             pcJobError: manifest.errorMessage,
@@ -489,11 +506,12 @@ export function usePcRenderJobs({
           updateQueueItem(matchingItem.id, patch);
         }
 
-        // 2. Sync Cloud Analyze Jobs (`analyze_*.json`)
+        // 2. Sync Remote Analyze Jobs (`analyze_*.json` — PC or Cloud)
         let newlyReadyStudioItemId: string | null = null;
 
         for (const entry of effectiveAnalyzeJobs) {
           const { manifest } = entry;
+          const analyzeTarget: RenderJobTarget = manifest.target === 'pc' ? 'pc' : 'cloud';
 
           if (manifest.status === 'processing' || manifest.status === 'analyzed') {
             setFailedDispatchJobFileIds((prev) => {
@@ -504,8 +522,9 @@ export function usePcRenderJobs({
             });
           }
 
-          // Only auto-relaunch once if GitHub Actions had NO run at all after > 3 min
+          // Only auto-relaunch once if a CLOUD job had NO GitHub Actions run after > 3 min
           if (
+            analyzeTarget === 'cloud' &&
             manifest.status === 'pending' &&
             cloudRenderConfigured &&
             missingRunSet.has(entry.jobFileId) &&
@@ -545,7 +564,8 @@ export function usePcRenderJobs({
           const stageLabel = formatAnalyzeStageLabel(
             manifest.stage,
             manifest.status,
-            manifest.progress
+            manifest.progress,
+            analyzeTarget
           );
 
           if (manifest.status === 'analyzed' && manifest.plan) {
@@ -563,7 +583,7 @@ export function usePcRenderJobs({
                 matchingItem?.projectName ||
                 matchingItem?.originalName ||
                 manifest.sourceFiles[0]?.name ||
-                'Video_Nube';
+                'Video_Remoto';
               const outputFileName = isMulti
                 ? buildCombinedEditedFilename(baseName, convertedPlan.etiqueta)
                 : buildEditedFilename(baseName, convertedPlan.etiqueta);
@@ -572,13 +592,15 @@ export function usePcRenderJobs({
                 updateQueueItem(matchingItem.id, {
                   stage: 'review',
                   progress: 100,
-                  stageDetail: 'Historia lista · Revisa los cortes y renderiza en la nube',
+                  stageDetail: 'Historia lista · Revisa los cortes y renderiza',
                   errorMessage: undefined,
                   analysis: convertedPlan,
                   outputFileName,
                   geminiFileCleaned: true,
                   analyzeJobId: manifest.jobId,
                   analyzeJobFileId: entry.jobFileId,
+                  analyzeJobTarget: analyzeTarget,
+                  analyzeJobCreatedAt: manifest.createdAt,
                   analyzeJobStatus: 'analyzed',
                   analyzeJobStage: 'revision',
                   analyzeJobProgress: 100,
@@ -587,7 +609,7 @@ export function usePcRenderJobs({
                 });
                 newlyReadyStudioItemId = matchingItem.id;
               } else {
-                // Hydrate an analyzed cloud job even if the user reloaded the PWA while Actions ran
+                // Hydrate an analyzed remote job even if the user reloaded the PWA while worker ran
                 const hydratedId = manifest.queueItemId || `cloud-analyzed-${manifest.jobId}`;
                 const hydratedClips: SourceClipRef[] = manifest.sourceFiles.map((sf, idx) => ({
                   id: `${hydratedId}-clip-${idx}`,
@@ -609,12 +631,12 @@ export function usePcRenderJobs({
                     ? manifest.projectName
                       ? `${manifest.projectName} (${manifest.sourceFiles.length} clips)`
                       : `${manifest.sourceFiles[0]?.name || 'Multi-Clip'} + ${manifest.sourceFiles.length - 1} más`
-                    : manifest.sourceFiles[0]?.name || 'Vídeo analizado en la nube',
+                    : manifest.sourceFiles[0]?.name || 'Vídeo analizado remotamente',
                   mimeType: 'video/mp4',
                   sizeBytes: 0,
                   modifiedTime: manifest.sourceFiles[0]?.modifiedTime || manifest.createdAt,
                   stage: 'review',
-                  stageDetail: 'Historia lista · Revisa los cortes y renderiza en la nube',
+                  stageDetail: 'Historia lista · Revisa los cortes y renderiza',
                   progress: 100,
                   outputFileName,
                   geminiFileCleaned: true,
@@ -624,6 +646,8 @@ export function usePcRenderJobs({
                   customInstruction: manifest.options?.customInstruction,
                   analyzeJobId: manifest.jobId,
                   analyzeJobFileId: entry.jobFileId,
+                  analyzeJobTarget: analyzeTarget,
+                  analyzeJobCreatedAt: manifest.createdAt,
                   analyzeJobStatus: 'analyzed',
                   analyzeJobStage: 'revision',
                   analyzeJobProgress: 100,
@@ -638,7 +662,8 @@ export function usePcRenderJobs({
                 });
               }
 
-              logInfo('IA', 'Plan multimodal recibido desde la nube y cargado en Estudio', {
+              logInfo('IA', 'Plan multimodal recibido y cargado en Estudio', {
+                origen: analyzeTarget,
                 jobId: manifest.jobId,
                 cortes: convertedPlan.cortes.length,
                 etiqueta: convertedPlan.etiqueta,
@@ -655,6 +680,8 @@ export function usePcRenderJobs({
                   errorMessage: undefined,
                   analyzeJobId: manifest.jobId,
                   analyzeJobFileId: entry.jobFileId,
+                  analyzeJobTarget: analyzeTarget,
+                  analyzeJobCreatedAt: manifest.createdAt,
                   analyzeJobStatus: manifest.status,
                   analyzeJobStage: manifest.stage,
                   analyzeJobProgress: manifest.progress || 0,
@@ -673,9 +700,14 @@ export function usePcRenderJobs({
                 progress: 0,
                 stageDetail: stageLabel,
                 errorMessage:
-                  manifest.errorMessage || 'Error inesperado durante el análisis en la nube.',
+                  manifest.errorMessage ||
+                  (analyzeTarget === 'pc'
+                    ? 'Error inesperado durante el análisis en el PC.'
+                    : 'Error inesperado durante el análisis en la nube.'),
                 analyzeJobId: manifest.jobId,
                 analyzeJobFileId: entry.jobFileId,
+                analyzeJobTarget: analyzeTarget,
+                analyzeJobCreatedAt: manifest.createdAt,
                 analyzeJobStatus: 'error',
                 analyzeJobStage: manifest.stage,
                 analyzeJobProgress: manifest.progress || 0,
@@ -738,8 +770,10 @@ export function usePcRenderJobs({
       instruction?: string;
       projectName?: string;
       isMultiClip: boolean;
+      target: RenderJobTarget;
       token: string;
     }): Promise<AnalyzeJobManifest> => {
+      const target = params.target;
       const manifest = buildAnalyzeJobManifest({
         sourceFiles: params.sourceFiles,
         model: geminiModel,
@@ -750,10 +784,12 @@ export function usePcRenderJobs({
         queueItemId: params.queueItemId,
         projectName: params.projectName,
         isMultiClip: params.isMultiClip,
+        target,
       });
 
-      logInfo('Nube', 'Subiendo manifiesto de análisis cloud a _AutoCut_Jobs', {
+      logInfo(target === 'pc' ? 'PC' : 'Nube', 'Subiendo manifiesto de análisis a _AutoCut_Jobs', {
         jobId: manifest.jobId,
+        destino: target,
         clips: manifest.sourceFiles.length,
         modelo: manifest.options.model,
         whisper: manifest.options.whisperModel,
@@ -775,12 +811,33 @@ export function usePcRenderJobs({
       ]);
       setLastPcSyncTime(Date.now());
 
+      if (target === 'pc') {
+        updateQueueItem(params.queueItemId, {
+          stage: 'analyzing',
+          progress: 5,
+          errorMessage: undefined,
+          analyzeJobId: manifest.jobId,
+          analyzeJobFileId: uploaded.id,
+          analyzeJobTarget: 'pc',
+          analyzeJobCreatedAt: manifest.createdAt,
+          analyzeJobStatus: 'pending',
+          analyzeJobStage: 'descarga',
+          analyzeJobProgress: 0,
+          analyzeJobError: undefined,
+          cloudWorkflowRunUrl: undefined,
+          stageDetail: 'En cola PC (análisis)...',
+        });
+        return manifest;
+      }
+
       updateQueueItem(params.queueItemId, {
         stage: 'analyzing',
         progress: 5,
         errorMessage: undefined,
         analyzeJobId: manifest.jobId,
         analyzeJobFileId: uploaded.id,
+        analyzeJobTarget: 'cloud',
+        analyzeJobCreatedAt: manifest.createdAt,
         analyzeJobStatus: 'pending',
         analyzeJobStage: 'descarga',
         analyzeJobProgress: 0,
@@ -829,10 +886,17 @@ export function usePcRenderJobs({
 
   const sendItemToCloudAnalyze = useCallback(
     async (itemId: string): Promise<AnalyzeJobManifest | null> => {
-      if (!cloudRenderConfigured) {
+      const target = resolveProcessTarget({ processEngine, pcOnline: isPcOnline });
+      logInfo(target === 'pc' ? 'PC' : 'Nube', 'Decisión de enrutado de análisis', {
+        motor: processEngine,
+        pcEnLinea: isPcOnline,
+        destino: target,
+      });
+
+      if (target === 'cloud' && !cloudRenderConfigured) {
         onError({
           message:
-            'El análisis en la nube aún no está configurado en el servidor. Consulta la guía en Ajustes.',
+            'El análisis en la nube aún no está configurado en el servidor. Enciende el PC o consulta la guía en Ajustes.',
           actionHint: 'settings',
         });
         return null;
@@ -840,7 +904,7 @@ export function usePcRenderJobs({
 
       const token = resolveDriveToken();
       if (!token) {
-        onError('Inicia sesión con Google Drive para analizar en la nube.');
+        onError('Inicia sesión con Google Drive para analizar el vídeo.');
         return null;
       }
       if (!folderId.trim()) {
@@ -882,7 +946,10 @@ export function usePcRenderJobs({
           stage: 'analyzing',
           progress: 3,
           errorMessage: undefined,
-          stageDetail: 'Preparando clips para análisis en la nube...',
+          stageDetail:
+            target === 'pc'
+              ? 'Preparando clips para análisis en PC...'
+              : 'Preparando clips para análisis en la nube...',
         });
 
         const resolvedSourceFiles = await ensureSourceFilesInDrive(clipCandidates, token);
@@ -909,6 +976,7 @@ export function usePcRenderJobs({
           instruction: item.customInstruction ?? customInstruction,
           projectName: item.projectName,
           isMultiClip: isMulti,
+          target,
           token,
         });
       } catch (err) {
@@ -919,13 +987,21 @@ export function usePcRenderJobs({
           const msg =
             err instanceof Error
               ? err.message
+              : target === 'pc'
+              ? 'No se pudo lanzar el análisis en el PC.'
               : 'No se pudo lanzar el análisis en la nube.';
-          logError('Nube', 'Error al lanzar análisis en la nube', { error: msg });
+          logError(target === 'pc' ? 'PC' : 'Nube', 'Error al lanzar análisis remoto', {
+            destino: target,
+            error: msg,
+          });
           updateQueueItem(itemId, {
             stage: 'error',
             progress: 0,
             errorMessage: msg,
-            stageDetail: 'Error al lanzar análisis en la nube',
+            stageDetail:
+              target === 'pc'
+                ? 'Error al lanzar análisis en PC'
+                : 'Error al lanzar análisis en la nube',
           });
           onError(msg);
         }
@@ -936,6 +1012,8 @@ export function usePcRenderJobs({
       }
     },
     [
+      processEngine,
+      isPcOnline,
       cloudRenderConfigured,
       resolveDriveToken,
       folderId,
@@ -957,10 +1035,17 @@ export function usePcRenderJobs({
       chosenPreset: EditStylePreset,
       chosenInstruction: string
     ): Promise<AnalyzeJobManifest | null> => {
-      if (!cloudRenderConfigured) {
+      const target = resolveProcessTarget({ processEngine, pcOnline: isPcOnline });
+      logInfo(target === 'pc' ? 'PC' : 'Nube', 'Decisión de enrutado de análisis Multi-Clip', {
+        motor: processEngine,
+        pcEnLinea: isPcOnline,
+        destino: target,
+      });
+
+      if (target === 'cloud' && !cloudRenderConfigured) {
         onError({
           message:
-            'El análisis en la nube aún no está configurado en el servidor. Consulta la guía en Ajustes.',
+            'El análisis en la nube aún no está configurado en el servidor. Enciende el PC o consulta la guía en Ajustes.',
           actionHint: 'settings',
         });
         return null;
@@ -968,7 +1053,7 @@ export function usePcRenderJobs({
 
       const token = resolveDriveToken();
       if (!token) {
-        onError('Inicia sesión con Google Drive para analizar en la nube.');
+        onError('Inicia sesión con Google Drive para analizar los clips.');
         return null;
       }
       if (!folderId.trim()) {
@@ -989,7 +1074,7 @@ export function usePcRenderJobs({
       if (missingSource) {
         onCloseMultiClipModal?.();
         onError(
-          'Los clips de ejemplo no contienen archivo real para enviar a la nube. Selecciona 2 o más vídeos de Google Drive o subidos desde tu móvil/PC.'
+          'Los clips de ejemplo no contienen archivo real para enviar al motor remoto. Selecciona 2 o más vídeos de Google Drive o subidos desde tu móvil/PC.'
         );
         return null;
       }
@@ -1027,7 +1112,10 @@ export function usePcRenderJobs({
         mimeType: 'video/mp4',
         sizeBytes: totalSizeBytes,
         stage: 'analyzing',
-        stageDetail: `Preparando ${orderedItems.length} clips para análisis en la nube...`,
+        stageDetail:
+          target === 'pc'
+            ? `Preparando ${orderedItems.length} clips para análisis en PC...`
+            : `Preparando ${orderedItems.length} clips para análisis en la nube...`,
         progress: 3,
         sourceClips: initialSourceClips,
         stylePreset: chosenPreset,
@@ -1066,6 +1154,7 @@ export function usePcRenderJobs({
           instruction: chosenInstruction.trim(),
           projectName: projectName.trim() || undefined,
           isMultiClip: true,
+          target,
           token,
         });
       } catch (err) {
@@ -1076,13 +1165,19 @@ export function usePcRenderJobs({
           const msg =
             err instanceof Error
               ? err.message
-              : 'No se pudo lanzar el análisis Multi-Clip en la nube.';
-          logError('Nube', 'Error al lanzar análisis Multi-Clip en la nube', { error: msg });
+              : 'No se pudo lanzar el análisis Multi-Clip.';
+          logError(target === 'pc' ? 'PC' : 'Nube', 'Error al lanzar análisis Multi-Clip', {
+            destino: target,
+            error: msg,
+          });
           updateQueueItem(combinedId, {
             stage: 'error',
             progress: 0,
             errorMessage: msg,
-            stageDetail: 'Error al lanzar análisis en la nube',
+            stageDetail:
+              target === 'pc'
+                ? 'Error al lanzar análisis en PC'
+                : 'Error al lanzar análisis en la nube',
           });
           onError(msg);
         }
@@ -1093,6 +1188,8 @@ export function usePcRenderJobs({
       }
     },
     [
+      processEngine,
+      isPcOnline,
       cloudRenderConfigured,
       resolveDriveToken,
       folderId,
@@ -1111,10 +1208,17 @@ export function usePcRenderJobs({
 
   const redoCloudStory = useCallback(
     async (itemId: string, newInstruction: string): Promise<AnalyzeJobManifest | null> => {
-      if (!cloudRenderConfigured) {
+      const target = resolveProcessTarget({ processEngine, pcOnline: isPcOnline });
+      logInfo(target === 'pc' ? 'PC' : 'Nube', 'Decisión de enrutado para rehacer historia', {
+        motor: processEngine,
+        pcEnLinea: isPcOnline,
+        destino: target,
+      });
+
+      if (target === 'cloud' && !cloudRenderConfigured) {
         onError({
           message:
-            'El análisis en la nube aún no está configurado en el servidor. Consulta la guía en Ajustes.',
+            'El análisis en la nube aún no está configurado en el servidor. Enciende el PC o consulta la guía en Ajustes.',
           actionHint: 'settings',
         });
         return null;
@@ -1122,7 +1226,7 @@ export function usePcRenderJobs({
 
       const token = resolveDriveToken();
       if (!token) {
-        onError('Inicia sesión con Google Drive para rehacer la historia en la nube.');
+        onError('Inicia sesión con Google Drive para rehacer la historia.');
         return null;
       }
       if (!folderId.trim()) {
@@ -1167,7 +1271,10 @@ export function usePcRenderJobs({
           customInstruction: trimmedInstruction || undefined,
           stage: 'analyzing',
           progress: 5,
-          stageDetail: 'Rehaciendo historia en la nube (reutilizando transcripción)...',
+          stageDetail:
+            target === 'pc'
+              ? 'Rehaciendo historia en PC (reutilizando transcripción)...'
+              : 'Rehaciendo historia en la nube (reutilizando transcripción)...',
         });
 
         return await submitAnalyzeManifest({
@@ -1177,6 +1284,7 @@ export function usePcRenderJobs({
           instruction: trimmedInstruction,
           projectName: item.projectName,
           isMultiClip: isMulti,
+          target,
           token,
         });
       } catch (err) {
@@ -1187,8 +1295,11 @@ export function usePcRenderJobs({
           const msg =
             err instanceof Error
               ? err.message
-              : 'No se pudo relanzar la historia en la nube.';
-          logError('Nube', 'Error al rehacer historia en la nube', { error: msg });
+              : 'No se pudo relanzar la historia.';
+          logError(target === 'pc' ? 'PC' : 'Nube', 'Error al rehacer historia', {
+            destino: target,
+            error: msg,
+          });
           onError(msg);
         }
         return null;
@@ -1198,6 +1309,8 @@ export function usePcRenderJobs({
       }
     },
     [
+      processEngine,
+      isPcOnline,
       cloudRenderConfigured,
       resolveDriveToken,
       folderId,
@@ -1233,24 +1346,57 @@ export function usePcRenderJobs({
       }
 
       if (item.source === 'demo') {
-        logWarn('UI', 'Intento de envío a PC con vídeo de demostración', {
-          item: item.originalName,
-        });
+        logWarn('PC', 'Intento de envío a PC con vídeo de demostración');
       }
 
       setSendingToPcId(itemId);
       setSendingTarget('pc');
+      setCloudUploadProgress(null);
       onError(null);
 
       try {
+        let sourceFilesOverride: RenderJobSourceFile[] | undefined;
+        if (item.source !== 'demo') {
+          const isMulti = Boolean(
+            item.isMultiClip && item.sourceClips && item.sourceClips.length > 0
+          );
+          const clipCandidates: ClipUploadCandidate[] = isMulti
+            ? item.sourceClips!.map((clip, idx) => ({
+                index: idx,
+                name: clip.originalName,
+                driveFileId: clip.driveFileId,
+                modifiedTime: clip.modifiedTime,
+                rawBlob: clip.rawBlob,
+              }))
+            : [
+                {
+                  index: 0,
+                  name: item.originalName,
+                  driveFileId: item.driveFileId,
+                  modifiedTime: item.modifiedTime,
+                  rawBlob: item.rawBlob,
+                },
+              ];
+
+          if (clipCandidates.some((c) => !c.driveFileId && Boolean(c.rawBlob))) {
+            const uploadedSources = await ensureSourceFilesInDrive(clipCandidates, token);
+            sourceFilesOverride = uploadedSources.map((s) => ({
+              name: s.name,
+              driveFileId: s.driveFileId,
+              ...(s.uploadedTempSource ? { uploadedTempSource: true } : {}),
+            }));
+          }
+        }
+
         const manifest = buildRenderJobManifest({
           item,
           exportQuality,
           tiktokOptions,
           target: 'pc',
+          sourceFilesOverride,
         });
 
-        logInfo('UI', 'Enviando manifiesto de render a PC (sin descargar bruto en móvil)', {
+        logInfo('PC', 'Enviando manifiesto de render a PC (sin descargar bruto en móvil)', {
           jobId: manifest.jobId,
           clips: manifest.sourceFiles.length,
           cortes: manifest.cuts.length,
@@ -1265,6 +1411,7 @@ export function usePcRenderJobs({
           pcJobId: manifest.jobId,
           pcJobFileId: uploaded.id,
           pcJobTarget: 'pc',
+          pcJobCreatedAt: manifest.createdAt,
           pcJobStatus: 'pending',
           pcJobProgress: 0,
           pcJobError: undefined,
@@ -1301,11 +1448,12 @@ export function usePcRenderJobs({
         } else {
           const msg =
             err instanceof Error ? err.message : 'No se pudo enviar el trabajo a _AutoCut_Jobs.';
-          logError('Drive', 'Fallo al enviar trabajo de render a PC', { error: msg });
+          logError('PC', 'Fallo al enviar trabajo de render a PC', { error: msg });
           onError(formatPhaseError('Drive', msg));
         }
         return null;
       } finally {
+        setCloudUploadProgress(null);
         setSendingToPcId(null);
         setSendingTarget(null);
       }
@@ -1316,6 +1464,7 @@ export function usePcRenderJobs({
       itemsRef,
       exportQuality,
       tiktokOptions,
+      ensureSourceFilesInDrive,
       updateQueueItem,
       clearAuthSession,
       onError,
@@ -1427,6 +1576,7 @@ export function usePcRenderJobs({
           pcJobId: manifest.jobId,
           pcJobFileId: uploaded.id,
           pcJobTarget: 'cloud',
+          pcJobCreatedAt: manifest.createdAt,
           pcJobStatus: 'pending',
           pcJobProgress: 0,
           pcJobError: undefined,
@@ -1497,6 +1647,173 @@ export function usePcRenderJobs({
       tiktokOptions,
       ensureSourceFilesInDrive,
       updateQueueItem,
+      clearAuthSession,
+      onError,
+    ]
+  );
+
+  const sendItemToRender = useCallback(
+    async (itemId: string): Promise<RenderJobManifest | null> => {
+      const target = resolveProcessTarget({ processEngine, pcOnline: isPcOnline });
+      logInfo(target === 'pc' ? 'PC' : 'Nube', 'Decisión de enrutado de render', {
+        motor: processEngine,
+        pcEnLinea: isPcOnline,
+        destino: target,
+      });
+      if (target === 'pc') {
+        return sendItemToPc(itemId);
+      }
+      return sendItemToCloud(itemId);
+    },
+    [processEngine, isPcOnline, sendItemToPc, sendItemToCloud]
+  );
+
+  const fallbackPcJobToCloud = useCallback(
+    async (jobFileId: string, kind: 'render' | 'analyze'): Promise<boolean> => {
+      if (!cloudRenderConfigured) {
+        onError({
+          message:
+            'El respaldo en la nube no está configurado en el servidor. Revisa Ajustes.',
+          actionHint: 'settings',
+        });
+        return false;
+      }
+
+      const token = resolveDriveToken();
+      if (!token) {
+        onError('Inicia sesión con Google Drive para redirigir el trabajo a la nube.');
+        return false;
+      }
+
+      setFallingBackJobFileId(jobFileId);
+      onError(null);
+
+      try {
+        if (kind === 'analyze') {
+          const entry = analyzeJobs.find((j) => j.jobFileId === jobFileId);
+          if (!entry) {
+            throw new Error('No se encontró el trabajo de análisis pendiente.');
+          }
+          const updatedManifest: AnalyzeJobManifest = {
+            ...entry.manifest,
+            target: 'cloud',
+            status: 'pending',
+            progress: 0,
+            errorMessage: undefined,
+            updatedAt: new Date().toISOString(),
+          };
+          await patchDriveJsonFile(jobFileId, updatedManifest, token);
+          await dispatchCloudRenderJob(jobFileId);
+          dispatchedAtByJobFileIdRef.current[jobFileId] = Date.now();
+          delete cloudWorkflowFailuresRef.current[jobFileId];
+
+          logInfo('Nube', 'Análisis PC redirigido a la nube (fallback manual)', {
+            jobId: entry.manifest.jobId,
+          });
+
+          setAnalyzeJobs((prev) =>
+            prev.map((j) =>
+              j.jobFileId !== jobFileId
+                ? j
+                : { ...j, manifest: updatedManifest, workflowRunUrl: undefined }
+            )
+          );
+
+          const matchingItem = itemsRef.current.find(
+            (it) =>
+              it.analyzeJobFileId === jobFileId ||
+              it.analyzeJobId === entry.manifest.jobId ||
+              (entry.manifest.queueItemId && it.id === entry.manifest.queueItemId)
+          );
+          if (matchingItem) {
+            updateQueueItem(matchingItem.id, {
+              stage: 'analyzing',
+              progress: 5,
+              analyzeJobTarget: 'cloud',
+              analyzeJobStatus: 'pending',
+              analyzeJobProgress: 0,
+              analyzeJobError: undefined,
+              cloudWorkflowRunUrl: undefined,
+              stageDetail: 'En cola nube (análisis) · Redirigido desde PC',
+            });
+          }
+          return true;
+        }
+
+        const entry = pcJobs.find((j) => j.jobFileId === jobFileId);
+        if (!entry) {
+          throw new Error('No se encontró el trabajo de render pendiente.');
+        }
+        const updatedManifest: RenderJobManifest = {
+          ...entry.manifest,
+          target: 'cloud',
+          status: 'pending',
+          progress: 0,
+          errorMessage: undefined,
+          updatedAt: new Date().toISOString(),
+        };
+        await patchDriveJsonFile(jobFileId, updatedManifest, token);
+        await dispatchCloudRenderJob(jobFileId);
+        dispatchedAtByJobFileIdRef.current[jobFileId] = Date.now();
+        delete cloudWorkflowFailuresRef.current[jobFileId];
+
+        logInfo('Nube', 'Render PC redirigido a la nube (fallback manual)', {
+          jobId: entry.manifest.jobId,
+        });
+
+        setPcJobs((prev) =>
+          prev.map((j) =>
+            j.jobFileId !== jobFileId
+              ? j
+              : { ...j, manifest: updatedManifest, workflowRunUrl: undefined }
+          )
+        );
+
+        const matchingItem = itemsRef.current.find(
+          (it) =>
+            it.pcJobFileId === jobFileId ||
+            it.pcJobId === entry.manifest.jobId ||
+            (entry.manifest.queueItemId && it.id === entry.manifest.queueItemId)
+        );
+        if (matchingItem) {
+          updateQueueItem(matchingItem.id, {
+            pcJobTarget: 'cloud',
+            pcJobStatus: 'pending',
+            pcJobProgress: 0,
+            pcJobError: undefined,
+            cloudWorkflowRunUrl: undefined,
+            stageDetail: 'Nube: En cola nube · Redirigido desde PC',
+          });
+        }
+        if (lastSentPcJob?.jobFileId === jobFileId) {
+          setLastSentPcJob((prev) => (prev ? { ...prev, target: 'cloud' } : null));
+        }
+        return true;
+      } catch (err) {
+        if (err instanceof DriveAuthExpiredError) {
+          clearAuthSession();
+          onError(formatPhaseError('Drive', err.message));
+        } else {
+          const msg =
+            err instanceof Error
+              ? err.message
+              : 'No se pudo redirigir el trabajo a GitHub Actions.';
+          logError('Nube', 'Error al redirigir trabajo PC a la nube', { error: msg });
+          onError(msg);
+        }
+        return false;
+      } finally {
+        setFallingBackJobFileId(null);
+      }
+    },
+    [
+      cloudRenderConfigured,
+      resolveDriveToken,
+      analyzeJobs,
+      pcJobs,
+      itemsRef,
+      updateQueueItem,
+      lastSentPcJob?.jobFileId,
       clearAuthSession,
       onError,
     ]
@@ -1731,6 +2048,9 @@ export function usePcRenderJobs({
     pcJobs,
     analyzeJobs,
     pcOutputs,
+    pcWorkerStatus,
+    isPcOnline,
+    resolvedTarget,
     isSyncingPcJobs,
     lastPcSyncTime,
     sendingToPcId,
@@ -1740,15 +2060,18 @@ export function usePcRenderJobs({
     lastSentPcJob,
     failedDispatchJobFileIds,
     retryingDispatchJobFileId,
+    fallingBackJobFileId,
     downloadingOutputId,
     pcOutputPreviewUrls,
     hasActivePcJobs,
+    sendItemToRender,
     sendItemToPc,
     sendItemToCloud,
     sendItemToCloudAnalyze,
     sendMultiClipToCloudAnalyze,
     redoCloudStory,
     retryCloudDispatch,
+    fallbackPcJobToCloud,
     syncPcJobs,
     downloadPcOutputVideo,
   };

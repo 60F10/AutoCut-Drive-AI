@@ -1,7 +1,7 @@
 import type { AppSettings, EditStylePreset, TikTokEditOptions } from '../types';
 
 export type LogLevel = 'INFO' | 'WARN' | 'ERROR';
-export type LogCategory = 'UI' | 'Drive' | 'Frames' | 'IA' | 'FFmpeg' | 'Nube' | 'Sistema';
+export type LogCategory = 'UI' | 'Drive' | 'Frames' | 'IA' | 'FFmpeg' | 'PC' | 'Nube' | 'Sistema';
 
 export interface DebugLogEntry {
   id: number;
@@ -26,7 +26,7 @@ export interface DiagnosticContextSnapshot {
   settings?: Pick<
     AppSettings,
     'model' | 'exportQuality' | 'autoWatchEnabled' | 'watchIntervalSec' | 'autoUploadEnabled'
-  > & { hasFolderId?: boolean };
+  > & { hasFolderId?: boolean; processEngine?: AppSettings['processEngine'] };
   tiktokOptions?: TikTokEditOptions;
   stylePreset?: EditStylePreset;
   queueSummary?: DiagnosticQueueSummary;
@@ -127,6 +127,7 @@ export function hydrateDebugLogsFromStorage(): number {
           item.category === 'Frames' ||
           item.category === 'IA' ||
           item.category === 'FFmpeg' ||
+          item.category === 'PC' ||
           item.category === 'Nube' ||
           item.category === 'Sistema'
             ? item.category
@@ -492,6 +493,9 @@ export function buildDiagnosticReport(context?: DiagnosticContextSnapshot): stri
           context.settings.exportQuality === 'mobile_fast' ? '720p móvil (mobile_fast)' : '1080p HD (high_1080p)'
         }`,
         `Carpeta Drive configurada: ${context.settings.hasFolderId ? 'Sí' : 'No'}`,
+        ...(context.settings.processEngine
+          ? [`Motor de proceso: ${context.settings.processEngine}`]
+          : []),
         `Vigilancia automática: ${
           context.settings.autoWatchEnabled ? `Sí (${context.settings.watchIntervalSec}s)` : 'No'
         }`,

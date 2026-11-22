@@ -196,6 +196,7 @@ const DRIVE_FOLDER_MIME = 'application/vnd.google-apps.folder';
 export const PC_JOBS_SUBFOLDER = '_AutoCut_Jobs';
 export const PC_OUTPUT_SUBFOLDER = '_AutoCut_Output';
 export const PC_SOURCES_SUBFOLDER = '_sources';
+export const PC_WORKER_STATUS_FILENAME = '_worker_status.json';
 export const DRIVE_RESUMABLE_CHUNK_BYTES = 8 * 1024 * 1024; // 8 MB chunks (multiple of 256 KB)
 
 function escapeDriveQueryValue(value: string): string {
@@ -309,12 +310,11 @@ export async function uploadRenderJobManifest(
     body: multipartBody,
   });
 
-  await assertDriveOk(res, 'Subir manifiesto de trabajo PC');
+  await assertDriveOk(res, 'Subir manifiesto de render');
   const result = (await res.json()) as DriveUploadResult;
-  logInfo(manifest.target === 'cloud' ? 'Nube' : 'Drive', 'Manifiesto de render subido a _AutoCut_Jobs', {
+  logInfo(manifest.target === 'cloud' ? 'Nube' : 'PC', 'Manifiesto de render subido a _AutoCut_Jobs', {
     jobId: manifest.jobId,
     destino: manifest.target || 'pc',
-    archivo: fileName,
     clips: manifest.sourceFiles.length,
     cortes: manifest.cuts.length,
     calidad: manifest.options.quality,
@@ -362,16 +362,36 @@ export async function uploadAnalyzeJobManifest(
     body: multipartBody,
   });
 
-  await assertDriveOk(res, 'Subir manifiesto de análisis en la nube');
+  await assertDriveOk(res, 'Subir manifiesto de análisis');
   const result = (await res.json()) as DriveUploadResult;
-  logInfo('Nube', 'Manifiesto de análisis subido a _AutoCut_Jobs', {
+  logInfo(manifest.target === 'pc' ? 'PC' : 'Nube', 'Manifiesto de análisis subido a _AutoCut_Jobs', {
     jobId: manifest.jobId,
-    archivo: fileName,
+    destino: manifest.target || 'cloud',
     clips: manifest.sourceFiles.length,
     whisperModel: manifest.options.whisperModel || 'small',
     ms: Math.round(performance.now() - t0),
   });
   return result;
+}
+
+/**
+ * Updates an existing JSON file in Google Drive (e.g. changing a pending PC job's target to "cloud").
+ */
+export async function patchDriveJsonFile(
+  fileId: string,
+  payload: unknown,
+  accessToken: string
+): Promise<void> {
+  const url = `${DRIVE_UPLOAD_BASE}/files/${encodeURIComponent(fileId)}?uploadType=media`;
+  const res = await fetch(url, {
+    method: 'PATCH',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json; charset=UTF-8',
+    },
+    body: JSON.stringify(payload, null, 2),
+  });
+  await assertDriveOk(res, 'Actualizar manifiesto en Drive');
 }
 
 /**
@@ -574,12 +594,13 @@ export interface PcRenderDriveSnapshot {
   jobs: import('../types').PcJobSyncEntry[];
   analyzeJobs: import('../types').AnalyzeJobSyncEntry[];
   outputs: DriveFileMeta[];
+  pcWorkerStatus: import('../types').PcWorkerStatus | null;
   jobsFolderId: string | null;
   outputFolderId: string | null;
 }
 
 /**
- * Reads `job_*.json` and `analyze_*.json` statuses from `_AutoCut_Jobs`
+ * Reads `job_*.json`, `analyze_*.json`, and `_worker_status.json` from `_AutoCut_Jobs`
  * and lists rendered `.mp4` files in `_AutoCut_Output`.
  */
 export async function listPcRenderJobsAndOutputs(
@@ -593,7 +614,14 @@ export async function listPcRenderJobsAndOutputs(
   ]);
 
   if (!jobsFolderId && !outputFolderId) {
-    return { jobs: [], analyzeJobs: [], outputs: [], jobsFolderId: null, outputFolderId: null };
+    return {
+      jobs: [],
+      analyzeJobs: [],
+      outputs: [],
+      pcWorkerStatus: null,
+      jobsFolderId: null,
+      outputFolderId: null,
+    };
   }
 
   const [jobFiles, outputFiles] = await Promise.all([
@@ -615,10 +643,48 @@ export async function listPcRenderJobsAndOutputs(
     .filter((f) => /^analyze_.*\.json$/i.test(f.name))
     .slice(0, 25);
 
+  const workerStatusFile = jobFiles.find(
+    (f) => f.name.toLowerCase() === PC_WORKER_STATUS_FILENAME
+  );
+
   const jobs: import('../types').PcJobSyncEntry[] = [];
   const analyzeJobs: import('../types').AnalyzeJobSyncEntry[] = [];
 
-  await Promise.all([
+  const workerStatusPromise: Promise<import('../types').PcWorkerStatus | null> = workerStatusFile
+    ? (async () => {
+        try {
+          const res = await fetch(
+            `${DRIVE_API_BASE}/files/${encodeURIComponent(workerStatusFile.id)}?alt=media`,
+            {
+              headers: {
+                Authorization: `Bearer ${accessToken}`,
+              },
+            }
+          );
+          if (!res.ok) return null;
+          const parsed = (await res.json()) as Partial<import('../types').PcWorkerStatus>;
+          if (parsed && typeof parsed === 'object' && typeof parsed.lastSeen === 'string') {
+            return {
+              lastSeen: parsed.lastSeen,
+              version: typeof parsed.version === 'string' ? parsed.version : undefined,
+              encoder: typeof parsed.encoder === 'string' ? parsed.encoder : undefined,
+              whisperDevice:
+                typeof parsed.whisperDevice === 'string' ? parsed.whisperDevice : undefined,
+              whisperModel:
+                typeof parsed.whisperModel === 'string' ? parsed.whisperModel : undefined,
+              busy: typeof parsed.busy === 'boolean' ? parsed.busy : undefined,
+            };
+          }
+          return null;
+        } catch {
+          // Ignore temporarily half-synced _worker_status.json
+          return null;
+        }
+      })()
+    : Promise.resolve(null);
+
+  const [pcWorkerStatus] = await Promise.all([
+    workerStatusPromise,
     ...renderManifestFiles.map(async (file) => {
       try {
         const res = await fetch(
@@ -708,8 +774,9 @@ export async function listPcRenderJobsAndOutputs(
     analisis: analyzeJobs.length,
     completados: jobs.filter((j) => j.manifest.status === 'completed').length,
     outputsMp4: outputs.length,
+    pcHeartbeat: Boolean(pcWorkerStatus?.lastSeen),
     ms: Math.round(performance.now() - t0),
   });
 
-  return { jobs, analyzeJobs, outputs, jobsFolderId, outputFolderId };
+  return { jobs, analyzeJobs, outputs, pcWorkerStatus, jobsFolderId, outputFolderId };
 }

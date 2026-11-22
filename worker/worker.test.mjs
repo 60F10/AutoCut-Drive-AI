@@ -1,5 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import {
   QUALITY_PROFILES,
   SDR_COLOR_ARGS,
@@ -14,7 +18,11 @@ import {
   sanitizeOutputFilename,
   verifyRenderedDurations,
 } from './render-core.mjs';
-import { shouldPcWorkerClaimJob } from './pc-worker.mjs';
+import {
+  RotatingFileLogger,
+  formatSafePcLog,
+  shouldPcWorkerClaimJob,
+} from './pc-worker.mjs';
 import {
   RESUMABLE_CHUNK_BYTES,
   buildTranscriptCacheFilename,
@@ -25,6 +33,7 @@ import {
   shouldCloudWorkerClaimJob,
 } from './cloud-worker.mjs';
 import {
+  claimJobAtomically,
   convertPlanSegmentsToCuts,
   enforceTargetDuration,
   formatSentencesForPrompt,
@@ -865,4 +874,243 @@ test('kind: "analyze" manifests route strictly to analyze (never render), are cl
     'transcript_1AbC_dEf-123_2026-11-22T10_30_00_000Z.json'
   );
 });
+
+test('pc-worker claims kind: "analyze" with target: "pc" while cloud-worker ignores it', () => {
+  const analyzePc = {
+    jobId: 'ana_pc_1',
+    kind: 'analyze',
+    target: 'pc',
+    status: 'pending',
+    sourceFiles: [{ name: 'clip.mov', driveFileId: 'drv123' }],
+  };
+  const analyzeCloud = {
+    jobId: 'ana_cloud_1',
+    kind: 'analyze',
+    target: 'cloud',
+    status: 'pending',
+    sourceFiles: [{ name: 'clip.mov', driveFileId: 'drv123' }],
+  };
+  const analyzePcProcessing = {
+    ...analyzePc,
+    status: 'processing',
+    claimedBy: 'pc',
+  };
+
+  assert.equal(shouldPcWorkerClaimJob(analyzePc), true);
+  assert.equal(shouldPcWorkerClaimJob(analyzeCloud), false);
+  assert.equal(shouldPcWorkerClaimJob(analyzePcProcessing), false);
+
+  assert.equal(shouldCloudWorkerClaimJob(analyzePc), false);
+  assert.equal(shouldCloudWorkerClaimJob(analyzeCloud), true);
+  assert.equal(shouldCloudWorkerClaimJob(analyzePcProcessing), false);
+});
+
+test('claimJobAtomically allows strictly one winner when PC and cloud race on the same pending job', async () => {
+  let sharedManifest = {
+    jobId: 'race_001',
+    kind: 'render',
+    target: 'pc',
+    status: 'pending',
+    progress: 0,
+  };
+
+  // Force both workers to read the initial `pending` state before either writes,
+  // then interleave writes and re-reads to simulate Drive sync race conditions.
+  let readsDone = 0;
+  let releaseBothReads;
+  const bothReadPromise = new Promise((resolve) => {
+    releaseBothReads = resolve;
+  });
+
+  let writesDone = 0;
+  let releaseBothWrites;
+  const bothWritePromise = new Promise((resolve) => {
+    releaseBothWrites = resolve;
+  });
+
+  const makeAdapter = () => {
+    let callNum = 0;
+    return {
+      readManifest: async () => {
+        callNum += 1;
+        if (callNum === 1) {
+          const snapshot = { ...sharedManifest };
+          readsDone += 1;
+          if (readsDone === 2) releaseBothReads();
+          await bothReadPromise;
+          return snapshot;
+        }
+        // Second read happens AFTER both workers attempted to write
+        await bothWritePromise;
+        return { ...sharedManifest };
+      },
+      writeManifest: async (next) => {
+        sharedManifest = { ...next };
+        writesDone += 1;
+        if (writesDone === 2) releaseBothWrites();
+      },
+    };
+  };
+
+  const [pcResult, cloudResult] = await Promise.all([
+    claimJobAtomically({
+      ...makeAdapter(),
+      workerId: 'pc',
+      nowIso: () => '2026-11-22T12:00:00.001Z',
+    }),
+    claimJobAtomically({
+      ...makeAdapter(),
+      workerId: 'cloud',
+      nowIso: () => '2026-11-22T12:00:00.002Z',
+    }),
+  ]);
+
+  const winners = [pcResult, cloudResult].filter((r) => r.claimed);
+  const losers = [pcResult, cloudResult].filter((r) => !r.claimed);
+
+  assert.equal(winners.length, 1, 'Strictly one worker must win the atomic claim');
+  assert.equal(losers.length, 1, 'The other worker must abort cleanly');
+  assert.equal(sharedManifest.status, 'processing');
+  assert.equal(sharedManifest.claimedBy, winners[0].manifest.claimedBy);
+
+  // A third worker arriving afterwards sees status: processing and immediately aborts
+  const lateResult = await claimJobAtomically({
+    readManifest: async () => ({ ...sharedManifest }),
+    writeManifest: async () => {
+      throw new Error('Must not write when job is not pending');
+    },
+    workerId: 'pc',
+  });
+  assert.equal(lateResult.claimed, false);
+});
+
+test('worker/transcribe.py falls back automatically from CUDA to CPU int8 when CUDA initialization fails', async (t) => {
+  const pythonCheck = spawnSync('python3', ['--version'], { encoding: 'utf8' });
+  const pythonBin = pythonCheck.status === 0 ? 'python3' : 'python';
+  const binCheck = spawnSync(pythonBin, ['--version'], { encoding: 'utf8' });
+  if (binCheck.status !== 0) {
+    t.skip('Python runtime not available in test environment');
+    return;
+  }
+
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autocut-transcribe-test-'));
+  try {
+    // Stub faster_whisper module where CUDA raises RuntimeError and CPU succeeds
+    const stubModulePath = path.join(tmpDir, 'faster_whisper.py');
+    await fs.writeFile(
+      stubModulePath,
+      [
+        'class _Word:',
+        '    def __init__(self, start, end, word):',
+        '        self.start = start',
+        '        self.end = end',
+        '        self.word = word',
+        '',
+        'class _Segment:',
+        '    def __init__(self):',
+        '        self.start = 0.2',
+        '        self.end = 1.8',
+        '        self.text = "Hola desde CPU"',
+        '        self.words = [_Word(0.2, 0.7, "Hola"), _Word(0.8, 1.8, "mundo")]',
+        '',
+        'class _Info:',
+        '    language = "es"',
+        '    duration = 2.0',
+        '',
+        'class WhisperModel:',
+        '    def __init__(self, model_size, device="cpu", compute_type="int8", **kwargs):',
+        '        if device == "cuda":',
+        '            raise RuntimeError("CUDA driver version is insufficient")',
+        '        self.device = device',
+        '        self.compute_type = compute_type',
+        '    def transcribe(self, input_path, **kwargs):',
+        '        return ([_Segment()], _Info())',
+      ].join('\n'),
+      'utf8'
+    );
+
+    const dummyAudio = path.join(tmpDir, 'dummy.mp4');
+    const outJson = path.join(tmpDir, 'transcript.json');
+    await fs.writeFile(dummyAudio, 'dummy', 'utf8');
+
+    const scriptPath = path.resolve(process.cwd(), 'worker', 'transcribe.py');
+    const res = spawnSync(
+      pythonBin,
+      [scriptPath, '--in', dummyAudio, '--out', outJson, '--model', 'medium', '--device', 'auto'],
+      {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PYTHONPATH: tmpDir,
+        },
+      }
+    );
+
+    assert.equal(res.status, 0, `transcribe.py failed: ${res.stderr}`);
+    assert.ok(
+      res.stderr.includes('fallback-cpu'),
+      `Expected stderr to contain "fallback-cpu", got: ${res.stderr}`
+    );
+
+    const parsed = JSON.parse(await fs.readFile(outJson, 'utf8'));
+    assert.equal(parsed.language, 'es');
+    assert.equal(parsed.segments.length, 1);
+    assert.equal(parsed.segments[0].words.length, 2);
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('formatSafePcLog redacts secrets/filenames and RotatingFileLogger rotates strictly within maxFiles', async () => {
+  const fakeKey = 'AIzaSyD1234567890abcdefghijklmnopqrstuv';
+  const fakeOAuth = 'ya29.a0AfH6SMBxFakeGoogleOAuthTokenValue1234567890';
+  const fakePat = 'github_pat_11ABCDEFG0123456789_secretTokenValueXYZ987654321';
+
+  const safeLine = formatSafePcLog('INFO', 'pc_worker_event', {
+    jobId: 'job_42',
+    stage: 'transcripcion',
+    progress: 55,
+    // Disallowed sensitive keys & raw values MUST be dropped/redacted
+    token: fakeOAuth,
+    apiKey: fakeKey,
+    fileName: 'vacaciones_familia_privado.mp4',
+    error: `Fallo con Bearer ${fakeOAuth} key=${fakeKey} pat=${fakePat} en G:\\Mi unidad\\secreto.mov`,
+  });
+
+  assert.ok(!safeLine.includes(fakeKey));
+  assert.ok(!safeLine.includes(fakeOAuth));
+  assert.ok(!safeLine.includes(fakePat));
+  assert.ok(!safeLine.includes('vacaciones_familia_privado.mp4'));
+  assert.ok(!safeLine.includes('secreto.mov'));
+  assert.ok(safeLine.includes('"jobId":"job_42"'));
+  assert.ok(safeLine.includes('"progress":55'));
+
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autocut-logrot-'));
+  try {
+    const logFilePath = path.join(tmpDir, 'pc-worker.log');
+    const logger = new RotatingFileLogger({
+      logFilePath,
+      maxBytes: 1024,
+      maxFiles: 5,
+      mirrorConsole: false,
+    });
+
+    for (let i = 0; i < 80; i += 1) {
+      logger.write('INFO', 'heartbeat_tick_rotation_test_padding_event', {
+        jobId: `job_${i}`,
+        stage: 'transcripcion',
+        progress: i,
+      });
+    }
+
+    const files = await fs.readdir(tmpDir);
+    assert.ok(files.includes('pc-worker.log'));
+    assert.ok(files.includes('pc-worker.log.1'), `Expected rotation to create .1 backup, got: ${files}`);
+    assert.ok(files.length <= 5, `Expected <= 5 rotated log files, got ${files.length}: ${files}`);
+    assert.ok(!files.includes('pc-worker.log.5'), 'Must not exceed 5 files total (.log + .1..4)');
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
 

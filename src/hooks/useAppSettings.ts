@@ -7,11 +7,13 @@ import type {
 } from '../types';
 import {
   DEFAULT_GEMINI_MODEL,
+  DEFAULT_PROCESS_ENGINE,
   DEFAULT_TIKTOK_OPTIONS,
   DEFAULT_WHISPER_MODEL,
   detectDefaultExportQuality,
   extractDriveFolderId,
   normalizeExportQuality,
+  normalizeProcessEngine,
   normalizeStylePreset,
   normalizeTikTokOptions,
   normalizeWhisperModel,
@@ -41,6 +43,7 @@ export function createDefaultSettings(): AppSettings {
     folderId: '',
     model: resolveEnvDefaultGeminiModel(),
     whisperModel: DEFAULT_WHISPER_MODEL,
+    processEngine: DEFAULT_PROCESS_ENGINE,
     watchIntervalSec: 60,
     autoWatchEnabled: false,
     autoUploadEnabled: true,
@@ -69,6 +72,7 @@ function loadInitialSettings(): AppSettings {
       folderId: extractDriveFolderId(String(parsed.folderId ?? '')),
       model: validModel,
       whisperModel: normalizeWhisperModel(parsed.whisperModel),
+      processEngine: normalizeProcessEngine(parsed.processEngine),
       watchIntervalSec: validInterval,
       autoWatchEnabled: Boolean(parsed.autoWatchEnabled),
       autoUploadEnabled: parsed.autoUploadEnabled !== false,
@@ -120,6 +124,7 @@ export function useAppSettings() {
       ...next,
       model: sanitizeGeminiModelName(next.model, resolveEnvDefaultGeminiModel()),
       whisperModel: normalizeWhisperModel(next.whisperModel),
+      processEngine: normalizeProcessEngine(next.processEngine),
       folderId: extractDriveFolderId(next.folderId),
       exportQuality: normalizeExportQuality(next.exportQuality),
     };
@@ -127,6 +132,7 @@ export function useAppSettings() {
     logInfo('UI', 'Ajustes guardados', {
       modelo: sanitized.model,
       whisper: sanitized.whisperModel,
+      motor: sanitized.processEngine,
       calidad: sanitized.exportQuality === 'mobile_fast' ? '720p' : '1080p',
       vigilancia: sanitized.autoWatchEnabled ? `${sanitized.watchIntervalSec}s` : 'off',
       carpeta: sanitized.folderId ? 'sí' : 'no',

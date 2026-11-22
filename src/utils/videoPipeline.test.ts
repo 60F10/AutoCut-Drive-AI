@@ -1318,7 +1318,34 @@ test('Cloud multimodal analysis contract: buildAnalyzeJobManifest, cloudEditPlan
   assert.equal(geminiPlan.cortes[0].funcion, 'gancho');
   assert.equal(geminiPlan.cortes[0].texto, 'Hoy no cae ni una gota.');
   assert.equal(geminiPlan.cortes[0].words?.length, 2);
+
+  // PC-targeted analyze manifest and stage label
+  const pcAnalyzeManifest = buildAnalyzeJobManifest({
+    jobId: 'ana_pc_99',
+    target: 'pc',
+    sourceFiles: [{ name: 'clip_pc.mov', driveFileId: 'drv-pc-1' }],
+    model: 'gemini-3.8-flash',
+    whisperModel: 'medium',
+    stylePreset: 'agile_vlog',
+    tiktokOptions: {
+      subtitlesEnabled: true,
+      silenceTrimEnabled: true,
+      audioNormalizeEnabled: true,
+      framingMode: 'center_crop',
+    },
+  });
+  assert.equal(pcAnalyzeManifest.kind, 'analyze');
+  assert.equal(pcAnalyzeManifest.target, 'pc');
+  assert.equal(
+    formatAnalyzeStageLabel('descarga', 'pending', 0, 'pc'),
+    'En cola PC (análisis)...'
+  );
+  assert.equal(
+    formatAnalyzeStageLabel('descarga', 'pending', 0, 'cloud'),
+    'En cola nube (análisis)...'
+  );
 });
+
 
 
 

@@ -9,6 +9,8 @@ import {
   Folder,
   HardDrive,
   Mic,
+  Monitor,
+  RefreshCw,
   RotateCcw,
   Save,
   ShieldCheck,
@@ -20,6 +22,9 @@ import type {
   AppSettings,
   ExportQuality,
   GeminiModelId,
+  PcWorkerStatus,
+  ProcessEngineMode,
+  RenderJobTarget,
   WatchIntervalSec,
   WhisperModelId,
 } from '../types';
@@ -49,6 +54,11 @@ interface SettingsViewProps {
   onGoogleLogout: () => void;
   geminiConfigured: boolean;
   cloudRenderConfigured: boolean;
+  pcWorkerStatus: PcWorkerStatus | null;
+  isPcOnline: boolean;
+  resolvedTarget: RenderJobTarget;
+  isSyncingPcJobs: boolean;
+  onSyncPcJobs: () => void;
   cacheStats: VideoCacheStats;
   isClearingCache: boolean;
   onClearVideoCache: () => void;
@@ -57,6 +67,8 @@ interface SettingsViewProps {
 
 const CLOUD_SETUP_DOC_URL =
   'https://github.com/60F10/AutoCut-Drive-AI/blob/main/worker/CLOUD_SETUP.md';
+const PC_WORKER_DOC_URL =
+  'https://github.com/60F10/AutoCut-Drive-AI/blob/main/worker/README.md';
 
 export function SettingsView({
   settings,
@@ -68,6 +80,11 @@ export function SettingsView({
   onGoogleLogout,
   geminiConfigured,
   cloudRenderConfigured,
+  pcWorkerStatus,
+  isPcOnline,
+  resolvedTarget,
+  isSyncingPcJobs,
+  onSyncPcJobs,
   cacheStats,
   isClearingCache,
   onClearVideoCache,
@@ -76,6 +93,7 @@ export function SettingsView({
   const [folderInput, setFolderInput] = useState(settings.folderId);
   const [model, setModel] = useState<GeminiModelId>(settings.model);
   const [whisperModel, setWhisperModel] = useState<WhisperModelId>(settings.whisperModel);
+  const [processEngine, setProcessEngine] = useState<ProcessEngineMode>(settings.processEngine);
   const [watchIntervalSec, setWatchIntervalSec] = useState<WatchIntervalSec>(
     settings.watchIntervalSec
   );
@@ -108,6 +126,7 @@ export function SettingsView({
     setFolderInput(settings.folderId);
     setModel(settings.model);
     setWhisperModel(settings.whisperModel);
+    setProcessEngine(settings.processEngine);
     setWatchIntervalSec(settings.watchIntervalSec);
     setAutoWatchEnabled(settings.autoWatchEnabled);
     setAutoUploadEnabled(settings.autoUploadEnabled);
@@ -141,6 +160,7 @@ export function SettingsView({
       folderId: parsedFolderId,
       model: cleanedModel,
       whisperModel,
+      processEngine,
       watchIntervalSec,
       autoWatchEnabled,
       autoUploadEnabled,
@@ -285,7 +305,83 @@ export function SettingsView({
           </div>
         </div>
 
-        {/* Section 2.2: Cloud Whisper Transcription Model */}
+        {/* Section 2.1: Process Engine Routing (PC primary + Cloud fallback) */}
+        <div
+          data-testid="settings-process-engine-section"
+          className="p-5 sm:p-6 space-y-4"
+        >
+          <div className="flex items-start gap-2.5">
+            <Monitor className="h-4 w-4 text-[#00f0ff] shrink-0 mt-0.5" aria-hidden="true" />
+            <div>
+              <h2 className="font-display text-base font-semibold text-[#EEF5FF]">
+                Motor de proceso
+              </h2>
+              <p className="mt-1 text-xs text-[#94A8C4] leading-relaxed">
+                Elige dónde se ejecutan el análisis (Whisper + Gemini) y el renderizado (FFmpeg). En modo automático, usa tu PC cuando está en línea y pasa a GitHub Actions si está apagado.
+              </p>
+            </div>
+          </div>
+
+          <div
+            role="radiogroup"
+            aria-label="Motor de proceso"
+            className="grid grid-cols-1 sm:grid-cols-3 gap-3"
+          >
+            {(
+              [
+                {
+                  id: 'auto',
+                  title: 'Automático (recomendado)',
+                  badge: resolvedTarget === 'pc' ? 'Destino actual: PC' : 'Destino actual: NUBE',
+                  desc: 'Envía al PC si envió latido en los últimos 3 min; si está apagado, usa GitHub Actions.',
+                },
+                {
+                  id: 'pc',
+                  title: 'Solo PC',
+                  badge: 'RTX / CUDA + NVENC',
+                  desc: 'Deja siempre los trabajos en cola para tu PC Windows (nunca dispara GitHub Actions automáticamente).',
+                },
+                {
+                  id: 'cloud',
+                  title: 'Solo nube',
+                  badge: 'GitHub Actions',
+                  desc: 'Envía siempre análisis y renders a GitHub Actions aunque el PC esté encendido.',
+                },
+              ] as Array<{ id: ProcessEngineMode; title: string; badge: string; desc: string }>
+            ).map((option) => {
+              const selected = processEngine === option.id;
+              return (
+                <button
+                  key={option.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={selected}
+                  data-testid={`settings-engine-${option.id}`}
+                  onClick={() => setProcessEngine(option.id)}
+                  className={`min-h-[44px] rounded-md border p-3.5 text-left transition-all ${
+                    selected
+                      ? 'border-[#00f0ff] bg-[#00f0ff]/10 shadow-[0_0_16px_rgba(0,240,255,0.16)]'
+                      : 'border-[#00f0ff]/20 bg-[#05060a]/85 hover:border-[#00f0ff]/45'
+                  }`}
+                >
+                  <p
+                    className={`font-mono text-xs font-semibold ${
+                      selected ? 'text-[#00f0ff]' : 'text-[#EEF5FF]'
+                    }`}
+                  >
+                    {option.title}
+                  </p>
+                  <p className="mt-1 font-mono text-[10px] font-medium text-[#fcee0a]">
+                    {option.badge}
+                  </p>
+                  <p className="mt-1.5 text-[11px] text-[#94A8C4] leading-relaxed">{option.desc}</p>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Section 2.2: Whisper Transcription Model */}
         <div
           data-testid="settings-whisper-section"
           className="p-5 sm:p-6 space-y-4"
@@ -580,6 +676,102 @@ export function SettingsView({
           </div>
         </section>
 
+        {/* PC Worker Status Card (Heartbeat from _AutoCut_Jobs/_worker_status.json) */}
+        <section
+          data-testid="pc-worker-status-card"
+          className="cyber-panel rounded-md p-5 sm:p-6 space-y-4 border border-[#00f0ff]/35"
+        >
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-start gap-3 min-w-0">
+              <Monitor className="h-5 w-5 text-[#00f0ff] shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <h2 className="font-display text-base font-semibold text-[#EEF5FF]">
+                  Estado del PC
+                </h2>
+                <p className="text-xs text-[#94A8C4] leading-relaxed">
+                  Motor principal con GPU NVIDIA (Whisper CUDA + NVENC). Lee el latido de{' '}
+                  <span className="font-mono text-[#C8D7EC]">_worker_status.json</span> en Drive.
+                </p>
+              </div>
+            </div>
+            <span
+              data-testid="pc-worker-status-badge"
+              className={`font-mono text-[10px] font-semibold uppercase tracking-wider px-2 py-1 rounded-sm border shrink-0 ${
+                isPcOnline
+                  ? 'border-[#00f0ff]/55 bg-[#00f0ff]/12 text-[#00f0ff]'
+                  : 'border-[#fcee0a]/45 bg-[#fcee0a]/10 text-[#fcee0a]'
+              }`}
+            >
+              {isPcOnline ? 'En línea' : 'Apagado'}
+            </span>
+          </div>
+
+          {pcWorkerStatus ? (
+            <div className="grid grid-cols-2 gap-2.5 text-[11px]">
+              <div className="rounded-sm border border-[#00f0ff]/18 bg-[#05060a] px-3 py-2">
+                <p className="text-[#8EA2BD]">Encoder</p>
+                <p className="mt-0.5 font-mono font-semibold text-[#00f0ff]">
+                  {pcWorkerStatus.encoder || 'auto'}
+                </p>
+              </div>
+              <div className="rounded-sm border border-[#00f0ff]/18 bg-[#05060a] px-3 py-2">
+                <p className="text-[#8EA2BD]">Whisper</p>
+                <p className="mt-0.5 font-mono font-semibold text-[#EEF5FF]">
+                  {pcWorkerStatus.whisperModel || 'medium'} ·{' '}
+                  {(pcWorkerStatus.whisperDevice || 'auto').toUpperCase()}
+                </p>
+              </div>
+              <div className="rounded-sm border border-[#00f0ff]/18 bg-[#05060a] px-3 py-2">
+                <p className="text-[#8EA2BD]">Actividad</p>
+                <p
+                  className={`mt-0.5 font-mono font-semibold ${
+                    pcWorkerStatus.busy ? 'text-[#fcee0a]' : 'text-[#00f0ff]'
+                  }`}
+                >
+                  {pcWorkerStatus.busy ? 'Procesando trabajo' : 'Disponible'}
+                </p>
+              </div>
+              <div className="rounded-sm border border-[#00f0ff]/18 bg-[#05060a] px-3 py-2">
+                <p className="text-[#8EA2BD]">Último latido</p>
+                <p className="mt-0.5 font-mono font-semibold tabular-nums text-[#C8D7EC]">
+                  {new Date(pcWorkerStatus.lastSeen).toLocaleTimeString('es-ES', {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit',
+                  })}
+                </p>
+              </div>
+            </div>
+          ) : (
+            <p className="rounded-sm border border-[#00f0ff]/15 bg-[#05060a] px-3 py-2 text-[11px] text-[#94A8C4] leading-relaxed">
+              Sin señal reciente de <span className="font-mono text-[#C8D7EC]">_worker_status.json</span>. Cuando arranques el worker en tu PC Windows aparecerá aquí en línea.
+            </p>
+          )}
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+            <button
+              type="button"
+              onClick={onSyncPcJobs}
+              disabled={isSyncingPcJobs || !user || !settings.folderId}
+              data-testid="settings-refresh-pc-status-btn"
+              className="inline-flex min-h-[40px] w-full items-center justify-center gap-2 rounded-md border border-[#00f0ff]/45 bg-[#00f0ff]/12 px-3 font-mono text-xs font-semibold text-[#00f0ff] hover:bg-[#00f0ff]/22 disabled:opacity-45 transition-colors"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${isSyncingPcJobs ? 'animate-spin' : ''}`} />
+              {isSyncingPcJobs ? 'Comprobando...' : 'Comprobar ahora'}
+            </button>
+            <a
+              href={PC_WORKER_DOC_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              data-testid="pc-worker-guide-link"
+              className="inline-flex min-h-[40px] w-full items-center justify-center gap-2 rounded-md border border-[#00f0ff]/25 bg-[#05060a] px-3 font-mono text-xs font-medium text-[#C8D7EC] hover:border-[#00f0ff]/60 hover:text-[#00f0ff] transition-colors"
+            >
+              Guía PC (worker/README)
+              <ExternalLink className="h-3.5 w-3.5 shrink-0" />
+            </a>
+          </div>
+        </section>
+
         {/* Cloud Render (GitHub Actions) Status Card */}
         <section
           data-testid="cloud-render-settings-card"
@@ -590,10 +782,10 @@ export function SettingsView({
               <Cloud className="h-5 w-5 text-[#00f0ff] shrink-0 mt-0.5" />
               <div className="space-y-1">
                 <h2 className="font-display text-base font-semibold text-[#EEF5FF]">
-                  Análisis y render en la nube
+                  Respaldo en la nube (GitHub Actions)
                 </h2>
                 <p className="text-xs text-[#94A8C4] leading-relaxed">
-                  Transcripción con Whisper, guion multimodal con Gemini y renderizado con FFmpeg nativo en GitHub Actions (coste 0 €, sin tarjeta y sin dejar ningún PC encendido).
+                  Transcripción con Whisper, guion multimodal con Gemini y renderizado con FFmpeg nativo en GitHub Actions cuando el PC está apagado (coste 0 €, sin tarjeta).
                 </p>
               </div>
             </div>
@@ -611,7 +803,7 @@ export function SettingsView({
 
           <p className="rounded-sm border border-[#00f0ff]/15 bg-[#05060a] px-3 py-2 text-[11px] text-[#94A8C4] leading-relaxed">
             {cloudRenderConfigured
-              ? 'El servidor tiene los secretos de GitHub Actions listos. Puedes usar "Analizar en la nube" en la Cola y "Renderizar en la nube" desde el Estudio.'
+              ? 'El servidor tiene los secretos de GitHub Actions listos. En modo Automático se usará como respaldo si tu PC está apagado.'
               : 'Faltan las variables de servidor GITHUB_DISPATCH_TOKEN y GITHUB_REPO en Secrets (y GEMINI_API_KEY en GitHub Secrets para el análisis). Sigue la guía paso a paso.'}
           </p>
 
