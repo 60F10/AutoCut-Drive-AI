@@ -18,6 +18,7 @@ import {
   FrameExtractionError,
   extractLightweightVideoFrames,
 } from './frameExtractor';
+import { logError, logInfo } from './debugLogger';
 
 const ANALYZE_FETCH_TIMEOUT_MS = 75_000;
 const HEALTH_FETCH_TIMEOUT_MS = 10_000;
@@ -86,6 +87,7 @@ async function fetchRelativeJsonWithTimeout(
     if (isAbort) {
       const detail = `Timeout tras ${Math.round(timeoutMs / 1000)}s en ${relativePath}`;
       console.error(`[Análisis IA] ${detail}`);
+      logError('IA', 'Timeout en petición HTTP', { ruta: relativePath, timeoutSeg: Math.round(timeoutMs / 1000) });
       throw new GeminiClientError(
         `Tiempo de espera agotado (${Math.round(timeoutMs / 1000)}s) al contactar con el servidor de IA. Comprueba tu conexión e inténtalo de nuevo.`,
         'Análisis IA',
@@ -96,6 +98,7 @@ async function fetchRelativeJsonWithTimeout(
     const rawMsg = err instanceof Error ? err.message : String(err);
     const parsed = parseHumanReadableApiError(rawMsg);
     console.error(`[Análisis IA] Fallo de red en ${relativePath}:`, err);
+    logError('IA', 'Error de red en petición HTTP', { ruta: relativePath, error: rawMsg }, err);
     throw new GeminiClientError(
       parsed.userMessage,
       'Análisis IA',
@@ -193,6 +196,17 @@ export async function analyzeVideoWithGemini(
     58
   );
 
+  const apiStartMs = performance.now();
+  logInfo('IA', 'Enviando fotogramas a /api/gemini/analyze-video', {
+    archivo: fileName,
+    modelo: safeModel,
+    frames: budgeted.payload.frames.length,
+    payloadKB: Math.round(budgeted.byteLength / 1024),
+    duracionSeg: Number(effectiveDuration.toFixed(1)),
+    clipIndex: styleOptions?.clipIndex ?? 0,
+    subtitulos: Boolean(styleOptions?.subtitlesEnabled),
+  });
+
   // 3. Call relative /api/gemini/analyze-video endpoint with timeout & JSON response
   const response = await fetchRelativeJsonWithTimeout(
     '/api/gemini/analyze-video',
@@ -232,6 +246,13 @@ export async function analyzeVideoWithGemini(
 
     const parsed = parseHumanReadableApiError(rawErrorText);
     const detail = technicalDetail || parsed.technicalDetail;
+    logError('IA', 'Respuesta HTTP de error en Gemini', {
+      archivo: fileName,
+      modelo: safeModel,
+      http: response.status,
+      ms: Math.round(performance.now() - apiStartMs),
+      detalle: detail || parsed.userMessage,
+    });
     if (detail) {
       console.error('[Análisis IA] Detalle del error del servidor:', detail);
     }
@@ -256,6 +277,7 @@ export async function analyzeVideoWithGemini(
     data = (await response.json()) as typeof data;
   } catch (parseErr) {
     const detail = parseErr instanceof Error ? parseErr.message : String(parseErr);
+    logError('IA', 'JSON de respuesta inválido', { archivo: fileName, http: response.status }, parseErr);
     throw new GeminiClientError(
       'El servidor devolvió una respuesta incompleta o no válida.',
       'Análisis IA',
@@ -265,6 +287,12 @@ export async function analyzeVideoWithGemini(
 
   if (data.error) {
     const parsed = parseHumanReadableApiError(data.error);
+    logError('IA', 'Error lógico en respuesta de Gemini', {
+      archivo: fileName,
+      modelo: safeModel,
+      ms: Math.round(performance.now() - apiStartMs),
+      detalle: data.technicalDetail || parsed.userMessage,
+    });
     throw new GeminiClientError(
       parsed.userMessage,
       'Análisis IA',
@@ -274,6 +302,7 @@ export async function analyzeVideoWithGemini(
   }
 
   if (!data.analysis) {
+    logError('IA', 'Respuesta sin análisis de cortes', { archivo: fileName, modelo: safeModel });
     throw new GeminiClientError(
       'Gemini terminó el análisis sin devolver cortes.',
       'Análisis IA'
@@ -302,6 +331,15 @@ export async function analyzeVideoWithGemini(
         }
       : {}),
   };
+
+  logInfo('IA', 'Análisis IA completado', {
+    archivo: fileName,
+    modelo: safeModel,
+    http: response.status,
+    cortes: normalizedPlan.cortes.length,
+    etiqueta: normalizedPlan.etiqueta,
+    ms: Math.round(performance.now() - apiStartMs),
+  });
 
   onStatusUpdate?.(
     `Análisis completado (${budgeted.payload.frames.length} fotogramas · ${formatBytes(budgeted.byteLength)}).`,

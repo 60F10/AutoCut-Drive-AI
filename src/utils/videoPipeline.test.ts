@@ -44,6 +44,16 @@ import {
   toLocalDateKey,
   type ExtractedVideoFrame,
 } from './videoPipeline';
+import {
+  MAX_DEBUG_LOG_ENTRIES,
+  buildDiagnosticReport,
+  clearDebugLogs,
+  getDebugLogStats,
+  getDebugLogs,
+  logError,
+  logInfo,
+  sanitizeLogString,
+} from '../services/debugLogger';
 import type { AnalyticsRecord, DriveFileMeta, SubtitleBlock, VideoCut } from '../types';
 
 test('extractDriveFolderId parses raw IDs and full Google Drive URLs', () => {
@@ -657,5 +667,83 @@ test('mergeMultiClipEditPlans combines per-clip analyses preserving clip_index a
   assert.equal(formatPhaseError('Análisis IA', 'Timeout'), '[Análisis IA] Timeout');
   assert.equal(formatPhaseError('Extracción frames', 'Códec no soportado'), '[Extracción frames] Códec no soportado');
 });
+
+test('debugLogger keeps a 200-entry circular buffer, redacts secrets/base64, and builds a clean diagnostic report', () => {
+  clearDebugLogs();
+  assert.equal(MAX_DEBUG_LOG_ENTRIES, 200);
+
+  // Fill 215 entries -> circular buffer keeps strictly the last 200
+  for (let i = 1; i <= 215; i += 1) {
+    logInfo('UI', `Evento número ${i}`);
+  }
+  const all = getDebugLogs();
+  assert.equal(all.length, 200);
+  assert.equal(all[0].message, 'Evento número 16');
+  assert.equal(all[199].message, 'Evento número 215');
+  assert.match(all[0].timestamp, /^\d{2}:\d{2}:\d{2}\.\d{3}$/);
+
+  // Security redaction: API keys, OAuth tokens, Authorization Bearer, and base64 images are NEVER stored raw
+  clearDebugLogs();
+  const fakeApiKey = 'AIzaSyD1234567890abcdefghijklmnopqrstuv';
+  const fakeOAuth = 'ya29.a0AfH6SMBxFakeGoogleOAuthTokenValue1234567890';
+  const fakeBase64 = `data:image/jpeg;base64,${'A'.repeat(4000)}`;
+
+  logError(
+    'IA',
+    `Fallo con Authorization: Bearer ${fakeOAuth} y key ${fakeApiKey} img=${fakeBase64}`,
+    {
+      access_token: fakeOAuth,
+      authorization: `Bearer ${fakeOAuth}`,
+      apiKey: fakeApiKey,
+      dataBase64: 'B'.repeat(8000),
+      http: 404,
+      archivo: 'clip.mov',
+    },
+    new Error(`Boom ${fakeApiKey}`)
+  );
+
+  const report = buildDiagnosticReport({
+    settings: {
+      model: 'gemini-3.8-flash',
+      exportQuality: 'mobile_fast',
+      autoWatchEnabled: false,
+      watchIntervalSec: 60,
+      autoUploadEnabled: true,
+      hasFolderId: true,
+    },
+    tiktokOptions: {
+      subtitlesEnabled: false,
+      silenceTrimEnabled: true,
+      audioNormalizeEnabled: true,
+      framingMode: 'center_crop',
+    },
+    stylePreset: 'funny_jumpcut',
+    queueSummary: { total: 3, pending: 1, active: 0, completed: 1, error: 1 },
+    activeError: '[Análisis IA] Error 404',
+  });
+
+  // Never leaks secrets or raw base64
+  assert.ok(!report.includes(fakeApiKey));
+  assert.ok(!report.includes(fakeOAuth));
+  assert.ok(!report.includes('AAAA'.repeat(40)));
+  assert.ok(!report.includes('BBBB'.repeat(40)));
+  assert.ok(report.includes('[OMITIDO]'));
+  assert.ok(report.includes('[base64:'));
+  assert.ok(sanitizeLogString(fakeBase64).startsWith('[base64:'));
+
+  // Contains structured sections required for mobile debugging
+  assert.ok(report.includes('--- ENTORNO ---'));
+  assert.ok(report.includes('--- CONFIGURACIÓN ACTIVA ---'));
+  assert.ok(report.includes('Modelo Gemini: gemini-3.8-flash'));
+  assert.ok(report.includes('720p móvil'));
+  assert.ok(report.includes('Subtítulos automáticos: No'));
+  assert.ok(report.includes('--- ESTADO DE LA COLA ---'));
+  assert.ok(report.includes('--- CRONOLOGÍA (1 eventos · 1 errores'));
+  assert.equal(getDebugLogStats().errors, 1);
+
+  clearDebugLogs();
+  assert.equal(getDebugLogStats().total, 0);
+});
+
 
 

@@ -20,6 +20,7 @@ import {
   getVideoCacheStats,
   type VideoCacheStats,
 } from '../services/videoStorage';
+import { logInfo } from '../services/debugLogger';
 
 const SETTINGS_STORAGE_KEY = 'autocut_drive_ai_settings_v1';
 const STYLE_PRESET_STORAGE_KEY = 'autocut_drive_ai_style_preset_v1';
@@ -118,6 +119,12 @@ export function useAppSettings() {
       exportQuality: normalizeExportQuality(next.exportQuality),
     };
     setSettings(sanitized);
+    logInfo('UI', 'Ajustes guardados', {
+      modelo: sanitized.model,
+      calidad: sanitized.exportQuality === 'mobile_fast' ? '720p' : '1080p',
+      vigilancia: sanitized.autoWatchEnabled ? `${sanitized.watchIntervalSec}s` : 'off',
+      carpeta: sanitized.folderId ? 'sí' : 'no',
+    });
     try {
       window.localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(sanitized));
     } catch {
@@ -126,12 +133,14 @@ export function useAppSettings() {
   }, []);
 
   const resetSettings = useCallback(() => {
+    logInfo('UI', 'Ajustes restablecidos a valores por defecto');
     persistSettings(createDefaultSettings());
   }, [persistSettings]);
 
   const handleChangeStylePreset = useCallback((next: EditStylePreset) => {
     const normalized = normalizeStylePreset(next);
     setStylePreset(normalized);
+    logInfo('UI', 'Estilo de edición cambiado', { estilo: normalized });
     try {
       window.localStorage.setItem(STYLE_PRESET_STORAGE_KEY, normalized);
     } catch {
@@ -142,6 +151,12 @@ export function useAppSettings() {
   const handleChangeTikTokOptions = useCallback((patch: Partial<TikTokEditOptions>) => {
     setTikTokOptions((prev) => {
       const next = normalizeTikTokOptions({ ...prev, ...patch });
+      logInfo('UI', 'Opciones de edición TikTok actualizadas', {
+        subtitulos: next.subtitlesEnabled ? 'sí' : 'no',
+        silencios: next.silenceTrimEnabled ? 'sí' : 'no',
+        loudnorm: next.audioNormalizeEnabled ? 'sí' : 'no',
+        encuadre: next.framingMode,
+      });
       try {
         window.localStorage.setItem(TIKTOK_OPTIONS_STORAGE_KEY, JSON.stringify(next));
       } catch {
@@ -153,9 +168,13 @@ export function useAppSettings() {
 
   const handleChangeExportQuality = useCallback(
     (quality: ExportQuality) => {
+      const normalized = normalizeExportQuality(quality);
+      logInfo('UI', 'Modo de resolución cambiado', {
+        calidad: normalized === 'mobile_fast' ? '720p móvil' : '1080p HD',
+      });
       persistSettings({
         ...settings,
-        exportQuality: normalizeExportQuality(quality),
+        exportQuality: normalized,
       });
     },
     [settings, persistSettings]

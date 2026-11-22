@@ -40,6 +40,7 @@ import {
   getEditedVideoBlob,
   saveEditedVideoBlob,
 } from '../services/videoStorage';
+import { logError, logInfo } from '../services/debugLogger';
 
 const ANALYTICS_STORAGE_KEY = 'autocut_drive_ai_analytics_v1';
 const GALLERY_ITEMS_STORAGE_KEY = 'autocut_drive_ai_gallery_items_v1';
@@ -341,11 +342,17 @@ export function useVideoQueue({
     }
 
     setIsScanning(true);
+    logInfo('Drive', 'Escaneando carpeta de Google Drive');
     try {
       const files = await listDriveFolderFiles(settings.folderId, token);
       const { pending, alreadyEditedSources } = detectPendingVideos(files);
       setAlreadyEditedCount(alreadyEditedSources.length);
       setLastScanTime(Date.now());
+      logInfo('Drive', 'Escaneo completado', {
+        pendientes: pending.length,
+        yaEditados: alreadyEditedSources.length,
+        totalDrive: files.length,
+      });
 
       setItems((prev) => {
         const existingDriveIds = new Set(
@@ -372,6 +379,7 @@ export function useVideoQueue({
       if (err instanceof DriveAuthExpiredError) {
         clearAuthSession();
       }
+      logError('Drive', 'Error al escanear carpeta de Drive', undefined, err);
       onError(
         formatPhaseError(
           'Drive',
@@ -459,6 +467,14 @@ export function useVideoQueue({
       }
 
       setItems((prev) => [...added, ...prev]);
+      const totalAddedMb = Number(
+        (added.reduce((sum, f) => sum + f.sizeBytes, 0) / (1024 * 1024)).toFixed(2)
+      );
+      logInfo('UI', 'Vídeos locales añadidos a la cola', {
+        cantidad: added.length,
+        pesoTotalMB: totalAddedMb,
+        primero: added[0]?.originalName,
+      });
 
       // Inspect resolution & duration asynchronously to warn early about heavy/4K files
       added.forEach((entry) => {
@@ -562,7 +578,15 @@ export function useVideoQueue({
 
       onError(null);
       setIsProcessingAny(true);
+      const processStartMs = performance.now();
       let currentPhase: ErrorPhase = target.source === 'drive' && !target.rawBlob ? 'Drive' : 'Extracción frames';
+      logInfo('UI', 'Clic en procesar vídeo', {
+        archivo: target.originalName,
+        origen: target.source,
+        pesoMB: Number((target.sizeBytes / (1024 * 1024)).toFixed(2)),
+        modelo: settings.model,
+        calidad: settings.exportQuality === 'mobile_fast' ? '720p' : '1080p',
+      });
 
       try {
         let rawBlob = target.rawBlob;
@@ -667,6 +691,13 @@ export function useVideoQueue({
           progress: 100,
         });
 
+        logInfo('IA', 'EDL listo para revisión en Estudio', {
+          archivo: target.originalName,
+          cortes: plan.cortes.length,
+          etiqueta: plan.etiqueta,
+          totalMs: Math.round(performance.now() - processStartMs),
+        });
+
         onSelectStudioItem(itemId);
         if (openStudioOnReview) {
           onNavigateView('studio');
@@ -691,6 +722,21 @@ export function useVideoQueue({
                   actionHint: parsed.actionHint,
                 };
               })();
+        const logCat =
+          currentPhase === 'Drive'
+            ? 'Drive'
+            : currentPhase === 'Extracción frames'
+            ? 'Frames'
+            : 'IA';
+        logError(
+          logCat,
+          `Fallo procesando ${target.originalName}: ${structured.message}`,
+          {
+            fase: currentPhase,
+            totalMs: Math.round(performance.now() - processStartMs),
+          },
+          err
+        );
         updateQueueItem(itemId, {
           stage: 'error',
           errorMessage: structured.message,
@@ -785,6 +831,14 @@ export function useVideoQueue({
       };
 
       setItems((prev) => [combinedItem, ...prev]);
+
+      const multiStartMs = performance.now();
+      logInfo('UI', 'Iniciando combinación Multi-Clip', {
+        clips: orderedItems.length,
+        pesoTotalMB: Number((totalSizeBytes / (1024 * 1024)).toFixed(2)),
+        modelo: settings.model,
+        estilo: chosenPreset,
+      });
 
       let currentPhase: ErrorPhase = 'Drive';
       try {
@@ -901,6 +955,12 @@ export function useVideoQueue({
           progress: 100,
         });
 
+        logInfo('IA', 'Plan Multi-Clip listo para revisión', {
+          clips: resolvedClips.length,
+          cortes: plan.cortes.length,
+          totalMs: Math.round(performance.now() - multiStartMs),
+        });
+
         onSelectStudioItem(combinedId);
         onNavigateView('studio');
       } catch (err) {
@@ -923,6 +983,15 @@ export function useVideoQueue({
                   actionHint: parsed.actionHint,
                 };
               })();
+        logError(
+          currentPhase === 'Drive' ? 'Drive' : currentPhase === 'Extracción frames' ? 'Frames' : 'IA',
+          `Fallo en Multi-Clip (${displayName}): ${structured.message}`,
+          {
+            fase: currentPhase,
+            totalMs: Math.round(performance.now() - multiStartMs),
+          },
+          err
+        );
         updateQueueItem(combinedId, {
           stage: 'error',
           errorMessage: structured.message,

@@ -1,8 +1,26 @@
 import { useEffect, useState } from 'react';
-import { Check, Cpu, Folder, HardDrive, RotateCcw, Save, ShieldCheck, Trash2, Zap } from 'lucide-react';
+import {
+  Bug,
+  Check,
+  ClipboardCopy,
+  Cpu,
+  Folder,
+  HardDrive,
+  RotateCcw,
+  Save,
+  ShieldCheck,
+  Trash2,
+  Zap,
+} from 'lucide-react';
 import type { User } from 'firebase/auth';
 import type { AppSettings, ExportQuality, GeminiModelId, WatchIntervalSec } from '../types';
 import type { VideoCacheStats } from '../services/videoStorage';
+import {
+  clearDebugLogs,
+  getDebugLogStats,
+  subscribeDebugLogs,
+  type DebugLogStats,
+} from '../services/debugLogger';
 import {
   DEFAULT_GEMINI_MODEL,
   RECOMMENDED_GEMINI_MODELS,
@@ -24,6 +42,7 @@ interface SettingsViewProps {
   cacheStats: VideoCacheStats;
   isClearingCache: boolean;
   onClearVideoCache: () => void;
+  onCopyDiagnosticReport: () => Promise<boolean>;
 }
 
 export function SettingsView({
@@ -38,6 +57,7 @@ export function SettingsView({
   cacheStats,
   isClearingCache,
   onClearVideoCache,
+  onCopyDiagnosticReport,
 }: SettingsViewProps) {
   const [folderInput, setFolderInput] = useState(settings.folderId);
   const [model, setModel] = useState<GeminiModelId>(settings.model);
@@ -49,6 +69,25 @@ export function SettingsView({
   const [exportQuality, setExportQuality] = useState<ExportQuality>(settings.exportQuality);
   const [savedBanner, setSavedBanner] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
+  const [logStats, setLogStats] = useState<DebugLogStats>(() => getDebugLogStats());
+  const [copiedReport, setCopiedReport] = useState(false);
+
+  useEffect(() => {
+    setLogStats(getDebugLogStats());
+    return subscribeDebugLogs(() => setLogStats(getDebugLogStats()));
+  }, []);
+
+  const handleCopyReportClick = async () => {
+    const ok = await onCopyDiagnosticReport();
+    if (ok) {
+      setCopiedReport(true);
+      window.setTimeout(() => setCopiedReport(false), 2000);
+    }
+  };
+
+  const handleClearLogsClick = () => {
+    clearDebugLogs();
+  };
 
   useEffect(() => {
     setFolderInput(settings.folderId);
@@ -451,6 +490,79 @@ export function SettingsView({
             ) : (
               <GoogleSignInButton onClick={onGoogleLogin} loading={isLoggingIn} />
             )}
+          </div>
+        </section>
+
+        {/* Diagnostic & Support Card */}
+        <section
+          data-testid="diagnostic-support-card"
+          className="cyber-panel rounded-md p-5 sm:p-6 space-y-4 border border-[#00f0ff]/35"
+        >
+          <div className="flex items-start gap-3">
+            <Bug className="h-5 w-5 text-[#fcee0a] shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <h2 className="font-display text-base font-semibold text-[#EEF5FF]">
+                Diagnóstico y soporte
+              </h2>
+              <p className="text-xs text-[#94A8C4] leading-relaxed">
+                Copia en un toque la cronología de acciones, configuración y errores (sin tokens ni claves) para pegarla en un chat y depurar desde el móvil.
+              </p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2.5">
+            <div className="rounded-md border border-[#00f0ff]/25 bg-[#05060a] px-3.5 py-2.5">
+              <p className="text-[11px] text-[#8EA2BD]">Eventos registrados</p>
+              <p
+                data-testid="diagnostic-events-count"
+                className="mt-0.5 font-mono text-sm font-semibold tabular-nums text-[#00f0ff]"
+              >
+                {logStats.total} / {logStats.maxEntries}
+              </p>
+            </div>
+            <div className="rounded-md border border-[#00f0ff]/25 bg-[#05060a] px-3.5 py-2.5">
+              <p className="text-[11px] text-[#8EA2BD]">Errores capturados</p>
+              <p
+                data-testid="diagnostic-errors-count"
+                className={`mt-0.5 font-mono text-sm font-semibold tabular-nums ${
+                  logStats.errors > 0 ? 'text-[#ff6ca9]' : 'text-[#EEF5FF]'
+                }`}
+              >
+                {logStats.errors}
+              </p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+            <button
+              type="button"
+              onClick={handleCopyReportClick}
+              data-testid="copy-diagnostic-report-btn"
+              className="cyber-btn-primary inline-flex min-h-[44px] w-full items-center justify-center gap-2 px-3.5 text-xs whitespace-nowrap"
+            >
+              {copiedReport ? (
+                <>
+                  <Check className="h-4 w-4" />
+                  ¡Copiado!
+                </>
+              ) : (
+                <>
+                  <ClipboardCopy className="h-4 w-4" />
+                  Copiar informe completo
+                </>
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={handleClearLogsClick}
+              disabled={logStats.total === 0}
+              data-testid="clear-diagnostic-log-btn"
+              className="inline-flex min-h-[44px] w-full items-center justify-center gap-2 rounded-md border border-[#00f0ff]/25 bg-[#05060a] px-3.5 text-xs font-medium text-[#C8D7EC] hover:border-[#ff2a85]/60 hover:text-[#ff85b8] disabled:opacity-45 transition-colors whitespace-nowrap"
+            >
+              <Trash2 className="h-4 w-4" />
+              Limpiar registro
+            </button>
           </div>
         </section>
 

@@ -15,6 +15,7 @@ import {
   renderMultiClipCutsWithFfmpeg,
   type RenderProgress,
 } from '../services/ffmpegService';
+import { logError, logInfo } from '../services/debugLogger';
 
 interface UseStudioEditorOptions {
   itemsRef: MutableRefObject<QueueItem[]>;
@@ -189,6 +190,17 @@ export function useStudioEditor({
           : 'Preparando re-renderizado...',
       });
 
+      const renderStartMs = performance.now();
+      const activeCutsCount = target.analysis.cortes.filter((c) => c.enabled).length;
+      logInfo('FFmpeg', 'Iniciando renderizado de vídeo en Studio', {
+        archivo: target.originalName,
+        multiClip: isMulti ? 'sí' : 'no',
+        cortesActivos: activeCutsCount,
+        calidad: exportQuality === 'mobile_fast' ? '720p' : '1080p',
+        subtitulos: tiktokOptions.subtitlesEnabled ? 'sí' : 'no',
+        encuadre: tiktokOptions.framingMode,
+      });
+
       try {
         const activeQuality = exportQuality;
         const effectiveTikTokOptions: TikTokEditOptions = { ...tiktokOptions };
@@ -276,6 +288,12 @@ export function useStudioEditor({
           clipCount: target.isMultiClip ? target.sourceClips?.length ?? 2 : 1,
         });
 
+        logInfo('FFmpeg', 'Renderizado completado', {
+          archivo: fileName,
+          salidaMB: Number((editedBlob.size / (1024 * 1024)).toFixed(2)),
+          ms: Math.round(performance.now() - renderStartMs),
+        });
+
         if (isFirstRender) {
           maybePromptDriveUpload(itemId, fileName, editedBlob.size);
         }
@@ -285,6 +303,15 @@ export function useStudioEditor({
           err instanceof Error ? err.message : 'Error al renderizar los cortes.'
         );
         console.error('[FFmpeg] Error durante el renderizado en Studio:', err);
+        logError(
+          'FFmpeg',
+          `Fallo al renderizar ${target.originalName}: ${message}`,
+          {
+            calidad: exportQuality === 'mobile_fast' ? '720p' : '1080p',
+            ms: Math.round(performance.now() - renderStartMs),
+          },
+          err
+        );
         onError(message);
         updateQueueItem(itemId, {
           stage: target.completedAt ? 'completed' : 'review',

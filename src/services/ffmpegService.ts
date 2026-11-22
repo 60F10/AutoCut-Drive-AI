@@ -13,6 +13,7 @@ import {
   remapSubtitlesToFinalTimeline,
   type FfmpegPipelineOptions,
 } from '../utils/videoPipeline';
+import { logError, logInfo, logWarn } from './debugLogger';
 
 // Single-threaded @ffmpeg/core UMD CDNs (compatible with iOS Safari without SharedArrayBuffer or COOP/COEP headers)
 const FFMPEG_CORE_CDNS = [
@@ -43,6 +44,7 @@ async function fetchFfmpegAssetAsBlobUrl(
   mimeType: string,
   assetLabel: 'ffmpeg-core.js' | 'ffmpeg-core.wasm'
 ): Promise<string> {
+  const t0 = performance.now();
   const controller = new AbortController();
   const timerId = window.setTimeout(() => controller.abort(), FFMPEG_ASSET_TIMEOUT_MS);
 
@@ -63,9 +65,12 @@ async function fetchFfmpegAssetAsBlobUrl(
       throw new Error(`${assetLabel} se descargó vacío (0 bytes) desde ${url}`);
     }
 
-    console.info(
-      `[FFmpeg] ${assetLabel} cargado correctamente (${(buf.byteLength / (1024 * 1024)).toFixed(2)} MB)`
-    );
+    const mb = Number((buf.byteLength / (1024 * 1024)).toFixed(2));
+    console.info(`[FFmpeg] ${assetLabel} cargado correctamente (${mb} MB)`);
+    logInfo('FFmpeg', `${assetLabel} descargado`, {
+      pesoMB: mb,
+      ms: Math.round(performance.now() - t0),
+    });
     return URL.createObjectURL(new Blob([buf], { type: mimeType }));
   } catch (err) {
     const isAbort =
@@ -78,6 +83,7 @@ async function fetchFfmpegAssetAsBlobUrl(
       ? err.message
       : String(err);
     console.error(`[FFmpeg] Error cargando ${assetLabel} desde ${url}:`, err);
+    logWarn('FFmpeg', `Fallo descargando ${assetLabel}`, { motivo: reason }, err);
     throw new Error(`Fallo al cargar ${assetLabel}: ${reason}`);
   } finally {
     window.clearTimeout(timerId);
@@ -89,6 +95,7 @@ async function getLoadedFfmpeg(onStatus?: (msg: string) => void): Promise<FFmpeg
   if (loadPromise) return loadPromise;
 
   loadPromise = (async () => {
+    const t0 = performance.now();
     const instance = new FFmpeg();
     const attemptErrors: string[] = [];
 
@@ -113,6 +120,9 @@ async function getLoadedFfmpeg(onStatus?: (msg: string) => void): Promise<FFmpeg
         onStatus?.('Inicializando FFmpeg single-thread en el navegador...');
         await instance.load({ coreURL, wasmURL });
         console.info(`[FFmpeg] Motor single-thread inicializado correctamente desde ${baseURL}`);
+        logInfo('FFmpeg', 'Núcleo single-thread inicializado', {
+          ms: Math.round(performance.now() - t0),
+        });
         ffmpegInstance = instance;
         return instance;
       } catch (err) {
@@ -125,6 +135,10 @@ async function getLoadedFfmpeg(onStatus?: (msg: string) => void): Promise<FFmpeg
     }
 
     loadPromise = null;
+    logError('FFmpeg', 'No se pudo cargar @ffmpeg/core desde ningún CDN', {
+      intentos: attemptErrors.length,
+      ultimoError: attemptErrors[attemptErrors.length - 1] ?? 'desconocido',
+    });
     throw new Error(
       formatPhaseError(
         'FFmpeg',

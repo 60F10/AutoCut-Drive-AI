@@ -1,7 +1,22 @@
 import { useCallback, useRef, useState } from 'react';
-import { AlertCircle, AlertTriangle, Check, RefreshCw, Settings, X, Zap } from 'lucide-react';
+import {
+  AlertCircle,
+  AlertTriangle,
+  Check,
+  ClipboardCopy,
+  RefreshCw,
+  Settings,
+  X,
+  Zap,
+} from 'lucide-react';
 import type { ActiveView, AppErrorBanner } from './types';
 import { parseHumanReadableApiError } from './utils/videoPipeline';
+import {
+  buildDiagnosticReport,
+  copyTextWithFallback,
+  logInfo,
+  type DiagnosticContextSnapshot,
+} from './services/debugLogger';
 import { useAppSettings } from './hooks/useAppSettings';
 import { useGoogleDriveAuth } from './hooks/useGoogleDriveAuth';
 import { useVideoQueue } from './hooks/useVideoQueue';
@@ -14,6 +29,7 @@ import { StudioView } from './components/StudioView';
 import { SettingsView } from './components/SettingsView';
 import { DriveConfirmModal } from './components/DriveConfirmModal';
 import { MultiClipComposerModal } from './components/MultiClipComposerModal';
+import { DiagnosticCopyModal } from './components/DiagnosticCopyModal';
 import { OfflineIndicator } from './components/PWAInstallButton';
 
 const VIEW_TITLES: Record<ActiveView, string> = {
@@ -26,6 +42,8 @@ const VIEW_TITLES: Record<ActiveView, string> = {
 export default function App() {
   const [activeView, setActiveView] = useState<ActiveView>('queue');
   const [bannerError, setBannerError] = useState<AppErrorBanner | null>(null);
+  const [bannerCopied, setBannerCopied] = useState(false);
+  const [manualCopyReport, setManualCopyReport] = useState<string | null>(null);
 
   const reportError = useCallback((error: string | AppErrorBanner | null) => {
     if (!error) {
@@ -134,6 +152,60 @@ export default function App() {
     [studio]
   );
 
+  const handleCopyDiagnosticReport = useCallback(async (): Promise<boolean> => {
+    const items = queue.itemsRef.current;
+    let pending = 0;
+    let active = 0;
+    let completed = 0;
+    let error = 0;
+    for (const item of items) {
+      if (item.stage === 'pending') pending += 1;
+      else if (item.stage === 'error') error += 1;
+      else if (item.stage === 'completed') completed += 1;
+      else active += 1;
+    }
+
+    const context: DiagnosticContextSnapshot = {
+      settings: {
+        model: settings.model,
+        exportQuality: settings.exportQuality,
+        autoWatchEnabled: settings.autoWatchEnabled,
+        watchIntervalSec: settings.watchIntervalSec,
+        autoUploadEnabled: settings.autoUploadEnabled,
+        hasFolderId: Boolean(settings.folderId),
+      },
+      tiktokOptions,
+      stylePreset,
+      queueSummary: {
+        total: items.length,
+        pending,
+        active,
+        completed,
+        error,
+      },
+      activeError: bannerError?.message ?? null,
+    };
+
+    const report = buildDiagnosticReport(context);
+    const result = await copyTextWithFallback(report);
+    logInfo('UI', 'Informe de diagnóstico generado', { metodo: result.method });
+
+    if (result.ok) {
+      return true;
+    }
+
+    setManualCopyReport(report);
+    return false;
+  }, [queue.itemsRef, settings, tiktokOptions, stylePreset, bannerError?.message]);
+
+  const handleBannerCopyDiagnostic = useCallback(async () => {
+    const ok = await handleCopyDiagnosticReport();
+    if (ok) {
+      setBannerCopied(true);
+      window.setTimeout(() => setBannerCopied(false), 2000);
+    }
+  }, [handleCopyDiagnosticReport]);
+
   return (
     <div className="min-h-dvh-app cyber-canvas-bg text-[#EEF5FF] flex">
       <Sidebar
@@ -194,35 +266,52 @@ export default function App() {
                     {bannerError.message}
                   </p>
 
-                  {(bannerError.actionHint === 'settings' || bannerError.technicalDetail) && (
-                    <div className="flex flex-wrap items-center gap-3">
-                      {bannerError.actionHint === 'settings' && activeView !== 'settings' && (
-                        <button
-                          type="button"
-                          data-testid="error-open-settings-btn"
-                          onClick={() => setActiveView('settings')}
-                          className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[#ff2a85]/55 bg-[#ff2a85]/20 px-3 font-mono text-[11px] font-semibold text-white hover:bg-[#ff2a85]/30 transition-colors"
-                        >
-                          <Settings className="h-3.5 w-3.5" />
-                          Abrir Ajustes
-                        </button>
+                  <div className="flex flex-wrap items-center gap-2.5">
+                    <button
+                      type="button"
+                      data-testid="banner-copy-diagnostic-btn"
+                      onClick={handleBannerCopyDiagnostic}
+                      className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[#00f0ff]/45 bg-[#05060a]/85 px-3 font-mono text-[11px] font-semibold text-[#00f0ff] hover:bg-[#00f0ff]/15 transition-colors"
+                    >
+                      {bannerCopied ? (
+                        <>
+                          <Check className="h-3.5 w-3.5" />
+                          ¡Copiado!
+                        </>
+                      ) : (
+                        <>
+                          <ClipboardCopy className="h-3.5 w-3.5" />
+                          Copiar error / diagnóstico
+                        </>
                       )}
+                    </button>
 
-                      {bannerError.technicalDetail && (
-                        <details
-                          data-testid="error-technical-details"
-                          className="w-full text-[11px] text-[#ffb3d1]/85"
-                        >
-                          <summary className="cursor-pointer select-none font-mono text-[11px] text-[#ff85b8] hover:text-white">
-                            Ver detalle técnico
-                          </summary>
-                          <pre className="mt-1.5 max-h-36 overflow-auto whitespace-pre-wrap break-words rounded border border-[#ff2a85]/30 bg-[#05060a]/90 p-2.5 font-mono text-[10px] text-[#e2b4c8]">
-                            {bannerError.technicalDetail}
-                          </pre>
-                        </details>
-                      )}
-                    </div>
-                  )}
+                    {bannerError.actionHint === 'settings' && activeView !== 'settings' && (
+                      <button
+                        type="button"
+                        data-testid="error-open-settings-btn"
+                        onClick={() => setActiveView('settings')}
+                        className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[#ff2a85]/55 bg-[#ff2a85]/20 px-3 font-mono text-[11px] font-semibold text-white hover:bg-[#ff2a85]/30 transition-colors"
+                      >
+                        <Settings className="h-3.5 w-3.5" />
+                        Abrir Ajustes
+                      </button>
+                    )}
+
+                    {bannerError.technicalDetail && (
+                      <details
+                        data-testid="error-technical-details"
+                        className="w-full text-[11px] text-[#ffb3d1]/85"
+                      >
+                        <summary className="cursor-pointer select-none font-mono text-[11px] text-[#ff85b8] hover:text-white">
+                          Ver detalle técnico
+                        </summary>
+                        <pre className="mt-1.5 max-h-36 overflow-auto whitespace-pre-wrap break-words rounded border border-[#ff2a85]/30 bg-[#05060a]/90 p-2.5 font-mono text-[10px] text-[#e2b4c8]">
+                          {bannerError.technicalDetail}
+                        </pre>
+                      </details>
+                    )}
+                  </div>
                 </div>
               </div>
               <button
@@ -362,6 +451,7 @@ export default function App() {
               cacheStats={cacheStats}
               isClearingCache={queue.isClearingCache}
               onClearVideoCache={queue.handleClearVideoCache}
+              onCopyDiagnosticReport={handleCopyDiagnosticReport}
             />
           )}
         </main>
@@ -395,6 +485,12 @@ export default function App() {
         onConfirm={queue.handleConfirmDriveUpload}
         onCancel={() => queue.setPendingDriveUpload(null)}
         isUploading={queue.isUploadingToDrive}
+      />
+
+      <DiagnosticCopyModal
+        open={Boolean(manualCopyReport)}
+        reportText={manualCopyReport ?? ''}
+        onClose={() => setManualCopyReport(null)}
       />
 
       <OfflineIndicator />

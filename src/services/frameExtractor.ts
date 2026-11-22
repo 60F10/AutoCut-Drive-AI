@@ -7,6 +7,7 @@ import {
   formatPhaseError,
   type ExtractedVideoFrame,
 } from '../utils/videoPipeline';
+import { logError, logInfo, logWarn } from './debugLogger';
 
 export class FrameExtractionError extends Error {
   technicalDetail?: string;
@@ -107,6 +108,12 @@ export async function extractLightweightVideoFrames(
   if (typeof document === 'undefined') {
     throw new FrameExtractionError('La extracción de fotogramas requiere un navegador.');
   }
+
+  const t0 = performance.now();
+  logInfo('Frames', 'Iniciando extracción de fotogramas en navegador', {
+    pesoMB: Number((videoBlob.size / (1024 * 1024)).toFixed(2)),
+    duracionConocidaSeg: knownDurationSec ? Number(knownDurationSec.toFixed(1)) : 0,
+  });
 
   const objectUrl = URL.createObjectURL(videoBlob);
   const video = document.createElement('video');
@@ -214,6 +221,22 @@ export async function extractLightweightVideoFrames(
       );
     }
 
+    const approxJpegKb = Math.round(((accumulatedBase64Chars * 3) / 4) / 1024);
+    if (frames.length < timestamps.length) {
+      logWarn('Frames', 'Algunos fotogramas se omitieron por seek lento', {
+        extraidos: frames.length,
+        objetivo: timestamps.length,
+      });
+    }
+    logInfo('Frames', 'Extracción de fotogramas completada', {
+      frames: frames.length,
+      resolucion: `${width}x${height}`,
+      origen: `${sourceWidth}x${sourceHeight}`,
+      duracionSeg: Number(durationSec.toFixed(1)),
+      tamanoJpegKB: approxJpegKb,
+      ms: Math.round(performance.now() - t0),
+    });
+
     return {
       frames,
       durationSec,
@@ -221,10 +244,19 @@ export async function extractLightweightVideoFrames(
       sourceHeight,
     };
   } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    logError(
+      'Frames',
+      'Error al extraer fotogramas en navegador',
+      {
+        pesoMB: Number((videoBlob.size / (1024 * 1024)).toFixed(2)),
+        ms: Math.round(performance.now() - t0),
+      },
+      err
+    );
     if (err instanceof FrameExtractionError) {
       throw err;
     }
-    const detail = err instanceof Error ? err.message : String(err);
     throw new FrameExtractionError(
       'No se pudieron extraer los fotogramas del vídeo en el navegador.',
       detail
