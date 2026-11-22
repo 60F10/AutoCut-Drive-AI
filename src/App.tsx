@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from 'react';
-import { AlertCircle, AlertTriangle, RefreshCw, X } from 'lucide-react';
-import type { ActiveView } from './types';
+import { AlertCircle, AlertTriangle, Check, RefreshCw, Settings, X, Zap } from 'lucide-react';
+import type { ActiveView, AppErrorBanner } from './types';
+import { parseHumanReadableApiError } from './utils/videoPipeline';
 import { useAppSettings } from './hooks/useAppSettings';
 import { useGoogleDriveAuth } from './hooks/useGoogleDriveAuth';
 import { useVideoQueue } from './hooks/useVideoQueue';
@@ -24,7 +25,39 @@ const VIEW_TITLES: Record<ActiveView, string> = {
 
 export default function App() {
   const [activeView, setActiveView] = useState<ActiveView>('queue');
-  const [bannerError, setBannerError] = useState<string | null>(null);
+  const [bannerError, setBannerError] = useState<AppErrorBanner | null>(null);
+
+  const reportError = useCallback((error: string | AppErrorBanner | null) => {
+    if (!error) {
+      setBannerError(null);
+      return;
+    }
+
+    if (typeof error === 'string') {
+      const parsed = parseHumanReadableApiError(error);
+      if (parsed.technicalDetail) {
+        console.error('[AutoCut Drive AI] Error técnico:', parsed.technicalDetail);
+      }
+      setBannerError({
+        message: parsed.userMessage,
+        technicalDetail: parsed.technicalDetail,
+        actionHint: parsed.actionHint,
+      });
+      return;
+    }
+
+    const parsed = parseHumanReadableApiError(error.message);
+    const technicalDetail = error.technicalDetail || parsed.technicalDetail;
+    const actionHint = error.actionHint || parsed.actionHint;
+    if (technicalDetail) {
+      console.error('[AutoCut Drive AI] Error técnico:', technicalDetail);
+    }
+    setBannerError({
+      message: parsed.userMessage,
+      technicalDetail,
+      actionHint,
+    });
+  }, []);
 
   // Ref bridge lets useVideoQueue focus a newly completed item in Studio without circular hook deps
   const selectStudioRef = useRef<(itemId: string) => void>(() => {});
@@ -56,7 +89,7 @@ export default function App() {
     handleGoogleLogin,
     handleGoogleLogout,
     clearAuthSession,
-  } = useGoogleDriveAuth({ onError: setBannerError });
+  } = useGoogleDriveAuth({ onError: reportError });
 
   const queue = useVideoQueue({
     settings,
@@ -67,7 +100,7 @@ export default function App() {
     accessToken,
     clearAuthSession,
     refreshCacheStats,
-    onError: setBannerError,
+    onError: reportError,
     onNavigateView: setActiveView,
     onSelectStudioItem: handleSelectStudioFromQueue,
   });
@@ -81,7 +114,7 @@ export default function App() {
     cacheEditedVideo: queue.cacheEditedVideo,
     appendAnalyticsRecord: queue.appendAnalyticsRecord,
     maybePromptDriveUpload: queue.maybePromptDriveUpload,
-    onError: setBannerError,
+    onError: reportError,
   });
 
   selectStudioRef.current = studio.setSelectedStudioId;
@@ -144,12 +177,47 @@ export default function App() {
           {bannerError && (
             <div
               role="alert"
+              data-testid="app-error-banner"
               className="flex items-start justify-between gap-3 rounded-md border border-[#ff2a85]/50 bg-[#ff2a85]/12 px-4 py-3 text-xs text-[#ffb3d1] shadow-[0_0_20px_rgba(255,42,133,0.14)]"
             >
-              <span className="flex items-start gap-2.5 leading-relaxed">
+              <div className="flex items-start gap-2.5 min-w-0 flex-1">
                 <AlertCircle className="h-4 w-4 shrink-0 text-[#ff2a85] mt-0.5" />
-                <span>{bannerError}</span>
-              </span>
+                <div className="min-w-0 flex-1 space-y-2">
+                  <p className="leading-relaxed font-medium text-[#ffd4e5]">
+                    {bannerError.message}
+                  </p>
+
+                  {(bannerError.actionHint === 'settings' || bannerError.technicalDetail) && (
+                    <div className="flex flex-wrap items-center gap-3">
+                      {bannerError.actionHint === 'settings' && activeView !== 'settings' && (
+                        <button
+                          type="button"
+                          data-testid="error-open-settings-btn"
+                          onClick={() => setActiveView('settings')}
+                          className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[#ff2a85]/55 bg-[#ff2a85]/20 px-3 font-mono text-[11px] font-semibold text-white hover:bg-[#ff2a85]/30 transition-colors"
+                        >
+                          <Settings className="h-3.5 w-3.5" />
+                          Abrir Ajustes
+                        </button>
+                      )}
+
+                      {bannerError.technicalDetail && (
+                        <details
+                          data-testid="error-technical-details"
+                          className="w-full text-[11px] text-[#ffb3d1]/85"
+                        >
+                          <summary className="cursor-pointer select-none font-mono text-[11px] text-[#ff85b8] hover:text-white">
+                            Ver detalle técnico
+                          </summary>
+                          <pre className="mt-1.5 max-h-36 overflow-auto whitespace-pre-wrap break-words rounded border border-[#ff2a85]/30 bg-[#05060a]/90 p-2.5 font-mono text-[10px] text-[#e2b4c8]">
+                            {bannerError.technicalDetail}
+                          </pre>
+                        </details>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
               <button
                 type="button"
                 onClick={() => setBannerError(null)}
@@ -167,10 +235,33 @@ export default function App() {
               data-testid="heavy-video-warning-banner"
               className="flex items-start justify-between gap-3 rounded-md border border-[#fcee0a]/45 bg-[#fcee0a]/[0.08] px-4 py-3 text-xs text-[#fef08a]"
             >
-              <span className="flex items-start gap-2.5 leading-relaxed">
+              <div className="flex items-start gap-2.5 min-w-0 flex-1">
                 <AlertTriangle className="h-4 w-4 shrink-0 text-[#fcee0a] mt-0.5" />
-                <span>{queue.heavyVideoWarning}</span>
-              </span>
+                <div className="min-w-0 flex-1 space-y-2">
+                  <p className="leading-relaxed">{queue.heavyVideoWarning}</p>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {settings.exportQuality !== 'mobile_fast' ? (
+                      <button
+                        type="button"
+                        data-testid="heavy-switch-mobile-720p-btn"
+                        onClick={() => handleChangeExportQuality('mobile_fast')}
+                        className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[#00f0ff]/60 bg-[#00f0ff]/15 px-3 font-mono text-[11px] font-semibold text-[#00f0ff] hover:bg-[#00f0ff]/25 transition-colors"
+                      >
+                        <Zap className="h-3.5 w-3.5" />
+                        Cambiar a 720p móvil
+                      </button>
+                    ) : (
+                      <span
+                        data-testid="heavy-mobile-720p-active"
+                        className="inline-flex items-center gap-1.5 font-mono text-[11px] font-semibold text-[#00f0ff]"
+                      >
+                        <Check className="h-3.5 w-3.5" />
+                        Modo 720p móvil activado
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
               <button
                 type="button"
                 onClick={() => queue.setHeavyVideoWarning(null)}

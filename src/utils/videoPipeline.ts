@@ -1127,3 +1127,237 @@ export function formatBytes(bytes?: number | string): string {
   }
   return `${value.toFixed(value >= 100 || idx === 0 ? 0 : 1)} ${units[idx]}`;
 }
+
+export const DEFAULT_GEMINI_MODEL = 'gemini-3.8-flash';
+
+export interface RecommendedGeminiModel {
+  id: string;
+  title: string;
+  desc: string;
+}
+
+export const RECOMMENDED_GEMINI_MODELS: RecommendedGeminiModel[] = [
+  {
+    id: 'gemini-3.8-flash',
+    title: 'gemini-3.8-flash',
+    desc: 'Por defecto · Rápido, actualizado e ideal para clips cortos y vlogs diarios.',
+  },
+  {
+    id: 'gemini-4-hydrogen',
+    title: 'gemini-4-hydrogen',
+    desc: 'Alternativa Flash de nueva generación para análisis multimodal ágil.',
+  },
+  {
+    id: 'gemini-3.1-flash-lite',
+    title: 'gemini-3.1-flash-lite',
+    desc: 'Opción ultraligera y rápida para brutos cortos o máxima cuota.',
+  },
+];
+
+const RETIRED_GEMINI_MODEL_PATTERN = /^gemini-(1\.|2\.)/i;
+const VALID_GEMINI_MODEL_PATTERN = /^[a-zA-Z0-9._-]{3,80}$/;
+
+/**
+ * Sanitizes a user- or env-provided Gemini model name.
+ * Strips optional "models/" prefix, validates safe characters, and automatically
+ * migrates retired Gemini 1.x / 2.x names to the active fallback model.
+ */
+export function sanitizeGeminiModelName(
+  value?: unknown,
+  fallback: string = DEFAULT_GEMINI_MODEL
+): string {
+  const safeFallback =
+    typeof fallback === 'string' &&
+    VALID_GEMINI_MODEL_PATTERN.test(fallback.trim().replace(/^models\//i, '')) &&
+    !RETIRED_GEMINI_MODEL_PATTERN.test(fallback.trim().replace(/^models\//i, ''))
+      ? fallback.trim().replace(/^models\//i, '')
+      : DEFAULT_GEMINI_MODEL;
+
+  if (typeof value !== 'string') return safeFallback;
+  const cleaned = value.trim().replace(/^models\//i, '');
+  if (!cleaned || !VALID_GEMINI_MODEL_PATTERN.test(cleaned)) {
+    return safeFallback;
+  }
+  if (RETIRED_GEMINI_MODEL_PATTERN.test(cleaned)) {
+    return safeFallback;
+  }
+  return cleaned;
+}
+
+export interface ParsedApiError {
+  userMessage: string;
+  technicalDetail?: string;
+  actionHint?: 'settings';
+}
+
+function tryExtractNestedErrorMessage(text: string): {
+  code?: number;
+  status?: string;
+  message?: string;
+  wasJson: boolean;
+} {
+  const trimmed = text.trim();
+  const jsonStart = trimmed.indexOf('{');
+  const jsonEnd = trimmed.lastIndexOf('}');
+  if (jsonStart === -1 || jsonEnd <= jsonStart) {
+    return { wasJson: false };
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed.slice(jsonStart, jsonEnd + 1)) as Record<string, unknown>;
+    const nested =
+      parsed && typeof parsed.error === 'object' && parsed.error !== null
+        ? (parsed.error as Record<string, unknown>)
+        : parsed;
+
+    const code = typeof nested.code === 'number' ? nested.code : undefined;
+    const status = typeof nested.status === 'string' ? nested.status : undefined;
+    const message = typeof nested.message === 'string' ? nested.message : undefined;
+    return { code, status, message, wasJson: true };
+  } catch {
+    return { wasJson: trimmed.startsWith('{') };
+  }
+}
+
+/**
+ * Converts raw Gemini / HTTP / SDK error strings or objects into clear, human-friendly
+ * Spanish messages while keeping technical JSON/stack details separated for collapsible logs.
+ */
+export function parseHumanReadableApiError(rawError: unknown): ParsedApiError {
+  let rawText = '';
+  if (rawError instanceof Error) {
+    rawText = rawError.message || String(rawError);
+  } else if (typeof rawError === 'string') {
+    rawText = rawError;
+  } else if (rawError && typeof rawError === 'object') {
+    const record = rawError as Record<string, unknown>;
+    if (typeof record.message === 'string') {
+      rawText = record.message;
+    } else {
+      try {
+        rawText = JSON.stringify(rawError);
+      } catch {
+        rawText = String(rawError);
+      }
+    }
+  }
+
+  const trimmed = rawText.trim();
+  if (!trimmed) {
+    return {
+      userMessage: 'Ha ocurrido un error inesperado al procesar la solicitud. Inténtalo de nuevo.',
+    };
+  }
+
+  const extracted = tryExtractNestedErrorMessage(trimmed);
+  const diagnostic = `${extracted.status ?? ''} ${extracted.message ?? ''} ${trimmed}`.toLowerCase();
+  const httpCode = extracted.code;
+
+  // 1. Model retired / not found (404 / NOT_FOUND)
+  if (
+    httpCode === 404 ||
+    extracted.status === 'NOT_FOUND' ||
+    diagnostic.includes('no longer available') ||
+    diagnostic.includes('is not found for api version') ||
+    (diagnostic.includes('models/') && diagnostic.includes('not found'))
+  ) {
+    return {
+      userMessage:
+        'El modelo de IA configurado no está disponible. Revisa o cambia el modelo en Ajustes.',
+      technicalDetail: extracted.message || trimmed,
+      actionHint: 'settings',
+    };
+  }
+
+  // 2. Invalid API key / permissions (401 / 403)
+  if (
+    httpCode === 401 ||
+    httpCode === 403 ||
+    extracted.status === 'PERMISSION_DENIED' ||
+    extracted.status === 'UNAUTHENTICATED' ||
+    diagnostic.includes('api_key_invalid') ||
+    diagnostic.includes('api key not valid') ||
+    diagnostic.includes('gemini_api_key no está configurada')
+  ) {
+    return {
+      userMessage:
+        'La clave de la API de Gemini no es válida o no tiene permisos. Revísala en Settings > Secrets.',
+      technicalDetail: extracted.message || trimmed,
+    };
+  }
+
+  // 3. Quota / rate limit exceeded (429)
+  if (
+    httpCode === 429 ||
+    extracted.status === 'RESOURCE_EXHAUSTED' ||
+    diagnostic.includes('quota') ||
+    diagnostic.includes('rate limit') ||
+    diagnostic.includes('too many requests')
+  ) {
+    return {
+      userMessage:
+        'Se ha superado la cuota o límite temporal de Gemini. Espera unos segundos o prueba otro modelo en Ajustes.',
+      technicalDetail: extracted.message || trimmed,
+      actionHint: 'settings',
+    };
+  }
+
+  // 4. Payload too large (413)
+  if (
+    httpCode === 413 ||
+    diagnostic.includes('payload too large') ||
+    diagnostic.includes('file too large') ||
+    diagnostic.includes('limit_file_size')
+  ) {
+    return {
+      userMessage:
+        'El vídeo supera el tamaño máximo permitido para el análisis. Prueba con un clip más corto o ligero.',
+      technicalDetail: extracted.message || trimmed,
+    };
+  }
+
+  // 5. Upstream service unavailable / overloaded (500 / 503)
+  if (
+    httpCode === 500 ||
+    httpCode === 503 ||
+    extracted.status === 'UNAVAILABLE' ||
+    extracted.status === 'INTERNAL' ||
+    diagnostic.includes('overloaded') ||
+    diagnostic.includes('service unavailable')
+  ) {
+    return {
+      userMessage:
+        'El servicio de Gemini está temporalmente saturado. Inténtalo de nuevo en unos segundos.',
+      technicalDetail: extracted.message || trimmed,
+    };
+  }
+
+  // 6. Network connectivity errors
+  if (
+    diagnostic.includes('failed to fetch') ||
+    diagnostic.includes('networkerror') ||
+    diagnostic.includes('econnrefused') ||
+    diagnostic.includes('network request failed')
+  ) {
+    return {
+      userMessage:
+        'No se pudo conectar con el servidor. Comprueba tu conexión a internet e inténtalo de nuevo.',
+      technicalDetail: trimmed,
+    };
+  }
+
+  // 7. Generic JSON API error: never expose raw JSON object directly as headline
+  if (extracted.wasJson) {
+    return {
+      userMessage:
+        'La API de Gemini devolvió un error al procesar el vídeo. Revisa la configuración del modelo en Ajustes o inténtalo de nuevo.',
+      technicalDetail: extracted.message || trimmed,
+      actionHint: 'settings',
+    };
+  }
+
+  // 8. Already clean human-readable message
+  return {
+    userMessage: trimmed,
+  };
+}

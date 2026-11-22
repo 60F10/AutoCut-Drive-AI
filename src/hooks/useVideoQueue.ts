@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   ActiveView,
   AnalyticsRecord,
+  AppErrorBanner,
   AppSettings,
   EditStylePreset,
   PendingDriveUpload,
@@ -15,6 +16,7 @@ import {
   detectPendingVideos,
   evaluateHeavyVideoWarning,
   isSupportedVideoFile,
+  parseHumanReadableApiError,
 } from '../utils/videoPipeline';
 import { createDemoAnalyticsRecords, createDemoQueueItems } from '../utils/demoData';
 import { getCachedDriveToken } from '../services/googleAuth';
@@ -25,6 +27,7 @@ import {
   uploadEditedVideoMultipart,
 } from '../services/driveApi';
 import {
+  GeminiClientError,
   analyzeMultiClipWithGemini,
   analyzeVideoWithGemini,
 } from '../services/geminiClient';
@@ -91,7 +94,7 @@ interface UseVideoQueueOptions {
   accessToken: string | null;
   clearAuthSession: () => void;
   refreshCacheStats: () => Promise<void>;
-  onError: (message: string | null) => void;
+  onError: (error: string | AppErrorBanner | null) => void;
   onNavigateView: (view: ActiveView) => void;
   onSelectStudioItem: (itemId: string) => void;
 }
@@ -660,15 +663,28 @@ export function useVideoQueue({
         if (err instanceof DriveAuthExpiredError) {
           clearAuthSession();
         }
-        const message =
-          err instanceof Error ? err.message : 'Error inesperado al procesar el vídeo.';
+        const structured: AppErrorBanner =
+          err instanceof GeminiClientError
+            ? {
+                message: err.message,
+                technicalDetail: err.technicalDetail,
+                actionHint: err.actionHint,
+              }
+            : (() => {
+                const parsed = parseHumanReadableApiError(err);
+                return {
+                  message: parsed.userMessage,
+                  technicalDetail: parsed.technicalDetail,
+                  actionHint: parsed.actionHint,
+                };
+              })();
         updateQueueItem(itemId, {
           stage: 'error',
-          errorMessage: message,
-          stageDetail: message,
+          errorMessage: structured.message,
+          stageDetail: structured.message,
           progress: 0,
         });
-        onError(message);
+        onError(structured);
       } finally {
         setIsProcessingAny(false);
       }
@@ -874,15 +890,28 @@ export function useVideoQueue({
         if (err instanceof DriveAuthExpiredError) {
           clearAuthSession();
         }
-        const message =
-          err instanceof Error ? err.message : 'Error inesperado al combinar los clips.';
+        const structured: AppErrorBanner =
+          err instanceof GeminiClientError
+            ? {
+                message: err.message,
+                technicalDetail: err.technicalDetail,
+                actionHint: err.actionHint,
+              }
+            : (() => {
+                const parsed = parseHumanReadableApiError(err);
+                return {
+                  message: parsed.userMessage,
+                  technicalDetail: parsed.technicalDetail,
+                  actionHint: parsed.actionHint,
+                };
+              })();
         updateQueueItem(combinedId, {
           stage: 'error',
-          errorMessage: message,
-          stageDetail: message,
+          errorMessage: structured.message,
+          stageDetail: structured.message,
           progress: 0,
         });
-        onError(message);
+        onError(structured);
       } finally {
         setIsProcessingAny(false);
       }

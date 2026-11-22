@@ -6,12 +6,18 @@ import path from 'node:path';
 import multer from 'multer';
 import { GoogleGenAI, Type, createPartFromUri } from '@google/genai';
 import {
+  DEFAULT_GEMINI_MODEL,
   buildGeminiSystemPrompt,
   normalizeStylePreset,
+  parseHumanReadableApiError,
+  sanitizeGeminiModelName,
 } from './src/utils/videoPipeline.ts';
 
 const PORT = Number(process.env.PORT) || 3000;
-const ALLOWED_MODELS = new Set(['gemini-2.5-flash', 'gemini-2.5-pro']);
+const DEFAULT_SERVER_GEMINI_MODEL = sanitizeGeminiModelName(
+  process.env.GEMINI_MODEL || process.env.VITE_GEMINI_MODEL,
+  DEFAULT_GEMINI_MODEL
+);
 
 const uploadDir = path.join(os.tmpdir(), 'autocut-drive-ai-uploads');
 fs.mkdirSync(uploadDir, { recursive: true });
@@ -174,6 +180,7 @@ async function startServer() {
     res.json({
       status: 'ok',
       geminiConfigured: Boolean(process.env.GEMINI_API_KEY),
+      defaultModel: DEFAULT_SERVER_GEMINI_MODEL,
     });
   });
 
@@ -185,8 +192,7 @@ async function startServer() {
       return;
     }
 
-    const requestedModel = typeof req.body?.model === 'string' ? req.body.model : 'gemini-2.5-flash';
-    const model = ALLOWED_MODELS.has(requestedModel) ? requestedModel : 'gemini-2.5-flash';
+    const model = sanitizeGeminiModelName(req.body?.model, DEFAULT_SERVER_GEMINI_MODEL);
     const stylePreset = normalizeStylePreset(req.body?.stylePreset);
     const customInstruction =
       typeof req.body?.customInstruction === 'string'
@@ -312,8 +318,7 @@ Selecciona los mejores momentos siguiendo el estilo indicado en las instruccione
       });
       res.end();
     } catch (error: unknown) {
-      const message =
-        error instanceof Error ? error.message : 'Error inesperado al analizar el vídeo con Gemini.';
+      const parsedError = parseHumanReadableApiError(error);
       console.error('[Gemini Analyze Error]:', error);
 
       if (uploadedGeminiFileName && ai) {
@@ -326,7 +331,9 @@ Selecciona los mejores momentos siguiendo el estilo indicado en las instruccione
 
       writeNdjson(res, {
         type: 'error',
-        error: message,
+        error: parsedError.userMessage,
+        technicalDetail: parsedError.technicalDetail,
+        actionHint: parsedError.actionHint,
       });
       res.end();
     } finally {
@@ -344,8 +351,7 @@ Selecciona los mejores momentos siguiendo el estilo indicado en las instruccione
       return;
     }
 
-    const requestedModel = typeof req.body?.model === 'string' ? req.body.model : 'gemini-2.5-flash';
-    const model = ALLOWED_MODELS.has(requestedModel) ? requestedModel : 'gemini-2.5-flash';
+    const model = sanitizeGeminiModelName(req.body?.model, DEFAULT_SERVER_GEMINI_MODEL);
     const stylePreset = normalizeStylePreset(req.body?.stylePreset);
     const customInstruction =
       typeof req.body?.customInstruction === 'string'
@@ -518,8 +524,7 @@ Selecciona los mejores momentos siguiendo el estilo indicado en las instruccione
       });
       res.end();
     } catch (error: unknown) {
-      const message =
-        error instanceof Error ? error.message : 'Error inesperado en el análisis Multi-Clip.';
+      const parsedError = parseHumanReadableApiError(error);
       console.error('[Gemini Multi-Clip Error]:', error);
 
       if (ai && uploadedGeminiFileNames.length > 0) {
@@ -530,7 +535,9 @@ Selecciona los mejores momentos siguiendo el estilo indicado en las instruccione
 
       writeNdjson(res, {
         type: 'error',
-        error: message,
+        error: parsedError.userMessage,
+        technicalDetail: parsedError.technicalDetail,
+        actionHint: parsedError.actionHint,
       });
       res.end();
     } finally {

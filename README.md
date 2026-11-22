@@ -1,6 +1,6 @@
 # AutoCut Drive AI
 
-Aplicación web progresiva (**PWA**) en React + TypeScript que automatiza la edición de vídeos brutos en formato vertical **9:16** (TikTok, Reels, YouTube Shorts) combinando **Google Drive**, **Gemini Files API** (`gemini-2.5-flash` / `gemini-2.5-pro`) y **FFmpeg.wasm 100 % en el navegador**.
+Aplicación web progresiva (**PWA**) en React + TypeScript que automatiza la edición de vídeos brutos en formato vertical **9:16** (TikTok, Reels, YouTube Shorts) combinando **Google Drive**, **Gemini Files API** (`gemini-3.8-flash` configurable) y **FFmpeg.wasm 100 % en el navegador**.
 
 ---
 
@@ -62,6 +62,8 @@ Variables disponibles en `.env.example`:
 | Variable | Obligatoria | Ámbito | Descripción |
 | --- | --- | --- | --- |
 | `GEMINI_API_KEY` | Sí | Solo servidor | Clave de la API de Google Gemini. Nunca se envía al navegador ni se commitea. |
+| `GEMINI_MODEL` | Opcional | Servidor | Sobreescribe el modelo por defecto del servidor (por defecto `gemini-3.8-flash`). |
+| `VITE_GEMINI_MODEL` | Opcional | Cliente | Sobreescribe el modelo inicial mostrado en Ajustes (por defecto `gemini-3.8-flash`). |
 | `APP_URL` | Opcional | Servidor | URL pública de despliegue (en local: `http://localhost:3000`). |
 | `PORT` | Opcional | Servidor | Puerto HTTP de Express/Vite (por defecto `3000`). |
 

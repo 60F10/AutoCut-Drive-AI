@@ -2,6 +2,7 @@ import { useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   AlertTriangle,
+  Check,
   CheckCircle2,
   Clock,
   ExternalLink,
@@ -16,6 +17,7 @@ import {
   Trash2,
   Upload,
   X,
+  Zap,
 } from 'lucide-react';
 import type {
   AnalyticsRecord,
@@ -291,16 +293,39 @@ export function QueueView({
           data-testid="queue-mobile-ram-notice"
           className="flex items-start justify-between gap-3 rounded-md border border-[#fcee0a]/45 bg-[#fcee0a]/[0.08] px-4 py-3 text-xs text-[#fcee0a]"
         >
-          <span className="flex items-start gap-2.5 leading-relaxed">
+          <div className="flex items-start gap-2.5 min-w-0 flex-1">
             <AlertTriangle className="h-4 w-4 shrink-0 text-[#fcee0a] mt-0.5" />
-            <span className="text-[#FAF3B8]">
-              Los archivos seleccionados suman{' '}
-              <strong className="font-mono tabular-nums text-[#fcee0a]">
-                {formatBytes(ramWarningBytes)}
-              </strong>{' '}
-              (más de 200 MB). En navegadores móviles FFmpeg.wasm puede consumir mucha RAM; te recomendamos usar el modo <strong className="font-mono text-[#00f0ff]">720p móvil</strong>.
-            </span>
-          </span>
+            <div className="min-w-0 flex-1 space-y-2">
+              <p className="text-[#FAF3B8] leading-relaxed">
+                Los archivos seleccionados suman{' '}
+                <strong className="font-mono tabular-nums text-[#fcee0a]">
+                  {formatBytes(ramWarningBytes)}
+                </strong>{' '}
+                (más de 200 MB). En navegadores móviles FFmpeg.wasm puede consumir mucha RAM; te recomendamos usar el modo <strong className="font-mono text-[#00f0ff]">720p móvil</strong>.
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                {exportQuality !== 'mobile_fast' ? (
+                  <button
+                    type="button"
+                    data-testid="queue-switch-mobile-720p-btn"
+                    onClick={() => onChangeExportQuality('mobile_fast')}
+                    className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[#00f0ff]/60 bg-[#00f0ff]/15 px-3 font-mono text-[11px] font-semibold text-[#00f0ff] hover:bg-[#00f0ff]/25 transition-colors"
+                  >
+                    <Zap className="h-3.5 w-3.5" />
+                    Cambiar a 720p móvil
+                  </button>
+                ) : (
+                  <span
+                    data-testid="queue-mobile-720p-active"
+                    className="inline-flex items-center gap-1.5 font-mono text-[11px] font-semibold text-[#00f0ff]"
+                  >
+                    <Check className="h-3.5 w-3.5" />
+                    Modo 720p móvil activado
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
           {recentUploadRamBytes > 0 && !exceedsMobileRamThreshold(selectedTotalBytes) && (
             <button
               type="button"

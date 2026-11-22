@@ -6,12 +6,14 @@ import type {
   TikTokEditOptions,
 } from '../types';
 import {
+  DEFAULT_GEMINI_MODEL,
   DEFAULT_TIKTOK_OPTIONS,
   detectDefaultExportQuality,
   extractDriveFolderId,
   normalizeExportQuality,
   normalizeStylePreset,
   normalizeTikTokOptions,
+  sanitizeGeminiModelName,
 } from '../utils/videoPipeline';
 import {
   MAX_CACHED_VIDEOS,
@@ -23,10 +25,18 @@ const SETTINGS_STORAGE_KEY = 'autocut_drive_ai_settings_v1';
 const STYLE_PRESET_STORAGE_KEY = 'autocut_drive_ai_style_preset_v1';
 const TIKTOK_OPTIONS_STORAGE_KEY = 'autocut_drive_ai_tiktok_options_v1';
 
+export function resolveEnvDefaultGeminiModel(): string {
+  const envModel =
+    typeof import.meta !== 'undefined' && import.meta.env
+      ? (import.meta.env.VITE_GEMINI_MODEL as string | undefined)
+      : undefined;
+  return sanitizeGeminiModelName(envModel, DEFAULT_GEMINI_MODEL);
+}
+
 export function createDefaultSettings(): AppSettings {
   return {
     folderId: '',
-    model: 'gemini-2.5-flash',
+    model: resolveEnvDefaultGeminiModel(),
     watchIntervalSec: 60,
     autoWatchEnabled: false,
     autoUploadEnabled: true,
@@ -40,8 +50,7 @@ function loadInitialSettings(): AppSettings {
     const raw = window.localStorage.getItem(SETTINGS_STORAGE_KEY);
     if (!raw) return defaults;
     const parsed = JSON.parse(raw) as Partial<AppSettings>;
-    const validModel =
-      parsed.model === 'gemini-2.5-pro' ? 'gemini-2.5-pro' : 'gemini-2.5-flash';
+    const validModel = sanitizeGeminiModelName(parsed.model, defaults.model);
     const validInterval =
       parsed.watchIntervalSec === 30 ||
       parsed.watchIntervalSec === 60 ||
@@ -102,9 +111,15 @@ export function useAppSettings() {
   }, []);
 
   const persistSettings = useCallback((next: AppSettings) => {
-    setSettings(next);
+    const sanitized: AppSettings = {
+      ...next,
+      model: sanitizeGeminiModelName(next.model, resolveEnvDefaultGeminiModel()),
+      folderId: extractDriveFolderId(next.folderId),
+      exportQuality: normalizeExportQuality(next.exportQuality),
+    };
+    setSettings(sanitized);
     try {
-      window.localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(next));
+      window.localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(sanitized));
     } catch {
       // Ignore storage quota errors
     }

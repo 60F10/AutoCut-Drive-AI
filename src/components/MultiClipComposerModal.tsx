@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { AlertTriangle, ArrowDown, ArrowUp, Layers, Sparkles, X } from 'lucide-react';
+import { AlertTriangle, ArrowDown, ArrowUp, Check, Layers, Sparkles, X, Zap } from 'lucide-react';
 import type {
   EditStylePreset,
   ExportQuality,
@@ -237,13 +237,34 @@ export function MultiClipComposerModal({
               className="flex items-start gap-2.5 rounded-md border border-[#fcee0a]/45 bg-[#fcee0a]/[0.08] px-3.5 py-2.5 text-xs text-[#fef08a]"
             >
               <AlertTriangle className="h-4 w-4 shrink-0 text-[#fcee0a] mt-0.5" />
-              <span className="leading-relaxed">
-                Los clips suman{' '}
-                <strong className="font-mono tabular-nums text-[#fcee0a]">
-                  {formatBytes(totalBytes)}
-                </strong>{' '}
-                (más de 200 MB). En navegadores móviles FFmpeg.wasm puede consumir mucha RAM; te recomendamos usar <strong>720p móvil</strong>.
-              </span>
+              <div className="min-w-0 flex-1 space-y-2">
+                <p className="leading-relaxed">
+                  Los clips suman{' '}
+                  <strong className="font-mono tabular-nums text-[#fcee0a]">
+                    {formatBytes(totalBytes)}
+                  </strong>{' '}
+                  (más de 200 MB). En navegadores móviles FFmpeg.wasm puede consumir mucha RAM; te recomendamos usar <strong>720p móvil</strong>.
+                </p>
+                {exportQuality !== 'mobile_fast' ? (
+                  <button
+                    type="button"
+                    data-testid="modal-switch-mobile-720p-btn"
+                    onClick={() => onChangeExportQuality('mobile_fast')}
+                    className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[#00f0ff]/60 bg-[#00f0ff]/15 px-3 font-mono text-[11px] font-semibold text-[#00f0ff] hover:bg-[#00f0ff]/25 transition-colors"
+                  >
+                    <Zap className="h-3.5 w-3.5" />
+                    Cambiar a 720p móvil
+                  </button>
+                ) : (
+                  <span
+                    data-testid="modal-mobile-720p-active"
+                    className="inline-flex items-center gap-1.5 font-mono text-[11px] font-semibold text-[#00f0ff]"
+                  >
+                    <Check className="h-3.5 w-3.5" />
+                    Modo 720p móvil activado
+                  </span>
+                )}
+              </div>
             </div>
           )}
         </div>

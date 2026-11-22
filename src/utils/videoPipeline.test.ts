@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  DEFAULT_GEMINI_MODEL,
   DEFAULT_TIKTOK_OPTIONS,
   EDIT_STYLE_PRESETS,
   MOBILE_RAM_WARNING_BYTES,
+  RECOMMENDED_GEMINI_MODELS,
   buildAssSubtitles,
   buildCombinedEditedFilename,
   buildEditedFilename,
@@ -25,8 +27,10 @@ import {
   normalizeStylePreset,
   normalizeTikTokOptions,
   parseGeminiEditPlan,
+  parseHumanReadableApiError,
   remapSubtitlesToFinalTimeline,
   sanitizeEtiqueta,
+  sanitizeGeminiModelName,
   toLocalDateKey,
 } from './videoPipeline';
 import type { AnalyticsRecord, DriveFileMeta, SubtitleBlock, VideoCut } from '../types';
@@ -445,3 +449,60 @@ test('formatSeconds, formatDurationHuman, and formatBytes produce clean determin
   assert.equal(formatBytes(1536), '1.5 KB');
   assert.equal(formatBytes(26214400), '25.0 MB');
 });
+
+test('Gemini model configuration defaults to gemini-3.8-flash and sanitizes custom or retired model IDs', () => {
+  assert.equal(DEFAULT_GEMINI_MODEL, 'gemini-3.8-flash');
+  assert.equal(RECOMMENDED_GEMINI_MODELS[0].id, 'gemini-3.8-flash');
+
+  // Supports env / user custom model overrides and strips optional "models/" prefix
+  assert.equal(sanitizeGeminiModelName('models/gemini-3.8-flash'), 'gemini-3.8-flash');
+  assert.equal(sanitizeGeminiModelName('  gemini-4-hydrogen  '), 'gemini-4-hydrogen');
+  assert.equal(sanitizeGeminiModelName('gemini-3.9-custom-preview'), 'gemini-3.9-custom-preview');
+
+  // Auto-migrates retired Gemini 1.x / 2.x names and rejects blank or unsafe strings
+  const retiredLegacyName = ['gemini', '2.0', 'flash'].join('-');
+  assert.equal(sanitizeGeminiModelName(retiredLegacyName), 'gemini-3.8-flash');
+  assert.equal(sanitizeGeminiModelName(''), 'gemini-3.8-flash');
+  assert.equal(sanitizeGeminiModelName('invalid model with spaces'), 'gemini-3.8-flash');
+  assert.equal(sanitizeGeminiModelName(undefined, 'gemini-4-hydrogen'), 'gemini-4-hydrogen');
+});
+
+test('parseHumanReadableApiError converts raw Gemini JSON/HTTP errors into clear Spanish messages', () => {
+  const retired404Json = JSON.stringify({
+    error: {
+      code: 404,
+      message: 'models/legacy-model is no longer available to new users. Please update your code to use models/gemini-3.8-flash.',
+      status: 'NOT_FOUND',
+    },
+  });
+
+  const parsed404 = parseHumanReadableApiError(retired404Json);
+  assert.equal(
+    parsed404.userMessage,
+    'El modelo de IA configurado no está disponible. Revisa o cambia el modelo en Ajustes.'
+  );
+  assert.equal(parsed404.actionHint, 'settings');
+  assert.ok(parsed404.technicalDetail?.includes('no longer available'));
+  assert.ok(!parsed404.userMessage.includes('{'));
+
+  const parsed429 = parseHumanReadableApiError(
+    JSON.stringify({ error: { code: 429, status: 'RESOURCE_EXHAUSTED', message: 'Quota exceeded' } })
+  );
+  assert.ok(parsed429.userMessage.includes('cuota'));
+  assert.equal(parsed429.actionHint, 'settings');
+
+  const parsed403 = parseHumanReadableApiError(
+    JSON.stringify({ error: { code: 403, status: 'PERMISSION_DENIED', message: 'API_KEY_INVALID' } })
+  );
+  assert.ok(parsed403.userMessage.includes('clave de la API'));
+
+  const parsed503 = parseHumanReadableApiError(
+    JSON.stringify({ error: { code: 503, status: 'UNAVAILABLE', message: 'Model overloaded' } })
+  );
+  assert.ok(parsed503.userMessage.includes('saturado'));
+
+  const parsedHuman = parseHumanReadableApiError('Selecciona archivos de vídeo válidos.');
+  assert.equal(parsedHuman.userMessage, 'Selecciona archivos de vídeo válidos.');
+  assert.equal(parsedHuman.technicalDetail, undefined);
+});
+

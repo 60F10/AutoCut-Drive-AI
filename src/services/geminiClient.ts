@@ -1,9 +1,34 @@
 import type { EditStylePreset, GeminiEditPlan, GeminiModelId } from '../types';
-import { parseGeminiEditPlan } from '../utils/videoPipeline';
+import {
+  DEFAULT_GEMINI_MODEL,
+  parseGeminiEditPlan,
+  parseHumanReadableApiError,
+  sanitizeGeminiModelName,
+} from '../utils/videoPipeline';
 
 export interface AnalyzeVideoResult {
   plan: GeminiEditPlan;
   geminiFileCleaned: boolean;
+}
+
+export class GeminiClientError extends Error {
+  technicalDetail?: string;
+  actionHint?: 'settings';
+
+  constructor(message: string, technicalDetail?: string, actionHint?: 'settings') {
+    super(message);
+    this.name = 'GeminiClientError';
+    this.technicalDetail = technicalDetail;
+    this.actionHint = actionHint;
+  }
+}
+
+export function getDefaultClientGeminiModel(): string {
+  const envModel =
+    typeof import.meta !== 'undefined' && import.meta.env
+      ? (import.meta.env.VITE_GEMINI_MODEL as string | undefined)
+      : undefined;
+  return sanitizeGeminiModelName(envModel, DEFAULT_GEMINI_MODEL);
 }
 
 async function consumeAnalyzeStream(
@@ -21,18 +46,30 @@ async function consumeAnalyzeStream(
   onStatusUpdate?: (message: string, progress: number) => void
 ): Promise<AnalyzeVideoResult> {
   if (!response.ok) {
-    let errorText = `Error del servidor (${response.status})`;
+    let rawErrorText = `Error del servidor (${response.status})`;
+    let technicalDetail: string | undefined;
     try {
-      const errJson = await response.json();
-      if (errJson?.error) errorText = errJson.error;
+      const errJson = (await response.json()) as { error?: string; technicalDetail?: string };
+      if (errJson?.error) rawErrorText = errJson.error;
+      if (errJson?.technicalDetail) technicalDetail = errJson.technicalDetail;
     } catch {
-      // Fallback to status text
+      try {
+        const text = await response.text();
+        if (text.trim()) rawErrorText = text.trim();
+      } catch {
+        // Fallback to status text
+      }
     }
-    throw new Error(errorText);
+    const parsed = parseHumanReadableApiError(rawErrorText);
+    const detail = technicalDetail || parsed.technicalDetail;
+    if (detail) {
+      console.error('[Gemini API Error Detail]:', detail);
+    }
+    throw new GeminiClientError(parsed.userMessage, detail, parsed.actionHint);
   }
 
   if (!response.body) {
-    throw new Error('No se recibió respuesta del análisis de Gemini.');
+    throw new GeminiClientError('No se recibió respuesta del análisis de Gemini.');
   }
 
   const reader = response.body.getReader();
@@ -67,6 +104,8 @@ async function consumeAnalyzeStream(
         analysis?: unknown;
         geminiFileCleaned?: boolean;
         error?: string;
+        technicalDetail?: string;
+        actionHint?: 'settings';
       };
 
       if (event.type === 'progress') {
@@ -78,7 +117,18 @@ async function consumeAnalyzeStream(
             : 50;
         onStatusUpdate?.(event.message || 'Analizando con Gemini...', pct);
       } else if (event.type === 'error') {
-        throw new Error(event.error || 'Error al analizar el vídeo con Gemini.');
+        const parsed = parseHumanReadableApiError(
+          event.error || 'Error al analizar el vídeo con Gemini.'
+        );
+        const detail = event.technicalDetail || parsed.technicalDetail;
+        if (detail) {
+          console.error('[Gemini API Stream Error]:', detail);
+        }
+        throw new GeminiClientError(
+          parsed.userMessage,
+          detail,
+          event.actionHint || parsed.actionHint
+        );
       } else if (event.type === 'result') {
         const plan = parseGeminiEditPlan(event.analysis, parseOptions);
         finalResult = {
@@ -90,7 +140,7 @@ async function consumeAnalyzeStream(
   }
 
   if (!finalResult) {
-    throw new Error('El análisis de Gemini terminó sin devolver cortes.');
+    throw new GeminiClientError('El análisis de Gemini terminó sin devolver cortes.');
   }
 
   onStatusUpdate?.('Análisis completado y archivos temporales limpiados.', 100);
@@ -107,15 +157,16 @@ export interface AnalyzeStyleOptions {
 export async function analyzeVideoWithGemini(
   videoBlob: Blob,
   fileName: string,
-  model: GeminiModelId,
+  model: GeminiModelId = getDefaultClientGeminiModel(),
   durationSec?: number,
   onStatusUpdate?: (message: string, progress: number) => void,
   styleOptions?: AnalyzeStyleOptions
 ): Promise<AnalyzeVideoResult> {
+  const safeModel = sanitizeGeminiModelName(model, getDefaultClientGeminiModel());
   const formData = new FormData();
   formData.append('video', videoBlob, fileName);
   formData.append('fileName', fileName);
-  formData.append('model', model);
+  formData.append('model', safeModel);
   if (durationSec && Number.isFinite(durationSec)) {
     formData.append('durationSec', String(durationSec));
   }
@@ -153,11 +204,12 @@ export interface MultiClipInput {
 
 export async function analyzeMultiClipWithGemini(
   clips: MultiClipInput[],
-  model: GeminiModelId,
+  model: GeminiModelId = getDefaultClientGeminiModel(),
   projectName?: string,
   onStatusUpdate?: (message: string, progress: number) => void,
   styleOptions?: AnalyzeStyleOptions
 ): Promise<AnalyzeVideoResult> {
+  const safeModel = sanitizeGeminiModelName(model, getDefaultClientGeminiModel());
   const formData = new FormData();
   const clipsMeta = clips.map((clip) => ({
     name: clip.fileName,
@@ -167,7 +219,7 @@ export async function analyzeMultiClipWithGemini(
   clips.forEach((clip) => {
     formData.append('videos', clip.blob, clip.fileName);
   });
-  formData.append('model', model);
+  formData.append('model', safeModel);
   formData.append('clipsMeta', JSON.stringify(clipsMeta));
   if (projectName?.trim()) {
     formData.append('projectName', projectName.trim());
@@ -200,11 +252,19 @@ export async function analyzeMultiClipWithGemini(
   );
 }
 
-export async function checkServerHealth(): Promise<{ status: string; geminiConfigured: boolean }> {
+export async function checkServerHealth(): Promise<{
+  status: string;
+  geminiConfigured: boolean;
+  defaultModel?: string;
+}> {
   try {
     const res = await fetch('/api/health');
     if (!res.ok) return { status: 'error', geminiConfigured: false };
-    return (await res.json()) as { status: string; geminiConfigured: boolean };
+    return (await res.json()) as {
+      status: string;
+      geminiConfigured: boolean;
+      defaultModel?: string;
+    };
   } catch {
     return { status: 'error', geminiConfigured: false };
   }

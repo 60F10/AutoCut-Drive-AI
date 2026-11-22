@@ -1,9 +1,15 @@
 import { useEffect, useState } from 'react';
-import { Check, Folder, HardDrive, RotateCcw, Save, ShieldCheck, Trash2, Zap } from 'lucide-react';
+import { Check, Cpu, Folder, HardDrive, RotateCcw, Save, ShieldCheck, Trash2, Zap } from 'lucide-react';
 import type { User } from 'firebase/auth';
 import type { AppSettings, ExportQuality, GeminiModelId, WatchIntervalSec } from '../types';
 import type { VideoCacheStats } from '../services/videoStorage';
-import { extractDriveFolderId, formatBytes } from '../utils/videoPipeline';
+import {
+  DEFAULT_GEMINI_MODEL,
+  RECOMMENDED_GEMINI_MODELS,
+  extractDriveFolderId,
+  formatBytes,
+  sanitizeGeminiModelName,
+} from '../utils/videoPipeline';
 import { GoogleSignInButton } from './GoogleSignInButton';
 
 interface SettingsViewProps {
@@ -66,15 +72,26 @@ export function SettingsView({
       return;
     }
 
+    const rawModel = model.trim().replace(/^models\//i, '');
+    if (rawModel && !/^[a-zA-Z0-9._-]{3,80}$/.test(rawModel)) {
+      setValidationError(
+        'El nombre del modelo de Gemini solo puede contener letras, números, puntos, guiones y guiones bajos.'
+      );
+      return;
+    }
+
+    const cleanedModel = sanitizeGeminiModelName(rawModel, DEFAULT_GEMINI_MODEL);
+
     onSaveSettings({
       folderId: parsedFolderId,
-      model,
+      model: cleanedModel,
       watchIntervalSec,
       autoWatchEnabled,
       autoUploadEnabled,
       exportQuality,
     });
     setFolderInput(parsedFolderId);
+    setModel(cleanedModel);
     setSavedBanner(true);
     window.setTimeout(() => setSavedBanner(false), 3000);
   };
@@ -144,47 +161,71 @@ export function SettingsView({
           <div
             role="radiogroup"
             aria-label="Seleccionar modelo de Gemini"
-            className="grid grid-cols-1 sm:grid-cols-2 gap-3"
+            className="grid grid-cols-1 sm:grid-cols-3 gap-3"
           >
-            {(
-              [
-                {
-                  id: 'gemini-2.5-flash',
-                  title: 'gemini-2.5-flash',
-                  desc: 'Por defecto · Rápido e ideal para clips cortos y vlogs diarios.',
-                },
-                {
-                  id: 'gemini-2.5-pro',
-                  title: 'gemini-2.5-pro',
-                  desc: 'Mayor precisión narrativa en brutos largos de 3 a 10 minutos.',
-                },
-              ] as Array<{ id: GeminiModelId; title: string; desc: string }>
-            ).map((option) => {
-              const selected = model === option.id;
+            {RECOMMENDED_GEMINI_MODELS.map((option) => {
+              const selected = model.trim().replace(/^models\//i, '') === option.id;
               return (
                 <button
                   key={option.id}
                   type="button"
                   role="radio"
                   aria-checked={selected}
-                  onClick={() => setModel(option.id)}
-                  className={`min-h-[44px] rounded-md border p-4 text-left transition-all ${
+                  data-testid={`settings-model-${option.id}`}
+                  onClick={() => {
+                    setModel(option.id);
+                    setValidationError(null);
+                  }}
+                  className={`min-h-[44px] rounded-md border p-3.5 text-left transition-all ${
                     selected
                       ? 'border-[#00f0ff] bg-[#00f0ff]/10 shadow-[0_0_16px_rgba(0,240,255,0.16)]'
                       : 'border-[#00f0ff]/20 bg-[#05060a]/85 hover:border-[#00f0ff]/45'
                   }`}
                 >
                   <p
-                    className={`font-mono text-xs font-semibold ${
+                    className={`font-mono text-xs font-semibold break-all ${
                       selected ? 'text-[#00f0ff]' : 'text-[#EEF5FF]'
                     }`}
                   >
                     {option.title}
                   </p>
-                  <p className="mt-1.5 text-xs text-[#94A8C4] leading-relaxed">{option.desc}</p>
+                  <p className="mt-1.5 text-[11px] text-[#94A8C4] leading-relaxed">{option.desc}</p>
                 </button>
               );
             })}
+          </div>
+
+          <div className="space-y-1.5 pt-1">
+            <label
+              htmlFor="gemini-model-input"
+              className="block text-xs font-medium text-[#C8D7EC]"
+            >
+              Modelo personalizado o sobrescritura directa
+            </label>
+            <div className="relative">
+              <Cpu
+                className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#00f0ff]"
+                aria-hidden="true"
+              />
+              <input
+                id="gemini-model-input"
+                data-testid="gemini-model-input"
+                type="text"
+                value={model}
+                onChange={(e) => {
+                  setModel(e.target.value);
+                  setValidationError(null);
+                }}
+                placeholder={DEFAULT_GEMINI_MODEL}
+                className="h-11 sm:h-10 w-full rounded-md border border-[#00f0ff]/25 bg-[#05060a] pl-9 pr-3 font-mono text-xs text-[#EEF5FF] placeholder:text-[#5F738E] focus:border-[#00f0ff] focus:outline-none"
+              />
+            </div>
+            <p className="text-[11px] text-[#8EA2BD] leading-relaxed">
+              Si Google jubila o lanza un nuevo modelo, puedes escribir aquí su identificador exacto (por defecto{' '}
+              <span className="font-mono text-[#00f0ff]">{DEFAULT_GEMINI_MODEL}</span>) o configurarlo mediante{' '}
+              <span className="font-mono text-[#fcee0a]">VITE_GEMINI_MODEL</span> /{' '}
+              <span className="font-mono text-[#fcee0a]">GEMINI_MODEL</span>.
+            </p>
           </div>
         </div>
 

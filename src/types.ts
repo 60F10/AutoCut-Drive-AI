@@ -1,4 +1,10 @@
-export type GeminiModelId = 'gemini-2.5-flash' | 'gemini-2.5-pro';
+export type GeminiModelId = string;
+
+export interface AppErrorBanner {
+  message: string;
+  technicalDetail?: string;
+  actionHint?: 'settings';
+}
 
 export type WatchIntervalSec = 30 | 60 | 300;
 
