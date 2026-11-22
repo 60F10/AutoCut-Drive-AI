@@ -89,30 +89,30 @@ export function GalleryView({
 
   if (completedItems.length === 0) {
     return (
-      <div className="rounded-xl border border-white/10 bg-[#121216] px-6 py-16 text-center">
-        <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl border border-white/10 bg-[#18181f] text-[#8B96A8]">
+      <div className="cyber-panel rounded-md px-6 py-16 text-center">
+        <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-md border border-[#00f0ff]/30 bg-[#05060a] text-[#00f0ff]">
           <Film className="h-5 w-5" />
         </div>
-        <h2 className="mt-4 font-display text-lg font-semibold text-[#EDF1F7]">
+        <h2 className="mt-4 font-display text-lg font-semibold text-[#EEF5FF]">
           Aún no tienes resultados en la galería
         </h2>
-        <p className="mx-auto mt-2 max-w-md text-sm text-[#8B96A8] leading-relaxed">
+        <p className="mx-auto mt-2 max-w-md text-sm text-[#94A8C4] leading-relaxed">
           Cuando Gemini y FFmpeg.wasm terminen de editar tus clips individuales o combinados, se guardarán en la caché local (IndexedDB) y aparecerán aquí listos para reproducir, descargar o subir a Drive.
         </p>
         <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
           <button
             type="button"
             onClick={onGoToQueue}
-            className="inline-flex h-10 items-center gap-2 rounded-lg bg-[#E11D48] px-4 text-sm font-medium text-white hover:bg-[#BE123C] transition-colors whitespace-nowrap"
+            className="cyber-btn-primary inline-flex h-11 items-center gap-2 px-5 text-sm whitespace-nowrap"
           >
             Ir a la cola de vídeos
           </button>
           <button
             type="button"
             onClick={onLoadDemo}
-            className="inline-flex h-10 items-center gap-2 rounded-lg border border-white/10 bg-[#18181f] px-4 text-sm font-medium text-[#EDF1F7] hover:bg-[#22222b] transition-colors whitespace-nowrap"
+            className="inline-flex h-11 items-center gap-2 rounded-md border border-[#ff2a85]/40 bg-[#ff2a85]/10 px-4 text-sm font-medium text-[#EEF5FF] hover:bg-[#ff2a85]/20 transition-colors whitespace-nowrap"
           >
-            <Sparkles className="h-4 w-4 text-[#F43F5E]" />
+            <Sparkles className="h-4 w-4 text-[#ff2a85]" />
             Cargar sesión de ejemplo
           </button>
         </div>
@@ -127,17 +127,17 @@ export function GalleryView({
         <div
           role="tablist"
           aria-label="Filtrar galería por etiqueta"
-          className="flex flex-wrap items-center gap-1 rounded-lg border border-white/10 bg-[#121216] p-1"
+          className="flex flex-wrap items-center gap-1 rounded-md border border-[#00f0ff]/25 bg-[#0c0f1a]/90 p-1"
         >
           <button
             type="button"
             role="tab"
             aria-selected={selectedTag === 'ALL'}
             onClick={() => setSelectedTag('ALL')}
-            className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap tabular-nums ${
+            className={`min-h-[34px] rounded-sm px-3 py-1.5 font-mono text-xs font-medium transition-colors whitespace-nowrap tabular-nums ${
               selectedTag === 'ALL'
-                ? 'bg-[#1D232E] text-white'
-                : 'text-[#8B96A8] hover:text-[#EDF1F7]'
+                ? 'bg-[#00f0ff]/18 text-[#00f0ff]'
+                : 'text-[#8EA2BD] hover:text-[#EEF5FF]'
             }`}
           >
             Todos ({completedItems.length})
@@ -149,10 +149,10 @@ export function GalleryView({
               role="tab"
               aria-selected={selectedTag === tag}
               onClick={() => setSelectedTag(tag)}
-              className={`rounded-md px-3 py-1.5 font-mono text-xs font-medium transition-colors whitespace-nowrap tabular-nums ${
+              className={`min-h-[34px] rounded-sm px-3 py-1.5 font-mono text-xs font-medium transition-colors whitespace-nowrap tabular-nums ${
                 selectedTag === tag
-                  ? 'bg-[#1D232E] text-white'
-                  : 'text-[#8B96A8] hover:text-[#EDF1F7]'
+                  ? 'bg-[#fcee0a]/15 text-[#fcee0a]'
+                  : 'text-[#8EA2BD] hover:text-[#EEF5FF]'
               }`}
             >
               {tag} ({count})
@@ -162,7 +162,7 @@ export function GalleryView({
 
         <div className="relative">
           <Search
-            className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#687487]"
+            className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#6A7E99]"
             aria-hidden="true"
           />
           <input
@@ -171,14 +171,14 @@ export function GalleryView({
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Buscar resultado..."
             aria-label="Buscar vídeo en la galería"
-            className="h-9 w-full sm:w-60 rounded-lg border border-white/10 bg-[#121216] pl-8 pr-3 text-xs text-[#EDF1F7] placeholder:text-[#687487] focus:border-[#E11D48] focus:outline-none"
+            className="h-10 sm:h-9 w-full sm:w-60 rounded-md border border-[#00f0ff]/25 bg-[#0c0f1a]/90 pl-8 pr-3 text-xs text-[#EEF5FF] placeholder:text-[#6A7E99] focus:border-[#00f0ff] focus:outline-none"
           />
         </div>
       </div>
 
       {/* Results Grid */}
       {filteredItems.length === 0 ? (
-        <div className="rounded-xl border border-white/10 bg-[#121216] px-6 py-10 text-center text-sm text-[#8B96A8]">
+        <div className="cyber-panel rounded-md px-6 py-10 text-center text-sm text-[#8EA2BD]">
           No hay resultados que coincidan con tu búsqueda.
         </div>
       ) : (
@@ -208,10 +208,10 @@ export function GalleryView({
               <article
                 key={item.id}
                 data-testid={`gallery-card-${item.id}`}
-                className="flex flex-col overflow-hidden rounded-xl border border-white/10 bg-[#121216]"
+                className="cyber-panel flex flex-col overflow-hidden rounded-md"
               >
-                {/* 9:16 Preview Area (Compact vertical showcase) */}
-                <div className="relative aspect-[9/11] w-full bg-[#07090C] border-b border-white/10 overflow-hidden">
+                {/* 9:16 Preview Area */}
+                <div className="relative aspect-[9/11] w-full bg-[#05060a] border-b border-[#00f0ff]/20 overflow-hidden">
                   {item.editedUrl ? (
                     <video
                       src={item.editedUrl}
@@ -220,25 +220,25 @@ export function GalleryView({
                       className="h-full w-full object-contain bg-black"
                     />
                   ) : isDriveOnly ? (
-                    <div className="flex h-full w-full flex-col justify-between bg-gradient-to-b from-[#141720] via-[#0d0e13] to-[#08080b] p-5">
-                      <div className="flex items-center justify-between text-[11px] font-mono text-[#8B96A8]">
-                        <span className="inline-flex items-center gap-1.5 text-[#38BDF8]">
+                    <div className="flex h-full w-full flex-col justify-between bg-gradient-to-b from-[#0d1322] via-[#080b14] to-[#05060a] p-5">
+                      <div className="flex items-center justify-between text-[11px] font-mono text-[#8EA2BD]">
+                        <span className="inline-flex items-center gap-1.5 text-[#00f0ff]">
                           <Cloud className="h-3.5 w-3.5" aria-hidden="true" />
                           Solo en Google Drive
                         </span>
-                        <span className="tabular-nums text-[#F43F5E]">
+                        <span className="tabular-nums text-[#fcee0a]">
                           {formatSeconds(finalSec)}
                         </span>
                       </div>
 
                       <div className="my-auto space-y-3 text-center px-2">
-                        <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-full border border-[#38BDF8]/30 bg-[#38BDF8]/10 text-[#38BDF8]">
+                        <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-md border border-[#00f0ff]/40 bg-[#00f0ff]/10 text-[#00f0ff]">
                           <CloudDownload className="h-5 w-5" />
                         </div>
                         <p className="font-display text-sm font-semibold text-white leading-snug">
                           {plan.titulo_interno}
                         </p>
-                        <p className="text-xs text-[#8B96A8] leading-relaxed">
+                        <p className="text-xs text-[#94A8C4] leading-relaxed">
                           El MP4 se liberó de la caché local del navegador pero sigue disponible en Google Drive.
                         </p>
                         <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
@@ -252,7 +252,7 @@ export function GalleryView({
                                   ? 'Inicia sesión con Google Drive para descargar de nuevo el vídeo'
                                   : undefined
                               }
-                              className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#E11D48] px-3 text-xs font-medium text-white hover:bg-[#BE123C] disabled:opacity-45 transition-colors whitespace-nowrap"
+                              className="cyber-btn-primary inline-flex h-9 items-center gap-1.5 px-3 text-xs disabled:opacity-45 whitespace-nowrap"
                             >
                               {isRestoring ? (
                                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -267,50 +267,50 @@ export function GalleryView({
                               href={item.uploadedWebViewLink}
                               target="_blank"
                               rel="noopener noreferrer"
-                              className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-white/10 bg-[#18181f] px-3 text-xs font-medium text-[#EDF1F7] hover:bg-[#22222b] transition-colors whitespace-nowrap"
+                              className="inline-flex h-9 items-center gap-1.5 rounded-md border border-[#00f0ff]/30 bg-[#0c0f1a] px-3 text-xs font-medium text-[#EEF5FF] hover:border-[#00f0ff]/65 hover:text-[#00f0ff] transition-colors whitespace-nowrap"
                             >
-                              <ExternalLink className="h-3.5 w-3.5 text-[#10B981]" />
+                              <ExternalLink className="h-3.5 w-3.5 text-[#00f0ff]" />
                               Abrir en Drive
                             </a>
                           )}
                         </div>
                       </div>
 
-                      <div className="flex items-center justify-between text-[11px] font-mono text-[#8B96A8] pt-3 border-t border-white/[0.06]">
+                      <div className="flex items-center justify-between text-[11px] font-mono text-[#8EA2BD] pt-3 border-t border-[#00f0ff]/15">
                         <span>{plan.cortes.filter((c) => c.enabled).length} cortes activos</span>
-                        <span className="text-[#10B981] tabular-nums">
+                        <span className="text-[#00f0ff] tabular-nums">
                           -{formatDurationHuman(savedSec)}
                         </span>
                       </div>
                     </div>
                   ) : (
-                    <div className="flex h-full w-full flex-col justify-between bg-gradient-to-b from-[#171820] via-[#101015] to-[#09090b] p-5">
-                      <div className="flex items-center justify-between text-[11px] font-mono text-[#8B96A8]">
+                    <div className="flex h-full w-full flex-col justify-between bg-gradient-to-b from-[#0e1424] via-[#080a12] to-[#05060a] p-5">
+                      <div className="flex items-center justify-between text-[11px] font-mono text-[#8EA2BD]">
                         <span>{qualityLabel}</span>
-                        <span className="tabular-nums text-[#F43F5E]">
+                        <span className="tabular-nums text-[#00f0ff]">
                           {formatSeconds(finalSec)}
                         </span>
                       </div>
 
                       <div className="my-auto space-y-3 text-center px-2">
-                        <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-full border border-white/15 bg-white/[0.04]">
+                        <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-md border border-[#ff2a85]/40 bg-[#ff2a85]/10">
                           {item.isMultiClip ? (
-                            <Layers className="h-5 w-5 text-[#F43F5E]" />
+                            <Layers className="h-5 w-5 text-[#ff2a85]" />
                           ) : (
-                            <Scissors className="h-5 w-5 text-[#F43F5E]" />
+                            <Scissors className="h-5 w-5 text-[#ff2a85]" />
                           )}
                         </div>
                         <p className="font-display text-sm font-semibold text-white leading-snug">
                           {plan.titulo_interno}
                         </p>
-                        <p className="text-xs text-[#8B96A8] line-clamp-2">
+                        <p className="text-xs text-[#94A8C4] line-clamp-2">
                           {plan.cortes[0]?.motivo}
                         </p>
                       </div>
 
-                      <div className="flex items-center justify-between text-[11px] font-mono text-[#8B96A8] pt-3 border-t border-white/[0.06]">
+                      <div className="flex items-center justify-between text-[11px] font-mono text-[#8EA2BD] pt-3 border-t border-[#00f0ff]/15">
                         <span>{plan.cortes.filter((c) => c.enabled).length} cortes activos</span>
-                        <span className="text-[#10B981] tabular-nums">
+                        <span className="text-[#00f0ff] tabular-nums">
                           -{formatDurationHuman(savedSec)}
                         </span>
                       </div>
@@ -320,49 +320,49 @@ export function GalleryView({
 
                 {/* Metadata & Actions */}
                 <div className="flex flex-1 flex-col p-5 space-y-3">
-                  <div className="flex flex-wrap items-center gap-2 text-xs text-[#8B96A8]">
-                    <span className="font-mono font-semibold text-[#F43F5E]">
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-[#8EA2BD]">
+                    <span className="font-mono font-semibold text-[#fcee0a]">
                       {plan.etiqueta}
                     </span>
                     <span aria-hidden="true">·</span>
-                    <span className="font-mono tabular-nums">
+                    <span className="font-mono tabular-nums text-[#C8D7EC]">
                       {formatSeconds(rawSec)} → {formatSeconds(finalSec)}
                     </span>
                     {item.isMultiClip && (
                       <>
                         <span aria-hidden="true">·</span>
-                        <span className="text-[#C8D0DC]">
+                        <span className="font-mono text-[#ff5c9f]">
                           Multi-Clip ({item.sourceClips?.length ?? 2})
                         </span>
                       </>
                     )}
                   </div>
 
-                  <h3 className="font-display text-[15px] font-semibold text-[#EDF1F7] leading-snug">
+                  <h3 className="font-display text-[15px] font-semibold text-[#EEF5FF] leading-snug">
                     {plan.titulo_interno}
                   </h3>
 
-                  <p className="font-mono text-[11px] text-[#8B96A8] truncate" title={outputName}>
+                  <p className="font-mono text-[11px] text-[#8EA2BD] truncate" title={outputName}>
                     {outputName}
                   </p>
 
-                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-[#687487] font-mono tabular-nums">
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-[#8EA2BD] font-mono tabular-nums">
                     <span>
                       Ahorro: {formatDurationHuman(savedSec)} · {formatBytes(displaySize)}
                     </span>
                     {item.cachedInIndexedDb && (
-                      <span className="inline-flex items-center gap-1 text-[#10B981]">
+                      <span className="inline-flex items-center gap-1 text-[#00f0ff]">
                         <HardDrive className="h-3 w-3" aria-hidden="true" />
                         Caché local
                       </span>
                     )}
                   </div>
 
-                  <div className="mt-auto pt-3 border-t border-white/10 flex flex-wrap items-center gap-2">
+                  <div className="mt-auto pt-3 border-t border-[#00f0ff]/20 flex flex-wrap items-center gap-2">
                     <button
                       type="button"
                       onClick={() => onOpenStudio(item.id)}
-                      className="flex-1 inline-flex h-9 items-center justify-center gap-1.5 rounded-lg bg-[#E11D48] px-3 text-xs font-medium text-white hover:bg-[#BE123C] transition-colors whitespace-nowrap"
+                      className="cyber-btn-primary flex-1 inline-flex h-10 items-center justify-center gap-1.5 px-3 text-xs whitespace-nowrap"
                     >
                       <Film className="h-3.5 w-3.5" />
                       Abrir estudio
@@ -374,9 +374,9 @@ export function GalleryView({
                         onClick={() => handleDownload(item)}
                         aria-label={`Descargar ${outputName}`}
                         title="Descargar MP4"
-                        className="inline-flex h-9 items-center justify-center rounded-lg border border-white/10 bg-[#18181f] px-2.5 text-xs font-medium text-[#EDF1F7] hover:bg-[#22222b] transition-colors"
+                        className="inline-flex h-10 w-10 items-center justify-center rounded-md border border-[#00f0ff]/30 bg-[#05060a] text-xs font-medium text-[#00f0ff] hover:border-[#00f0ff]/70 transition-colors"
                       >
-                        <Download className="h-3.5 w-3.5" />
+                        <Download className="h-4 w-4" />
                       </button>
                     ) : item.uploadedDriveId ? (
                       <button
@@ -389,12 +389,12 @@ export function GalleryView({
                             ? 'Descargar desde Google Drive a caché local'
                             : 'Conecta Google Drive para recuperar este vídeo'
                         }
-                        className="inline-flex h-9 items-center justify-center rounded-lg border border-white/10 bg-[#18181f] px-2.5 text-xs font-medium text-[#38BDF8] hover:bg-[#22222b] disabled:opacity-40 transition-colors"
+                        className="inline-flex h-10 w-10 items-center justify-center rounded-md border border-[#00f0ff]/30 bg-[#05060a] text-xs font-medium text-[#00f0ff] hover:border-[#00f0ff]/70 disabled:opacity-40 transition-colors"
                       >
                         {isRestoring ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          <Loader2 className="h-4 w-4 animate-spin" />
                         ) : (
-                          <CloudDownload className="h-3.5 w-3.5" />
+                          <CloudDownload className="h-4 w-4" />
                         )}
                       </button>
                     ) : (
@@ -403,9 +403,9 @@ export function GalleryView({
                         disabled
                         aria-label={`Descargar ${outputName}`}
                         title="Solo disponible para vídeos renderizados"
-                        className="inline-flex h-9 items-center justify-center rounded-lg border border-white/10 bg-[#18181f] px-2.5 text-xs font-medium text-[#EDF1F7] opacity-40"
+                        className="inline-flex h-10 w-10 items-center justify-center rounded-md border border-[#00f0ff]/20 bg-[#05060a] text-xs font-medium text-[#8EA2BD] opacity-40"
                       >
-                        <Download className="h-3.5 w-3.5" />
+                        <Download className="h-4 w-4" />
                       </button>
                     )}
 
@@ -416,9 +416,9 @@ export function GalleryView({
                         rel="noopener noreferrer"
                         aria-label={`Ver ${outputName} en Google Drive`}
                         title="Abrir en Google Drive"
-                        className="inline-flex h-9 items-center justify-center rounded-lg border border-white/10 bg-[#18181f] px-2.5 text-xs font-medium text-[#10B981] hover:bg-[#22222b] transition-colors"
+                        className="inline-flex h-10 w-10 items-center justify-center rounded-md border border-[#00f0ff]/30 bg-[#05060a] text-xs font-medium text-[#00f0ff] hover:border-[#00f0ff]/70 transition-colors"
                       >
-                        <ExternalLink className="h-3.5 w-3.5" />
+                        <ExternalLink className="h-4 w-4" />
                       </a>
                     ) : (
                       <button
@@ -426,9 +426,9 @@ export function GalleryView({
                         onClick={() => onRequestDriveUpload(item.id)}
                         aria-label={`Subir ${outputName} a Google Drive`}
                         title="Subir a Google Drive"
-                        className="inline-flex h-9 items-center justify-center rounded-lg border border-white/10 bg-[#18181f] px-2.5 text-xs font-medium text-[#38BDF8] hover:bg-[#22222b] transition-colors"
+                        className="inline-flex h-10 w-10 items-center justify-center rounded-md border border-[#ff2a85]/35 bg-[#05060a] text-xs font-medium text-[#ff2a85] hover:border-[#ff2a85]/70 transition-colors"
                       >
-                        <CloudUpload className="h-3.5 w-3.5" />
+                        <CloudUpload className="h-4 w-4" />
                       </button>
                     )}
                   </div>

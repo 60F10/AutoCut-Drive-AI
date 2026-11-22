@@ -28,9 +28,9 @@ export function MobileBottomNav({
     <nav
       aria-label="Navegación móvil"
       data-testid="mobile-bottom-nav"
-      className="md:hidden fixed bottom-0 inset-x-0 z-40 border-t border-white/10 bg-[#09090b]/90 backdrop-blur-xl pb-safe px-safe"
+      className="md:hidden fixed bottom-0 inset-x-0 z-40 border-t border-[#00f0ff]/30 bg-[#05060a]/92 backdrop-blur-xl pb-safe px-safe shadow-[0_-8px_28px_rgba(0,0,0,0.65)]"
     >
-      <div className="grid grid-cols-4 items-center px-1.5 py-1.5">
+      <div className="grid grid-cols-4 items-center gap-1 px-2 py-1.5">
         {tabs.map((tab) => {
           const Icon = tab.icon;
           const active = activeView === tab.id;
@@ -40,26 +40,26 @@ export function MobileBottomNav({
               type="button"
               onClick={() => onSelectView(tab.id)}
               aria-current={active ? 'page' : undefined}
-              className={`relative flex min-h-[48px] min-w-[44px] flex-col items-center justify-center gap-1 rounded-xl px-2 py-1.5 transition-colors ${
+              className={`relative flex min-h-[48px] min-w-[44px] flex-col items-center justify-center gap-1 rounded-md border px-2 py-1.5 transition-all ${
                 active
-                  ? 'text-white bg-white/[0.06]'
-                  : 'text-[#8B96A8] active:bg-white/[0.04] hover:text-[#EDF1F7]'
+                  ? 'border-[#00f0ff]/55 bg-[#00f0ff]/12 text-[#00f0ff] shadow-[0_0_16px_rgba(0,240,255,0.22)]'
+                  : 'border-transparent text-[#8EA2BD] active:bg-[#00f0ff]/10 hover:text-[#EEF5FF]'
               }`}
             >
               <span className="relative flex items-center justify-center">
                 <Icon
-                  className={`h-5 w-5 ${active ? 'text-[#F43F5E]' : 'text-[#8B96A8]'}`}
+                  className={`h-5 w-5 ${active ? 'text-[#00f0ff]' : 'text-[#8EA2BD]'}`}
                   aria-hidden="true"
                 />
                 {typeof tab.count === 'number' && tab.count > 0 && (
-                  <span className="absolute -top-1.5 -right-2.5 min-w-[16px] rounded-full bg-[#E11D48] px-1 text-center font-mono text-[10px] font-semibold leading-4 text-white tabular-nums">
+                  <span className="absolute -top-1.5 -right-2.5 min-w-[16px] rounded-sm bg-[#ff2a85] px-1 text-center font-mono text-[10px] font-bold leading-4 text-white tabular-nums shadow-[0_0_8px_rgba(255,42,133,0.5)]">
                     {tab.count > 99 ? '99+' : tab.count}
                   </span>
                 )}
               </span>
               <span
-                className={`text-[11px] font-medium leading-none tracking-tight ${
-                  active ? 'text-white' : 'text-[#8B96A8]'
+                className={`font-mono text-[10px] font-medium leading-none tracking-tight ${
+                  active ? 'text-[#00f0ff]' : 'text-[#8EA2BD]'
                 }`}
               >
                 {tab.label}

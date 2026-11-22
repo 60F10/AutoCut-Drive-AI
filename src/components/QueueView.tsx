@@ -196,38 +196,64 @@ export function QueueView({
   };
 
   return (
-    <div className={`space-y-6 ${selectedIds.length >= 2 ? 'pb-20' : ''}`}>
-      {/* Unboxed summary metrics row with symmetrical hairlines across 2x2 mobile and 4-col desktop */}
+    <div className={`space-y-5 sm:space-y-6 ${selectedIds.length >= 2 ? 'pb-24' : ''}`}>
+      {/* Mobile Thumb-Safe Primary Action Strip (moved out of top status bar area) */}
+      <section
+        aria-label="Acciones rápidas móviles"
+        data-testid="mobile-action-strip"
+        className="md:hidden grid grid-cols-2 gap-2.5"
+      >
+        <button
+          type="button"
+          onClick={onScanFolder}
+          disabled={isScanning}
+          className="cyber-btn-primary inline-flex min-h-[46px] items-center justify-center gap-2 px-3.5 text-xs disabled:opacity-50 whitespace-nowrap"
+        >
+          <RefreshCw className={`h-4 w-4 ${isScanning ? 'animate-spin' : ''}`} />
+          {isScanning ? 'Escaneando...' : 'Escanear carpeta'}
+        </button>
+
+        <button
+          type="button"
+          onClick={() => fileInputRef.current?.click()}
+          className="inline-flex min-h-[46px] items-center justify-center gap-2 rounded-md border border-[#00f0ff]/35 bg-[#0c0f1a]/90 px-3.5 text-xs font-medium text-[#EEF5FF] hover:border-[#00f0ff]/65 hover:bg-[#13192c] transition-colors whitespace-nowrap"
+        >
+          <Upload className="h-4 w-4 text-[#00f0ff]" />
+          Subir vídeos
+        </button>
+      </section>
+
+      {/* HUD Summary Metrics Strip */}
       <section
         aria-label="Resumen de la cola"
-        className="grid grid-cols-2 sm:grid-cols-4 gap-px overflow-hidden border border-white/10 rounded-xl bg-white/10"
+        className="grid grid-cols-2 sm:grid-cols-4 gap-px overflow-hidden border border-[#00f0ff]/25 rounded-md bg-[#00f0ff]/20"
       >
-        <div className="bg-[#121216] px-4 sm:px-5 py-4">
-          <p className="text-xs text-[#8B96A8]">Pendientes</p>
-          <p className="mt-1 font-mono text-2xl font-semibold tabular-nums text-[#EDF1F7]">
+        <div className="bg-[#0c0f1a]/95 px-4 sm:px-5 py-4">
+          <p className="text-xs text-[#8EA2BD]">Pendientes</p>
+          <p className="mt-1 font-mono text-2xl font-semibold tabular-nums text-[#EEF5FF]">
             {counts.pending}
           </p>
         </div>
-        <div className="bg-[#121216] px-4 sm:px-5 py-4">
-          <p className="text-xs text-[#8B96A8]">En proceso</p>
-          <p className="mt-1 font-mono text-2xl font-semibold tabular-nums text-[#F59E0B]">
+        <div className="bg-[#0c0f1a]/95 px-4 sm:px-5 py-4">
+          <p className="text-xs text-[#8EA2BD]">En proceso</p>
+          <p className="mt-1 font-mono text-2xl font-semibold tabular-nums text-[#fcee0a]">
             {counts.active}
           </p>
         </div>
-        <div className="bg-[#121216] px-4 sm:px-5 py-4">
-          <p className="text-xs text-[#8B96A8]">Completados</p>
-          <p className="mt-1 font-mono text-2xl font-semibold tabular-nums text-[#10B981]">
+        <div className="bg-[#0c0f1a]/95 px-4 sm:px-5 py-4">
+          <p className="text-xs text-[#8EA2BD]">Completados</p>
+          <p className="mt-1 font-mono text-2xl font-semibold tabular-nums text-[#00f0ff]">
             {counts.completed}
           </p>
         </div>
-        <div className="bg-[#121216] px-4 sm:px-5 py-4">
-          <p className="text-xs text-[#8B96A8]">Último escaneo</p>
-          <p className="mt-1 font-mono text-base sm:text-lg font-medium tabular-nums text-[#C8D0DC] truncate">
+        <div className="bg-[#0c0f1a]/95 px-4 sm:px-5 py-4">
+          <p className="text-xs text-[#8EA2BD]">Último escaneo</p>
+          <p className="mt-1 font-mono text-base sm:text-lg font-medium tabular-nums text-[#C8D7EC] truncate">
             {lastScanFormatted}
           </p>
           {alreadyEditedCount > 0 && (
-            <p className="mt-0.5 text-[11px] text-[#687487]">
-              {alreadyEditedCount} omitidos (ya editados)
+            <p className="mt-0.5 font-mono text-[11px] text-[#8EA2BD]">
+              {alreadyEditedCount} omitidos
             </p>
           )}
         </div>
@@ -253,14 +279,16 @@ export function QueueView({
         <div
           role="note"
           data-testid="queue-mobile-ram-notice"
-          className="flex items-start justify-between gap-3 rounded-lg border border-[#F59E0B]/30 bg-[#F59E0B]/[0.07] px-4 py-3 text-xs text-[#FCD34D]"
+          className="flex items-start justify-between gap-3 rounded-md border border-[#fcee0a]/45 bg-[#fcee0a]/[0.08] px-4 py-3 text-xs text-[#fcee0a]"
         >
           <span className="flex items-start gap-2.5 leading-relaxed">
-            <AlertTriangle className="h-4 w-4 shrink-0 text-[#F59E0B] mt-0.5" />
-            <span>
+            <AlertTriangle className="h-4 w-4 shrink-0 text-[#fcee0a] mt-0.5" />
+            <span className="text-[#FAF3B8]">
               Los archivos seleccionados suman{' '}
-              <strong className="font-mono tabular-nums">{formatBytes(ramWarningBytes)}</strong>{' '}
-              (más de 200 MB). En navegadores móviles FFmpeg.wasm puede consumir mucha RAM; puedes continuar, pero en clips largos se recomienda grabar en 1080p.
+              <strong className="font-mono tabular-nums text-[#fcee0a]">
+                {formatBytes(ramWarningBytes)}
+              </strong>{' '}
+              (más de 200 MB). En navegadores móviles FFmpeg.wasm puede consumir mucha RAM; te recomendamos usar el modo <strong className="font-mono text-[#00f0ff]">720p móvil</strong>.
             </span>
           </span>
           {recentUploadRamBytes > 0 && !exceedsMobileRamThreshold(selectedTotalBytes) && (
@@ -268,7 +296,7 @@ export function QueueView({
               type="button"
               onClick={() => setRecentUploadRamBytes(0)}
               aria-label="Ocultar aviso de memoria"
-              className="rounded p-0.5 text-[#FCD34D] hover:bg-white/[0.08] shrink-0"
+              className="rounded p-1 text-[#fcee0a] hover:bg-white/[0.08] shrink-0"
             >
               <X className="h-3.5 w-3.5" />
             </button>
@@ -281,7 +309,7 @@ export function QueueView({
         <div
           role="tablist"
           aria-label="Filtrar cola por estado"
-          className="grid grid-cols-2 sm:inline-flex items-center gap-1 rounded-lg bg-[#121216] p-1 border border-white/10 w-full sm:w-auto shrink-0"
+          className="grid grid-cols-2 sm:inline-flex items-center gap-1 rounded-md bg-[#0c0f1a]/90 p-1 border border-[#00f0ff]/25 w-full sm:w-auto shrink-0"
         >
           {(
             [
@@ -299,10 +327,10 @@ export function QueueView({
                 type="button"
                 aria-selected={active}
                 onClick={() => setFilter(tab.id)}
-                className={`rounded-md px-2.5 py-1.5 text-xs font-medium text-center transition-colors whitespace-nowrap shrink-0 tabular-nums ${
+                className={`min-h-[36px] rounded-sm px-2.5 py-1.5 font-mono text-xs font-medium text-center transition-colors whitespace-nowrap shrink-0 tabular-nums ${
                   active
-                    ? 'bg-[#1D232E] text-white'
-                    : 'text-[#8B96A8] hover:text-[#EDF1F7]'
+                    ? 'bg-[#00f0ff]/18 text-[#00f0ff]'
+                    : 'text-[#8EA2BD] hover:text-[#EEF5FF]'
                 }`}
               >
                 {tab.label}
@@ -314,7 +342,7 @@ export function QueueView({
         <div className="flex flex-wrap xl:flex-nowrap items-center gap-2">
           <div className="relative flex-1 sm:flex-initial">
             <Search
-              className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#687487]"
+              className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#6A7E99]"
               aria-hidden="true"
             />
             <input
@@ -323,7 +351,7 @@ export function QueueView({
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Buscar vídeo..."
               aria-label="Buscar vídeo en la cola"
-              className="h-9 w-full sm:w-44 rounded-lg border border-white/[0.09] bg-[#111419] pl-8 pr-3 text-xs text-[#EDF1F7] placeholder:text-[#687487] focus:border-[#E11D48] focus:outline-none"
+              className="h-10 sm:h-9 w-full sm:w-44 rounded-md border border-[#00f0ff]/25 bg-[#0c0f1a]/90 pl-8 pr-3 text-xs text-[#EEF5FF] placeholder:text-[#6A7E99] focus:border-[#00f0ff] focus:outline-none"
             />
           </div>
 
@@ -345,9 +373,9 @@ export function QueueView({
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
-            className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-white/[0.1] bg-[#111419] px-3 text-xs font-medium text-[#EDF1F7] hover:bg-[#191E27] transition-colors whitespace-nowrap shrink-0"
+            className="hidden md:inline-flex h-9 items-center gap-1.5 rounded-md border border-[#00f0ff]/30 bg-[#0c0f1a]/90 px-3 text-xs font-medium text-[#EEF5FF] hover:border-[#00f0ff]/60 hover:bg-[#13192c] transition-colors whitespace-nowrap shrink-0"
           >
-            <Upload className="h-3.5 w-3.5 text-[#8B96A8]" />
+            <Upload className="h-3.5 w-3.5 text-[#00f0ff]" />
             Subir vídeos
           </button>
 
@@ -357,7 +385,7 @@ export function QueueView({
                 type="button"
                 onClick={onClearPending}
                 disabled={isProcessingAny}
-                className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-white/[0.09] bg-[#111419] px-2.5 text-xs font-medium text-[#8B96A8] hover:bg-white/[0.04] hover:text-[#EDF1F7] disabled:opacity-45 transition-colors whitespace-nowrap shrink-0"
+                className="inline-flex h-10 sm:h-9 items-center gap-1.5 rounded-md border border-[#00f0ff]/20 bg-[#0c0f1a]/90 px-2.5 text-xs font-medium text-[#8EA2BD] hover:border-[#ff2a85]/50 hover:text-[#ff85b8] disabled:opacity-45 transition-colors whitespace-nowrap shrink-0"
               >
                 <Trash2 className="h-3.5 w-3.5" />
                 Quitar pendientes
@@ -367,7 +395,7 @@ export function QueueView({
                 type="button"
                 onClick={onProcessAllPending}
                 disabled={isProcessingAny}
-                className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-[#E11D48] px-3 text-xs font-medium text-white hover:bg-[#BE123C] disabled:opacity-50 transition-colors whitespace-nowrap shrink-0"
+                className="cyber-btn-primary inline-flex h-10 sm:h-9 items-center gap-1.5 px-3.5 text-xs disabled:opacity-50 whitespace-nowrap shrink-0"
               >
                 <Play className="h-3.5 w-3.5 fill-current" />
                 Procesar pendientes
@@ -379,14 +407,14 @@ export function QueueView({
 
       {/* Queue List or Empty State */}
       {items.length === 0 ? (
-        <div className="rounded-xl border border-white/10 bg-[#121216] px-6 py-14 text-center">
-          <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl border border-white/10 bg-[#18181f] text-[#8B96A8]">
+        <div className="cyber-panel rounded-md px-6 py-12 sm:py-14 text-center">
+          <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-md border border-[#00f0ff]/30 bg-[#05060a] text-[#00f0ff]">
             <FolderOpen className="h-5 w-5" />
           </div>
-          <h2 className="mt-4 font-display text-lg font-semibold text-[#EDF1F7]">
+          <h2 className="mt-4 font-display text-lg font-semibold text-[#EEF5FF]">
             Tu cola de edición está vacía
           </h2>
-          <p className="mx-auto mt-2 max-w-lg text-sm text-[#8B96A8] leading-relaxed">
+          <p className="mx-auto mt-2 max-w-lg text-sm text-[#94A8C4] leading-relaxed">
             {isDriveConnected && folderId
               ? 'Pulsa "Escanear carpeta" para detectar archivos .mp4, .mov o .webm sin versión _EDITADO, o sube varios vídeos desde tu galería para combinarlos en Modo Multi-Clip.'
               : 'Conecta tu cuenta de Google Drive y configura el ID de carpeta en Ajustes, sube vídeos desde tu móvil o PC, o carga una sesión de ejemplo.'}
@@ -398,7 +426,7 @@ export function QueueView({
                 type="button"
                 onClick={onScanFolder}
                 disabled={isScanning}
-                className="inline-flex h-11 items-center gap-2 rounded-lg bg-[#E11D48] px-4 text-sm font-medium text-white hover:bg-[#BE123C] disabled:opacity-50 transition-colors whitespace-nowrap"
+                className="cyber-btn-primary inline-flex h-11 items-center gap-2 px-5 text-sm disabled:opacity-50 whitespace-nowrap"
               >
                 <RefreshCw className={`h-4 w-4 ${isScanning ? 'animate-spin' : ''}`} />
                 {isScanning ? 'Escaneando carpeta...' : 'Escanear carpeta ahora'}
@@ -407,7 +435,7 @@ export function QueueView({
               <button
                 type="button"
                 onClick={onGoToSettings}
-                className="inline-flex h-11 items-center gap-2 rounded-lg bg-[#E11D48] px-4 text-sm font-medium text-white hover:bg-[#BE123C] transition-colors whitespace-nowrap"
+                className="cyber-btn-primary inline-flex h-11 items-center gap-2 px-5 text-sm whitespace-nowrap"
               >
                 Configurar carpeta de Drive
               </button>
@@ -416,28 +444,28 @@ export function QueueView({
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              className="inline-flex h-11 items-center gap-2 rounded-lg border border-white/10 bg-[#18181f] px-4 text-sm font-medium text-[#EDF1F7] hover:bg-[#20202a] transition-colors whitespace-nowrap"
+              className="inline-flex h-11 items-center gap-2 rounded-md border border-[#00f0ff]/30 bg-[#05060a]/90 px-4 text-sm font-medium text-[#EEF5FF] hover:border-[#00f0ff]/60 hover:bg-[#13192c] transition-colors whitespace-nowrap"
             >
-              <Upload className="h-4 w-4" />
+              <Upload className="h-4 w-4 text-[#00f0ff]" />
               Subir vídeos locales
             </button>
 
             <button
               type="button"
               onClick={onLoadDemo}
-              className="inline-flex h-11 items-center gap-2 rounded-lg border border-white/10 px-4 text-sm font-medium text-[#B8C2D1] hover:bg-white/[0.05] hover:text-white transition-colors whitespace-nowrap"
+              className="inline-flex h-11 items-center gap-2 rounded-md border border-[#ff2a85]/40 bg-[#ff2a85]/10 px-4 text-sm font-medium text-[#EEF5FF] hover:bg-[#ff2a85]/20 transition-colors whitespace-nowrap"
             >
-              <Sparkles className="h-4 w-4 text-[#F43F5E]" />
+              <Sparkles className="h-4 w-4 text-[#ff2a85]" />
               Cargar sesión de ejemplo
             </button>
           </div>
         </div>
       ) : filteredItems.length === 0 ? (
-        <div className="rounded-xl border border-white/10 bg-[#121216] px-6 py-10 text-center text-sm text-[#8B96A8]">
+        <div className="cyber-panel rounded-md px-6 py-10 text-center text-sm text-[#8EA2BD]">
           No hay vídeos que coincidan con el filtro actual.
         </div>
       ) : (
-        <div className="overflow-hidden rounded-xl border border-white/10 bg-[#121216] divide-y divide-white/[0.07]">
+        <div className="cyber-panel overflow-hidden rounded-md divide-y divide-[#00f0ff]/15">
           {filteredItems.map((item) => {
             const stageIdx = STAGE_ORDER.indexOf(item.stage);
             const active = isActiveStage(item.stage);
@@ -456,8 +484,8 @@ export function QueueView({
             return (
               <div
                 key={item.id}
-                className={`p-5 transition-colors ${
-                  isSelected ? 'bg-[#E11D48]/[0.05]' : 'hover:bg-white/[0.02]'
+                className={`p-4 sm:p-5 transition-colors ${
+                  isSelected ? 'bg-[#ff2a85]/[0.08]' : 'hover:bg-[#00f0ff]/[0.03]'
                 }`}
                 data-testid={`queue-item-${item.id}`}
               >
@@ -465,48 +493,48 @@ export function QueueView({
                   {/* Left: Multi-Clip Checkbox + Filename + unboxed metadata */}
                   <div className="flex items-start gap-3.5 min-w-0 flex-1">
                     {canSelectForCombine ? (
-                      <label className="mt-1 flex items-center shrink-0">
+                      <label className="mt-0.5 flex h-6 w-6 items-center justify-center shrink-0">
                         <input
                           type="checkbox"
                           checked={isSelected}
                           onChange={() => onToggleSelectItem(item.id)}
                           aria-label={`Seleccionar ${item.originalName} para combinar`}
-                          className="h-4 w-4 rounded border-white/25 bg-[#171B22] accent-[#E11D48]"
+                          className="h-4 w-4 rounded-sm border-[#00f0ff]/40 bg-[#05060a] accent-[#ff2a85]"
                         />
                       </label>
                     ) : (
-                      <div className="mt-1 flex h-4 w-4 items-center justify-center shrink-0 text-[#F43F5E]">
-                        {item.isMultiClip && <Layers className="h-3.5 w-3.5" aria-hidden="true" />}
+                      <div className="mt-1 flex h-5 w-5 items-center justify-center shrink-0 text-[#ff2a85]">
+                        {item.isMultiClip && <Layers className="h-4 w-4" aria-hidden="true" />}
                       </div>
                     )}
 
                     <div className="min-w-0 flex-1 space-y-1.5">
                       <div className="flex items-center gap-2.5 min-w-0">
-                        <span className="truncate font-display text-[15px] font-semibold text-[#EDF1F7]">
+                        <span className="truncate font-display text-[15px] font-semibold text-[#EEF5FF]">
                           {item.originalName}
                         </span>
                         {item.analysis?.etiqueta && (
                           <>
-                            <span className="text-[#4B5565]" aria-hidden="true">
+                            <span className="text-[#4F627D]" aria-hidden="true">
                               ·
                             </span>
-                            <span className="font-mono text-xs font-medium text-[#F43F5E] shrink-0">
+                            <span className="font-mono text-xs font-semibold text-[#fcee0a] shrink-0">
                               {item.analysis.etiqueta}
                             </span>
                           </>
                         )}
                       </div>
 
-                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-[#8B96A8]">
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-[#8EA2BD]">
                         <span>{sourceLabel}</span>
                         <span aria-hidden="true">·</span>
-                        <span className="font-mono tabular-nums">
+                        <span className="font-mono tabular-nums text-[#C8D7EC]">
                           {formatBytes(item.sizeBytes)}
                         </span>
                         {item.durationSec ? (
                           <>
                             <span aria-hidden="true">·</span>
-                            <span className="font-mono tabular-nums">
+                            <span className="font-mono tabular-nums text-[#C8D7EC]">
                               Bruto {formatSeconds(item.durationSec)}
                             </span>
                           </>
@@ -514,38 +542,38 @@ export function QueueView({
                       </div>
 
                       {item.outputFileName && (
-                        <p className="font-mono text-xs text-[#C8D0DC] truncate">
+                        <p className="font-mono text-xs text-[#00f0ff]/90 truncate">
                           Salida: {item.outputFileName}
                         </p>
                       )}
 
                       {item.analysis?.titulo_interno && (
-                        <p className="text-xs text-[#A3AEBF]">{item.analysis.titulo_interno}</p>
+                        <p className="text-xs text-[#B5C6DC]">{item.analysis.titulo_interno}</p>
                       )}
                     </div>
                   </div>
 
-                  {/* Right: Status label + Primary Action + Remove Pending */}
-                  <div className="flex flex-wrap items-center gap-2.5 shrink-0 pl-7 lg:pl-0">
-                    <div className="flex items-center gap-2 text-xs font-medium mr-1">
+                  {/* Right: Monospace HUD Status + Primary Action + Remove Pending */}
+                  <div className="flex flex-wrap items-center gap-2.5 shrink-0 pl-8 lg:pl-0">
+                    <div className="flex items-center gap-2 font-mono text-xs font-medium mr-1">
                       {item.stage === 'completed' ? (
-                        <CheckCircle2 className="h-4 w-4 text-[#10B981]" />
+                        <CheckCircle2 className="h-4 w-4 text-[#00f0ff]" />
                       ) : item.stage === 'error' ? (
-                        <AlertCircle className="h-4 w-4 text-[#EF4444]" />
+                        <AlertCircle className="h-4 w-4 text-[#ff2a85]" />
                       ) : active ? (
-                        <Loader2 className="h-4 w-4 animate-spin text-[#F59E0B]" />
+                        <Loader2 className="h-4 w-4 animate-spin text-[#fcee0a]" />
                       ) : (
-                        <Clock className="h-4 w-4 text-[#8B96A8]" />
+                        <Clock className="h-4 w-4 text-[#8EA2BD]" />
                       )}
                       <span
                         className={
                           item.stage === 'completed'
-                            ? 'text-[#10B981]'
+                            ? 'text-[#00f0ff]'
                             : item.stage === 'error'
-                            ? 'text-[#EF4444]'
+                            ? 'text-[#ff5c9f]'
                             : active
-                            ? 'text-[#F59E0B]'
-                            : 'text-[#C8D0DC]'
+                            ? 'text-[#fcee0a]'
+                            : 'text-[#C8D7EC]'
                         }
                       >
                         {STAGE_LABELS[item.stage]}
@@ -556,9 +584,9 @@ export function QueueView({
                       <button
                         type="button"
                         onClick={() => onOpenStudio(item.id)}
-                        className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-white/[0.12] bg-[#171B22] px-3 text-xs font-medium text-[#EDF1F7] hover:bg-[#1F2530] transition-colors whitespace-nowrap"
+                        className="inline-flex h-10 sm:h-9 items-center gap-1.5 rounded-md border border-[#00f0ff]/35 bg-[#05060a]/90 px-3 text-xs font-medium text-[#EEF5FF] hover:border-[#00f0ff]/70 hover:text-[#00f0ff] transition-colors whitespace-nowrap"
                       >
-                        <Film className="h-3.5 w-3.5 text-[#F43F5E]" />
+                        <Film className="h-3.5 w-3.5 text-[#00f0ff]" />
                         Abrir estudio
                       </button>
                     )}
@@ -569,7 +597,7 @@ export function QueueView({
                           type="button"
                           onClick={() => onProcessItem(item.id)}
                           disabled={isProcessingAny}
-                          className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-[#E11D48] px-3.5 text-xs font-medium text-white hover:bg-[#BE123C] disabled:opacity-50 transition-colors whitespace-nowrap"
+                          className="cyber-btn-primary inline-flex h-10 sm:h-9 items-center gap-1.5 px-3.5 text-xs disabled:opacity-50 whitespace-nowrap"
                         >
                           <Play className="h-3.5 w-3.5 fill-current" />
                           {item.stage === 'error' ? 'Reintentar' : 'Procesar'}
@@ -581,7 +609,7 @@ export function QueueView({
                           disabled={isProcessingAny}
                           aria-label={`Quitar ${item.originalName} de la cola`}
                           title="Quitar de la cola"
-                          className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-white/[0.09] bg-[#151921] text-[#8B96A8] hover:border-[#EF4444]/40 hover:bg-[#EF4444]/10 hover:text-[#FCA5A5] disabled:opacity-40 transition-colors"
+                          className="inline-flex h-10 w-10 sm:h-9 sm:w-9 items-center justify-center rounded-md border border-[#00f0ff]/20 bg-[#05060a] text-[#8EA2BD] hover:border-[#ff2a85]/55 hover:bg-[#ff2a85]/15 hover:text-[#ff85b8] disabled:opacity-40 transition-colors"
                         >
                           <Trash2 className="h-3.5 w-3.5" />
                         </button>
@@ -593,7 +621,7 @@ export function QueueView({
                         href={item.uploadedWebViewLink}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-white/[0.08] px-3 text-xs font-medium text-[#B8C2D1] hover:bg-white/[0.05] hover:text-white transition-colors whitespace-nowrap"
+                        className="inline-flex h-10 sm:h-9 items-center gap-1.5 rounded-md border border-[#00f0ff]/25 px-3 text-xs font-medium text-[#C8D7EC] hover:border-[#00f0ff]/60 hover:text-[#00f0ff] transition-colors whitespace-nowrap"
                       >
                         Ver en Drive
                         <ExternalLink className="h-3.5 w-3.5" />
@@ -602,8 +630,8 @@ export function QueueView({
                   </div>
                 </div>
 
-                {/* 6-Stage Pipeline Bar + Real Progress */}
-                <div className="mt-4 space-y-2 pl-7">
+                {/* 6-Stage Energy Pipeline Bar + Real Progress */}
+                <div className="mt-4 space-y-2 pl-8">
                   <div className="grid grid-cols-6 gap-1.5" aria-label="Etapas del flujo">
                     {STAGE_ORDER.map((step, idx) => {
                       const reached = item.stage !== 'error' && stageIdx >= idx;
@@ -611,25 +639,25 @@ export function QueueView({
                       return (
                         <div key={step} className="space-y-1">
                           <div
-                            className={`h-1 rounded-full transition-colors ${
+                            className={`h-1.5 rounded-sm transition-colors ${
                               item.stage === 'error'
-                                ? 'bg-[#EF4444]/40'
+                                ? 'bg-[#ff2a85]/45'
                                 : isCurrent && active
-                                ? 'bg-[#F59E0B]'
+                                ? 'bg-[#fcee0a] shadow-[0_0_8px_rgba(252,238,10,0.55)]'
                                 : reached
                                 ? item.stage === 'completed'
-                                  ? 'bg-[#10B981]'
-                                  : 'bg-[#E11D48]'
+                                  ? 'bg-[#00f0ff] shadow-[0_0_8px_rgba(0,240,255,0.4)]'
+                                  : 'bg-[#ff2a85]'
                                 : 'bg-white/[0.08]'
                             }`}
                           />
                           <span
-                            className={`hidden sm:block truncate text-[11px] ${
+                            className={`hidden sm:block truncate font-mono text-[10px] ${
                               isCurrent
-                                ? 'font-medium text-[#EDF1F7]'
+                                ? 'font-semibold text-[#EEF5FF]'
                                 : reached
-                                ? 'text-[#8B96A8]'
-                                : 'text-[#525D6E]'
+                                ? 'text-[#8EA2BD]'
+                                : 'text-[#52647D]'
                             }`}
                           >
                             {STAGE_LABELS[step]}
@@ -642,16 +670,16 @@ export function QueueView({
                   {active && (
                     <>
                       <div className="flex items-center justify-between gap-3 pt-1">
-                        <p className="text-xs text-[#C8D0DC] truncate">
+                        <p className="text-xs text-[#C8D7EC] truncate">
                           {item.stageDetail || STAGE_LABELS[item.stage]}
                         </p>
-                        <span className="font-mono text-xs tabular-nums text-[#F59E0B] shrink-0">
+                        <span className="font-mono text-xs font-semibold tabular-nums text-[#fcee0a] shrink-0">
                           {item.progress}%
                         </span>
                       </div>
-                      <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/[0.07]">
+                      <div className="h-2 w-full overflow-hidden rounded-sm border border-[#00f0ff]/25 bg-[#05060a]">
                         <div
-                          className="h-full rounded-full bg-[#F59E0B] transition-transform duration-150 origin-left"
+                          className="h-full cyber-energy-bar transition-transform duration-150 origin-left"
                           style={{ transform: `scaleX(${Math.max(0.03, item.progress / 100)})` }}
                         />
                       </div>
@@ -659,7 +687,7 @@ export function QueueView({
                   )}
 
                   {item.stage === 'error' && item.errorMessage && (
-                    <p className="text-xs text-[#F87171] pt-1">{item.errorMessage}</p>
+                    <p className="font-mono text-xs text-[#ff6ca9] pt-1">{item.errorMessage}</p>
                   )}
                 </div>
               </div>
@@ -668,20 +696,20 @@ export function QueueView({
         </div>
       )}
 
-      {/* Floating Multi-Clip Action Bar when >= 2 clips are selected (lifts cleanly above MobileBottomNav) */}
+      {/* Floating Multi-Clip Action Bar when >= 2 clips are selected (thumb-zone above MobileBottomNav) */}
       {selectedIds.length >= 2 && (
         <div
           data-testid="multiclip-floating-bar"
-          className="fixed bottom-[calc(4.75rem+env(safe-area-inset-bottom,0px))] md:bottom-5 left-1/2 -translate-x-1/2 z-40 flex items-center gap-3 rounded-xl border border-white/15 bg-[#121216]/95 px-4 py-2.5 shadow-2xl backdrop-blur-xl max-w-[calc(100vw-2rem)]"
+          className="fixed bottom-[calc(4.9rem+env(safe-area-inset-bottom,0px))] md:bottom-5 left-1/2 -translate-x-1/2 z-40 flex items-center gap-3 rounded-md border border-[#ff2a85]/55 bg-[#0c0f1a]/95 px-4 py-2.5 shadow-[0_0_24px_rgba(255,42,133,0.3)] backdrop-blur-xl max-w-[calc(100vw-2rem)]"
         >
-          <span className="hidden sm:inline font-mono text-xs tabular-nums text-[#8B96A8] whitespace-nowrap">
+          <span className="hidden sm:inline font-mono text-xs tabular-nums text-[#fcee0a] whitespace-nowrap">
             {formatBytes(selectedTotalBytes)}
           </span>
           <button
             type="button"
             onClick={onOpenMultiClipComposer}
             disabled={isProcessingAny}
-            className="inline-flex h-9 items-center gap-2 rounded-lg bg-[#E11D48] px-4 text-xs font-medium text-white hover:bg-[#BE123C] disabled:opacity-50 transition-colors whitespace-nowrap"
+            className="cyber-btn-magenta inline-flex h-10 sm:h-9 items-center gap-2 px-4 text-xs disabled:opacity-50 whitespace-nowrap"
           >
             <Layers className="h-3.5 w-3.5" />
             Combinar en 1 vídeo ({selectedIds.length} seleccionados)
@@ -690,7 +718,7 @@ export function QueueView({
             type="button"
             onClick={onClearSelection}
             aria-label="Limpiar selección Multi-Clip"
-            className="flex h-8 w-8 items-center justify-center rounded-lg text-[#8B96A8] hover:bg-white/[0.08] hover:text-white transition-colors shrink-0"
+            className="flex h-9 w-9 items-center justify-center rounded-md text-[#8EA2BD] hover:bg-white/[0.08] hover:text-white transition-colors shrink-0"
           >
             <X className="h-4 w-4" />
           </button>

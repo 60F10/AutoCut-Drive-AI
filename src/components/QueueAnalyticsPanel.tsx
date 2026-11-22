@@ -26,18 +26,18 @@ export function QueueAnalyticsPanel({ records }: QueueAnalyticsPanelProps) {
       className="grid grid-cols-1 xl:grid-cols-12 gap-5"
     >
       {/* Left: Recharts Bar Chart — Videos processed per day */}
-      <div className="xl:col-span-7 rounded-xl border border-white/10 bg-[#121216] p-5 flex flex-col">
-        <div className="flex flex-wrap items-center justify-between gap-2 pb-4 border-b border-white/10">
+      <div className="xl:col-span-7 cyber-panel rounded-md p-5 flex flex-col">
+        <div className="flex flex-wrap items-center justify-between gap-2 pb-4 border-b border-[#00f0ff]/20">
           <div className="flex items-center gap-2">
-            <BarChart3 className="h-4 w-4 text-[#F43F5E]" aria-hidden="true" />
-            <h2 className="font-display text-sm font-semibold text-[#EDF1F7]">
+            <BarChart3 className="h-4 w-4 text-[#00f0ff]" aria-hidden="true" />
+            <h2 className="font-display text-sm font-semibold text-[#EEF5FF]">
               Vídeos procesados por día
             </h2>
           </div>
-          <div className="flex items-center gap-3 text-xs text-[#8B96A8]">
+          <div className="flex items-center gap-3 text-xs text-[#8EA2BD]">
             <span>Últimos 7 días</span>
             <span aria-hidden="true">·</span>
-            <span className="font-mono tabular-nums text-[#EDF1F7]">
+            <span className="font-mono tabular-nums font-medium text-[#00f0ff]">
               {summary.totalProcessed} total
             </span>
           </div>
@@ -45,7 +45,7 @@ export function QueueAnalyticsPanel({ records }: QueueAnalyticsPanelProps) {
 
         <div className="mt-4 h-[190px] w-full min-w-0">
           {summary.totalProcessed === 0 ? (
-            <div className="flex h-full items-center justify-center rounded-lg border border-dashed border-white/10 bg-[#09090b] px-4 text-center text-xs text-[#687487]">
+            <div className="flex h-full items-center justify-center rounded-md border border-dashed border-[#00f0ff]/20 bg-[#05060a]/80 px-4 text-center text-xs text-[#8EA2BD]">
               Procesa un vídeo o carga la sesión de ejemplo para ver tu actividad diaria de cortes.
             </div>
           ) : (
@@ -54,34 +54,37 @@ export function QueueAnalyticsPanel({ records }: QueueAnalyticsPanelProps) {
                 data={summary.dailySeries}
                 margin={{ top: 8, right: 8, left: -24, bottom: 0 }}
               >
-                <CartesianGrid stroke="rgba(255,255,255,0.06)" vertical={false} />
+                <CartesianGrid stroke="rgba(0, 240, 255, 0.1)" vertical={false} />
                 <XAxis
                   dataKey="label"
-                  tick={{ fill: '#8B96A8', fontSize: 11, fontFamily: 'JetBrains Mono' }}
-                  axisLine={{ stroke: 'rgba(255,255,255,0.08)' }}
+                  interval="preserveStartEnd"
+                  minTickGap={18}
+                  tick={{ fill: '#8EA2BD', fontSize: 10, fontFamily: 'JetBrains Mono' }}
+                  axisLine={{ stroke: 'rgba(0, 240, 255, 0.2)' }}
                   tickLine={false}
                 />
                 <YAxis
                   allowDecimals={false}
-                  tick={{ fill: '#687487', fontSize: 11, fontFamily: 'JetBrains Mono' }}
+                  tick={{ fill: '#6A7E99', fontSize: 11, fontFamily: 'JetBrains Mono' }}
                   axisLine={false}
                   tickLine={false}
                 />
                 <Tooltip
-                  cursor={{ fill: 'rgba(255,255,255,0.04)' }}
+                  cursor={{ fill: 'rgba(0, 240, 255, 0.06)' }}
                   contentStyle={{
-                    backgroundColor: '#151921',
-                    border: '1px solid rgba(255,255,255,0.12)',
-                    borderRadius: '8px',
+                    backgroundColor: '#0c0f1a',
+                    border: '1px solid rgba(0, 240, 255, 0.4)',
+                    borderRadius: '6px',
                     fontSize: '12px',
-                    color: '#EDF1F7',
+                    fontFamily: 'JetBrains Mono',
+                    color: '#EEF5FF',
                   }}
                   formatter={(value: unknown) => [`${value} vídeos`, 'Procesados']}
                 />
                 <Bar
                   dataKey="count"
-                  fill="#E11D48"
-                  radius={[4, 4, 0, 0]}
+                  fill="#00f0ff"
+                  radius={[3, 3, 0, 0]}
                   maxBarSize={36}
                   isAnimationActive={false}
                 />
@@ -92,27 +95,27 @@ export function QueueAnalyticsPanel({ records }: QueueAnalyticsPanelProps) {
       </div>
 
       {/* Right: Saved Footage Time + Gemini Tag Breakdown */}
-      <div className="xl:col-span-5 rounded-xl border border-white/10 bg-[#121216] p-5 flex flex-col justify-between gap-5">
+      <div className="xl:col-span-5 cyber-panel rounded-md p-5 flex flex-col justify-between gap-5">
         {/* Saved Time Block */}
-        <div className="pb-4 border-b border-white/10">
-          <div className="flex items-center gap-2 text-xs text-[#8B96A8]">
-            <Clock className="h-3.5 w-3.5 text-[#10B981]" aria-hidden="true" />
+        <div className="pb-4 border-b border-[#00f0ff]/20">
+          <div className="flex items-center gap-2 text-xs text-[#8EA2BD]">
+            <Clock className="h-3.5 w-3.5 text-[#00f0ff]" aria-hidden="true" />
             <span>Metraje ahorrado gracias a los cortes</span>
           </div>
           <div className="mt-2 flex items-baseline justify-between gap-3">
             <p
               data-testid="total-saved-footage"
-              className="font-mono text-2xl font-semibold tabular-nums text-[#EDF1F7]"
+              className="font-mono text-2xl font-semibold tabular-nums text-[#EEF5FF]"
             >
               {formatDurationHuman(summary.totalSavedSec)}
             </p>
             {summary.avgReductionPct > 0 && (
-              <span className="font-mono text-xs tabular-nums text-[#10B981]">
+              <span className="font-mono text-xs font-semibold tabular-nums text-[#00f0ff]">
                 -{summary.avgReductionPct}% metraje muerto
               </span>
             )}
           </div>
-          <p className="mt-1 text-[11px] text-[#687487] font-mono tabular-nums">
+          <p className="mt-1 text-[11px] text-[#8EA2BD] font-mono tabular-nums">
             Bruto {formatDurationHuman(summary.totalRawSec)} → Final{' '}
             {formatDurationHuman(summary.totalFinalSec)}
           </p>
@@ -121,17 +124,17 @@ export function QueueAnalyticsPanel({ records }: QueueAnalyticsPanelProps) {
         {/* Gemini Tag Breakdown */}
         <div className="flex-1 space-y-3">
           <div className="flex items-center justify-between gap-2">
-            <span className="flex items-center gap-2 text-xs font-medium text-[#C8D0DC]">
-              <Tags className="h-3.5 w-3.5 text-[#F43F5E]" aria-hidden="true" />
+            <span className="flex items-center gap-2 text-xs font-medium text-[#C8D7EC]">
+              <Tags className="h-3.5 w-3.5 text-[#fcee0a]" aria-hidden="true" />
               Etiquetas generadas por Gemini
             </span>
-            <span className="font-mono text-[11px] tabular-nums text-[#687487]">
+            <span className="font-mono text-[11px] tabular-nums text-[#8EA2BD]">
               {summary.tagBreakdown.length} categorías
             </span>
           </div>
 
           {summary.tagBreakdown.length === 0 ? (
-            <p className="text-xs text-[#687487]">
+            <p className="text-xs text-[#8EA2BD]">
               Sin etiquetas registradas todavía.
             </p>
           ) : (
@@ -139,16 +142,16 @@ export function QueueAnalyticsPanel({ records }: QueueAnalyticsPanelProps) {
               {summary.tagBreakdown.slice(0, 5).map((item) => (
                 <div key={item.etiqueta} className="space-y-1">
                   <div className="flex items-center justify-between text-xs">
-                    <span className="font-mono font-medium text-[#EDF1F7]">
+                    <span className="font-mono font-semibold text-[#fcee0a]">
                       {item.etiqueta}
                     </span>
-                    <span className="font-mono tabular-nums text-[#8B96A8]">
+                    <span className="font-mono tabular-nums text-[#94A8C4]">
                       {item.count} · {item.sharePct}%
                     </span>
                   </div>
-                  <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/[0.07]">
+                  <div className="h-1.5 w-full overflow-hidden rounded-sm bg-[#05060a] border border-[#00f0ff]/15">
                     <div
-                      className="h-full rounded-full bg-[#E11D48] origin-left transition-transform duration-200"
+                      className="h-full origin-left transition-transform duration-200 bg-gradient-to-r from-[#ff2a85] to-[#00f0ff]"
                       style={{ transform: `scaleX(${Math.max(0.06, item.sharePct / 100)})` }}
                     />
                   </div>

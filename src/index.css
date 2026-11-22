@@ -11,20 +11,28 @@
   --sab: env(safe-area-inset-bottom, 0px);
   --sal: env(safe-area-inset-left, 0px);
   --sar: env(safe-area-inset-right, 0px);
+
+  --cyber-bg: #05060a;
+  --cyber-surface: rgba(12, 15, 26, 0.9);
+  --cyber-surface-solid: #0c0f1a;
+  --cyber-cyan: #00f0ff;
+  --cyber-magenta: #ff2a85;
+  --cyber-amber: #fcee0a;
+  --cyber-border: rgba(0, 240, 255, 0.25);
 }
 
 @layer base {
   html {
     font-family: var(--font-sans);
-    background-color: #09090b;
-    color: #edf1f7;
+    background-color: #05060a;
+    color: #eef5ff;
     color-scheme: dark;
     letter-spacing: 0.01em;
     -webkit-tap-highlight-color: transparent;
   }
 
   body {
-    background-color: #09090b;
+    background-color: #05060a;
     min-height: 100vh;
     min-height: 100dvh;
     overscroll-behavior-y: none;
@@ -61,6 +69,15 @@
     padding-top: env(safe-area-inset-top, 0px);
   }
 
+  /* Generous top safe-area for iOS PWA installed mode (Dynamic Island / status bar) */
+  .pt-safe-header {
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+
+  .pt-safe-modal {
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+
   .pb-safe {
     padding-bottom: env(safe-area-inset-bottom, 0px);
   }
@@ -79,7 +96,108 @@
   }
 
   .pb-mobile-nav {
-    padding-bottom: calc(5.25rem + env(safe-area-inset-bottom, 0px));
+    padding-bottom: calc(5.5rem + env(safe-area-inset-bottom, 0px));
+  }
+
+  /* Subtle tactical HUD grid + whisper-quiet scanlines on #05060a canvas */
+  .cyber-canvas-bg {
+    background-color: #05060a;
+    background-image:
+      linear-gradient(rgba(0, 240, 255, 0.035) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(0, 240, 255, 0.035) 1px, transparent 1px),
+      repeating-linear-gradient(
+        0deg,
+        rgba(0, 240, 255, 0.014) 0px,
+        rgba(0, 240, 255, 0.014) 1px,
+        transparent 1px,
+        transparent 4px
+      );
+    background-size: 40px 40px, 40px 40px, 100% 4px;
+    background-attachment: fixed;
+  }
+
+  /* Tactical HUD translucent panel with fine luminous cyan hairline border */
+  .cyber-panel {
+    background-color: rgba(12, 15, 26, 0.9);
+    border: 1px solid rgba(0, 240, 255, 0.25);
+    box-shadow: inset 0 1px 0 rgba(0, 240, 255, 0.08);
+    backdrop-filter: blur(10px);
+  }
+
+  /* Chamfered futuristic primary button with high-contrast text and subtle cyan glow */
+  .cyber-btn-primary {
+    background-color: #00f0ff;
+    color: #05060a;
+    font-weight: 600;
+    clip-path: polygon(
+      0 0,
+      calc(100% - 9px) 0,
+      100% 9px,
+      100% 100%,
+      9px 100%,
+      0 calc(100% - 9px)
+    );
+    box-shadow: 0 0 16px rgba(0, 240, 255, 0.28);
+    transition: background-color 160ms cubic-bezier(0.16, 1, 0.3, 1),
+      box-shadow 160ms cubic-bezier(0.16, 1, 0.3, 1),
+      transform 140ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .cyber-btn-primary:hover:not(:disabled) {
+    background-color: #5cf7ff;
+    box-shadow: 0 0 22px rgba(0, 240, 255, 0.45);
+  }
+
+  .cyber-btn-primary:active:not(:disabled) {
+    transform: scale(0.98);
+  }
+
+  /* Chamfered magenta secondary CTA (Multi-Clip / Combine) */
+  .cyber-btn-magenta {
+    background-color: #ff2a85;
+    color: #ffffff;
+    font-weight: 600;
+    clip-path: polygon(
+      0 0,
+      calc(100% - 9px) 0,
+      100% 9px,
+      100% 100%,
+      9px 100%,
+      0 calc(100% - 9px)
+    );
+    box-shadow: 0 0 16px rgba(255, 42, 133, 0.32);
+    transition: background-color 160ms cubic-bezier(0.16, 1, 0.3, 1),
+      box-shadow 160ms cubic-bezier(0.16, 1, 0.3, 1),
+      transform 140ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .cyber-btn-magenta:hover:not(:disabled) {
+    background-color: #ff4d99;
+    box-shadow: 0 0 22px rgba(255, 42, 133, 0.48);
+  }
+
+  .cyber-glow-cyan {
+    box-shadow: 0 0 16px rgba(0, 240, 255, 0.26);
+  }
+
+  .cyber-glow-magenta {
+    box-shadow: 0 0 16px rgba(255, 42, 133, 0.28);
+  }
+
+  .cyber-energy-bar {
+    background-image: linear-gradient(90deg, #00f0ff 0%, #38bdf8 55%, #ff2a85 100%);
+    box-shadow: 0 0 10px rgba(0, 240, 255, 0.45);
+  }
+}
+
+/* Installed iOS/Android PWA standalone mode: guaranteed clearance below Dynamic Island / status bar */
+@media (display-mode: standalone) {
+  .pt-safe-header {
+    padding-top: max(env(safe-area-inset-top, 0px), 56px);
+  }
+
+  .pt-safe-modal {
+    padding-top: max(env(safe-area-inset-top, 0px), 56px);
   }
 }
 
@@ -87,20 +205,20 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* Official Google Sign-In Material button styling for dark surfaces */
+/* Official Google Sign-In Material button styling for dark Cyberpunk HUD surfaces */
 .gsi-material-button {
   user-select: none;
   appearance: none;
-  background-color: #13171e;
-  border: 1px solid #2b3340;
-  border-radius: 8px;
+  background-color: #0c0f1a;
+  border: 1px solid rgba(0, 240, 255, 0.28);
+  border-radius: 6px;
   box-sizing: border-box;
-  color: #edf1f7;
+  color: #eef5ff;
   cursor: pointer;
   font-family: var(--font-sans);
   font-size: 13px;
   font-weight: 500;
-  height: 42px;
+  height: 44px;
   letter-spacing: 0.01em;
   outline: none;
   overflow: hidden;
@@ -108,19 +226,21 @@
   position: relative;
   text-align: center;
   transition: background-color 160ms cubic-bezier(0.16, 1, 0.3, 1),
-    border-color 160ms cubic-bezier(0.16, 1, 0.3, 1);
+    border-color 160ms cubic-bezier(0.16, 1, 0.3, 1),
+    box-shadow 160ms cubic-bezier(0.16, 1, 0.3, 1);
   vertical-align: middle;
   white-space: nowrap;
   width: 100%;
 }
 
 .gsi-material-button:hover:not(:disabled) {
-  background-color: #1a202a;
-  border-color: #3d4859;
+  background-color: #13192c;
+  border-color: rgba(0, 240, 255, 0.6);
+  box-shadow: 0 0 14px rgba(0, 240, 255, 0.16);
 }
 
 .gsi-material-button:focus-visible {
-  outline: 2px solid #e11d48;
+  outline: 2px solid #00f0ff;
   outline-offset: 2px;
 }
 

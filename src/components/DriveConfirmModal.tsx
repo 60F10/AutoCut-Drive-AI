@@ -22,15 +22,15 @@ export function DriveConfirmModal({
       role="dialog"
       aria-modal="true"
       aria-labelledby="drive-upload-confirm-title"
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-[2px]"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#05060a]/85 backdrop-blur-md pt-safe-modal"
     >
-      <div className="w-full max-w-md rounded-xl border border-white/[0.1] bg-[#111419] p-6 shadow-2xl">
+      <div className="w-full max-w-md rounded-lg cyber-panel p-6 shadow-[0_0_40px_rgba(0,240,255,0.14)]">
         <div className="flex items-start justify-between gap-3">
           <div className="flex items-center gap-2.5">
-            <CloudUpload className="h-5 w-5 text-[#38BDF8] shrink-0" />
+            <CloudUpload className="h-5 w-5 text-[#00f0ff] shrink-0" />
             <h2
               id="drive-upload-confirm-title"
-              className="font-display text-base font-semibold text-[#EDF1F7]"
+              className="font-display text-base font-semibold text-[#EEF5FF]"
             >
               Confirmar subida a Google Drive
             </h2>
@@ -40,33 +40,33 @@ export function DriveConfirmModal({
             onClick={onCancel}
             disabled={isUploading}
             aria-label="Cerrar confirmación"
-            className="rounded-md p-1 text-[#8B96A8] hover:bg-white/[0.06] hover:text-white transition-colors"
+            className="flex h-9 w-9 items-center justify-center rounded-md border border-[#00f0ff]/20 text-[#94A3B8] hover:border-[#00f0ff]/55 hover:bg-[#00f0ff]/10 hover:text-[#00f0ff] transition-colors"
           >
             <X className="h-4 w-4" />
           </button>
         </div>
 
-        <p className="mt-3 text-sm text-[#A3AEBF] leading-relaxed">
+        <p className="mt-3 text-sm text-[#94A3B8] leading-relaxed">
           Se creará un nuevo archivo editado en tu carpeta de Google Drive sin modificar ni eliminar el vídeo original.
         </p>
 
-        <div className="mt-4 rounded-lg border border-white/[0.08] bg-[#0B0E12] p-3.5 space-y-2 text-xs">
+        <div className="mt-4 rounded-md border border-[#00f0ff]/20 bg-[#05060a] p-3.5 space-y-2 text-xs">
           <div className="flex items-center justify-between gap-3">
-            <span className="text-[#8B96A8]">Archivo final</span>
-            <span className="font-mono text-[#EDF1F7] truncate max-w-[240px]">
+            <span className="text-[#7D8EA8]">Archivo final</span>
+            <span className="font-mono text-[#00f0ff] truncate max-w-[230px]">
               {pendingUpload.fileName}
             </span>
           </div>
           <div className="flex items-center justify-between gap-3">
-            <span className="text-[#8B96A8]">Carpeta destino</span>
-            <span className="font-mono text-[#C8D0DC] truncate max-w-[240px]">
+            <span className="text-[#7D8EA8]">Carpeta destino</span>
+            <span className="font-mono text-[#CFE2FF] truncate max-w-[230px]">
               {pendingUpload.folderId || 'Sin configurar'}
             </span>
           </div>
           {pendingUpload.sizeBytes > 0 && (
             <div className="flex items-center justify-between gap-3">
-              <span className="text-[#8B96A8]">Tamaño</span>
-              <span className="font-mono tabular-nums text-[#C8D0DC]">
+              <span className="text-[#7D8EA8]">Tamaño</span>
+              <span className="font-mono tabular-nums text-[#fcee0a]">
                 {formatBytes(pendingUpload.sizeBytes)}
               </span>
             </div>
@@ -78,7 +78,7 @@ export function DriveConfirmModal({
             type="button"
             onClick={onCancel}
             disabled={isUploading}
-            className="h-9 rounded-lg border border-white/[0.1] px-4 text-xs font-medium text-[#C8D0DC] hover:bg-white/[0.05] transition-colors whitespace-nowrap"
+            className="h-10 rounded-md border border-[#00f0ff]/25 px-4 text-xs font-medium text-[#CFE2FF] hover:border-[#00f0ff]/60 hover:bg-[#00f0ff]/10 transition-colors whitespace-nowrap"
           >
             Cancelar
           </button>
@@ -86,7 +86,7 @@ export function DriveConfirmModal({
             type="button"
             onClick={onConfirm}
             disabled={isUploading || !pendingUpload.folderId}
-            className="h-9 rounded-lg bg-[#E11D48] px-4 text-xs font-medium text-white hover:bg-[#BE123C] disabled:opacity-45 transition-colors whitespace-nowrap"
+            className="h-10 cyber-btn-primary px-5 text-xs disabled:opacity-45 whitespace-nowrap"
           >
             {isUploading ? 'Subiendo...' : 'Confirmar subida'}
           </button>

@@ -83,29 +83,29 @@ export function SettingsView({
     <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
       <form
         onSubmit={handleSubmit}
-        className="xl:col-span-7 rounded-xl border border-white/10 bg-[#121216] divide-y divide-white/10 overflow-hidden"
+        className="xl:col-span-7 cyber-panel rounded-md divide-y divide-[#00f0ff]/20 overflow-hidden"
       >
         {/* Section 1: Google Drive Folder */}
-        <div className="p-6 space-y-4">
+        <div className="p-5 sm:p-6 space-y-4">
           <div>
-            <h2 className="font-display text-base font-semibold text-[#EDF1F7]">
+            <h2 className="font-display text-base font-semibold text-[#EEF5FF]">
               Carpeta vigilada de Google Drive
             </h2>
-            <p className="mt-1 text-xs text-[#8B96A8] leading-relaxed">
-              Pega el ID de tu carpeta o la URL completa de Google Drive. La app ignorará cualquier archivo con <span className="font-mono text-[#C8D0DC]">_EDITADO</span> para evitar bucles infinitos.
+            <p className="mt-1 text-xs text-[#94A8C4] leading-relaxed">
+              Pega el ID de tu carpeta o la URL completa de Google Drive. La app ignorará cualquier archivo con <span className="font-mono text-[#fcee0a]">_EDITADO</span> para evitar bucles infinitos.
             </p>
           </div>
 
           <div className="space-y-2">
             <label
               htmlFor="drive-folder-id"
-              className="block text-xs font-medium text-[#C8D0DC]"
+              className="block text-xs font-medium text-[#C8D7EC]"
             >
               ID o enlace de carpeta de Google Drive
             </label>
             <div className="relative">
               <Folder
-                className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#687487]"
+                className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#00f0ff]"
                 aria-hidden="true"
               />
               <input
@@ -117,26 +117,26 @@ export function SettingsView({
                   setValidationError(null);
                 }}
                 placeholder="Ej: 1A2B3C4D5E6F7G8H9I0J o https://drive.google.com/drive/folders/..."
-                className="h-10 w-full rounded-lg border border-white/[0.1] bg-[#0B0E12] pl-9 pr-3 font-mono text-xs text-[#EDF1F7] placeholder:text-[#5C6778] focus:border-[#E11D48] focus:outline-none"
+                className="h-11 sm:h-10 w-full rounded-md border border-[#00f0ff]/25 bg-[#05060a] pl-9 pr-3 font-mono text-xs text-[#EEF5FF] placeholder:text-[#5F738E] focus:border-[#00f0ff] focus:outline-none"
               />
             </div>
 
             {folderInput.trim() && parsedFolderId !== folderInput.trim() && (
-              <p className="text-xs text-[#10B981]">
+              <p className="text-xs text-[#00f0ff]">
                 ID detectado automáticamente:{' '}
-                <span className="font-mono font-medium">{parsedFolderId}</span>
+                <span className="font-mono font-semibold text-[#fcee0a]">{parsedFolderId}</span>
               </p>
             )}
           </div>
         </div>
 
         {/* Section 2: Gemini Model */}
-        <div className="p-6 space-y-4">
+        <div className="p-5 sm:p-6 space-y-4">
           <div>
-            <h2 className="font-display text-base font-semibold text-[#EDF1F7]">
+            <h2 className="font-display text-base font-semibold text-[#EEF5FF]">
               Modelo de análisis Gemini
             </h2>
-            <p className="mt-1 text-xs text-[#8B96A8]">
+            <p className="mt-1 text-xs text-[#94A8C4]">
               El vídeo se sube mediante Gemini Files API (resumable upload) y se elimina automáticamente al terminar el análisis.
             </p>
           </div>
@@ -168,14 +168,20 @@ export function SettingsView({
                   role="radio"
                   aria-checked={selected}
                   onClick={() => setModel(option.id)}
-                  className={`rounded-lg border p-4 text-left transition-colors ${
+                  className={`min-h-[44px] rounded-md border p-4 text-left transition-all ${
                     selected
-                      ? 'border-[#E11D48] bg-[#E11D48]/[0.08]'
-                      : 'border-white/10 bg-[#09090b] hover:border-white/20'
+                      ? 'border-[#00f0ff] bg-[#00f0ff]/10 shadow-[0_0_16px_rgba(0,240,255,0.16)]'
+                      : 'border-[#00f0ff]/20 bg-[#05060a]/85 hover:border-[#00f0ff]/45'
                   }`}
                 >
-                  <p className="font-mono text-xs font-semibold text-[#EDF1F7]">{option.title}</p>
-                  <p className="mt-1.5 text-xs text-[#8B96A8] leading-relaxed">{option.desc}</p>
+                  <p
+                    className={`font-mono text-xs font-semibold ${
+                      selected ? 'text-[#00f0ff]' : 'text-[#EEF5FF]'
+                    }`}
+                  >
+                    {option.title}
+                  </p>
+                  <p className="mt-1.5 text-xs text-[#94A8C4] leading-relaxed">{option.desc}</p>
                 </button>
               );
             })}
@@ -183,14 +189,14 @@ export function SettingsView({
         </div>
 
         {/* Section 2.5: FFmpeg.wasm Render Quality / Mobile Performance Mode */}
-        <div className="p-6 space-y-4">
+        <div className="p-5 sm:p-6 space-y-4">
           <div className="flex items-start gap-2.5">
-            <Zap className="h-4 w-4 text-[#F43F5E] shrink-0 mt-0.5" aria-hidden="true" />
+            <Zap className="h-4 w-4 text-[#fcee0a] shrink-0 mt-0.5" aria-hidden="true" />
             <div>
-              <h2 className="font-display text-base font-semibold text-[#EDF1F7]">
+              <h2 className="font-display text-base font-semibold text-[#EEF5FF]">
                 Modo de renderizado FFmpeg.wasm
               </h2>
-              <p className="mt-1 text-xs text-[#8B96A8] leading-relaxed">
+              <p className="mt-1 text-xs text-[#94A8C4] leading-relaxed">
                 El modo rápido móvil (720p) reduce el uso de RAM y acelera el exportado ~3× en Safari iOS y Android.
               </p>
             </div>
@@ -226,15 +232,23 @@ export function SettingsView({
                   aria-checked={selected}
                   data-testid={`settings-quality-${option.id}`}
                   onClick={() => setExportQuality(option.id)}
-                  className={`rounded-lg border p-4 text-left transition-colors ${
+                  className={`min-h-[44px] rounded-md border p-4 text-left transition-all ${
                     selected
-                      ? 'border-[#E11D48] bg-[#E11D48]/[0.08]'
-                      : 'border-white/10 bg-[#09090b] hover:border-white/20'
+                      ? 'border-[#00f0ff] bg-[#00f0ff]/10 shadow-[0_0_16px_rgba(0,240,255,0.16)]'
+                      : 'border-[#00f0ff]/20 bg-[#05060a]/85 hover:border-[#00f0ff]/45'
                   }`}
                 >
-                  <p className="text-xs font-semibold text-[#EDF1F7]">{option.title}</p>
-                  <p className="mt-1 font-mono text-[11px] text-[#F43F5E]">{option.specs}</p>
-                  <p className="mt-1.5 text-xs text-[#8B96A8] leading-relaxed">{option.desc}</p>
+                  <p
+                    className={`text-xs font-semibold ${
+                      selected ? 'text-[#00f0ff]' : 'text-[#EEF5FF]'
+                    }`}
+                  >
+                    {option.title}
+                  </p>
+                  <p className="mt-1 font-mono text-[11px] font-medium text-[#fcee0a]">
+                    {option.specs}
+                  </p>
+                  <p className="mt-1.5 text-xs text-[#94A8C4] leading-relaxed">{option.desc}</p>
                 </button>
               );
             })}
@@ -242,21 +256,21 @@ export function SettingsView({
         </div>
 
         {/* Section 3: Watch Mode & Interval */}
-        <div className="p-6 space-y-5">
+        <div className="p-5 sm:p-6 space-y-5">
           <div>
-            <h2 className="font-display text-base font-semibold text-[#EDF1F7]">
+            <h2 className="font-display text-base font-semibold text-[#EEF5FF]">
               Vigilancia automática y subida
             </h2>
-            <p className="mt-1 text-xs text-[#8B96A8]">
+            <p className="mt-1 text-xs text-[#94A8C4]">
               Escanea la carpeta automáticamente mientras esta pestaña permanezca abierta.
             </p>
           </div>
 
           <div className="space-y-2">
-            <label className="block text-xs font-medium text-[#C8D0DC]">
+            <label className="block text-xs font-medium text-[#C8D7EC]">
               Intervalo de vigilancia
             </label>
-            <div className="inline-flex items-center gap-1 rounded-lg border border-white/[0.08] bg-[#0B0E12] p-1">
+            <div className="inline-flex items-center gap-1 rounded-md border border-[#00f0ff]/25 bg-[#05060a] p-1">
               {(
                 [
                   { value: 30, label: '30s' },
@@ -271,10 +285,10 @@ export function SettingsView({
                     type="button"
                     onClick={() => setWatchIntervalSec(opt.value)}
                     aria-pressed={active}
-                    className={`rounded-md px-4 py-1.5 font-mono text-xs font-medium transition-colors whitespace-nowrap ${
+                    className={`min-h-[36px] rounded-sm px-4 py-1.5 font-mono text-xs font-medium transition-colors whitespace-nowrap ${
                       active
-                        ? 'bg-[#1D232E] text-white'
-                        : 'text-[#8B96A8] hover:text-[#EDF1F7]'
+                        ? 'bg-[#00f0ff]/18 text-[#00f0ff]'
+                        : 'text-[#8EA2BD] hover:text-[#EEF5FF]'
                     }`}
                   >
                     {opt.label}
@@ -290,13 +304,13 @@ export function SettingsView({
                 type="checkbox"
                 checked={autoWatchEnabled}
                 onChange={(e) => setAutoWatchEnabled(e.target.checked)}
-                className="mt-0.5 h-4 w-4 rounded border-white/25 bg-[#0B0E12] accent-[#E11D48]"
+                className="mt-0.5 h-4 w-4 rounded-sm border-[#00f0ff]/40 bg-[#05060a] accent-[#00f0ff]"
               />
               <span>
-                <span className="block text-sm font-medium text-[#EDF1F7]">
+                <span className="block text-sm font-medium text-[#EEF5FF]">
                   Activar Modo Vigilancia Automática
                 </span>
-                <span className="block text-xs text-[#8B96A8]">
+                <span className="block text-xs text-[#94A8C4]">
                   Busca nuevos vídeos brutos en la carpeta según el intervalo elegido y los añade a la cola.
                 </span>
               </span>
@@ -307,14 +321,14 @@ export function SettingsView({
                 type="checkbox"
                 checked={autoUploadEnabled}
                 onChange={(e) => setAutoUploadEnabled(e.target.checked)}
-                className="mt-0.5 h-4 w-4 rounded border-white/25 bg-[#0B0E12] accent-[#E11D48]"
+                className="mt-0.5 h-4 w-4 rounded-sm border-[#00f0ff]/40 bg-[#05060a] accent-[#00f0ff]"
               />
               <span>
-                <span className="block text-sm font-medium text-[#EDF1F7]">
+                <span className="block text-sm font-medium text-[#EEF5FF]">
                   Solicitar subida a Google Drive al terminar el render
                 </span>
-                <span className="block text-xs text-[#8B96A8]">
-                  Al finalizar FFmpeg.wasm te pedirá confirmación antes de guardar el archivo <span className="font-mono">_EDITADO_ETIQUETA.mp4</span> en tu carpeta.
+                <span className="block text-xs text-[#94A8C4]">
+                  Al finalizar FFmpeg.wasm te pedirá confirmación antes de guardar el archivo <span className="font-mono text-[#fcee0a]">_EDITADO_ETIQUETA.mp4</span> en tu carpeta.
                 </span>
               </span>
             </label>
@@ -322,17 +336,17 @@ export function SettingsView({
         </div>
 
         {/* Form Footer */}
-        <div className="p-6 flex flex-wrap items-center justify-between gap-3 bg-[#0e0e12]">
+        <div className="p-5 sm:p-6 flex flex-wrap items-center justify-between gap-3 bg-[#05060a]/80">
           <div className="min-w-0">
             {validationError ? (
-              <p className="text-xs text-[#F87171]">{validationError}</p>
+              <p className="font-mono text-xs text-[#ff6ca9]">{validationError}</p>
             ) : savedBanner ? (
-              <p className="inline-flex items-center gap-1.5 text-xs text-[#10B981]">
+              <p className="inline-flex items-center gap-1.5 font-mono text-xs text-[#00f0ff]">
                 <Check className="h-3.5 w-3.5" />
                 Ajustes guardados en este navegador
               </p>
             ) : (
-              <p className="text-xs text-[#687487]">
+              <p className="text-xs text-[#8EA2BD]">
                 Preferencias guardadas localmente en localStorage.
               </p>
             )}
@@ -342,14 +356,14 @@ export function SettingsView({
             <button
               type="button"
               onClick={onResetSettings}
-              className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-white/10 px-3 text-xs font-medium text-[#8B96A8] hover:bg-white/[0.04] hover:text-white transition-colors whitespace-nowrap"
+              className="inline-flex h-10 items-center gap-1.5 rounded-md border border-[#00f0ff]/25 px-3 text-xs font-medium text-[#8EA2BD] hover:border-[#00f0ff]/55 hover:text-white transition-colors whitespace-nowrap"
             >
               <RotateCcw className="h-3.5 w-3.5" />
               Restablecer
             </button>
             <button
               type="submit"
-              className="inline-flex h-9 items-center gap-2 rounded-lg bg-[#E11D48] px-4 text-xs font-medium text-white hover:bg-[#BE123C] transition-colors whitespace-nowrap"
+              className="cyber-btn-primary inline-flex h-10 items-center gap-2 px-4 text-xs whitespace-nowrap"
             >
               <Save className="h-3.5 w-3.5" />
               Guardar ajustes
@@ -360,23 +374,27 @@ export function SettingsView({
 
       {/* Right column: Connections, IndexedDB Cache & Quick Folder Guide */}
       <div className="xl:col-span-5 space-y-5">
-        <section className="rounded-xl border border-white/10 bg-[#121216] p-6 space-y-4">
+        <section className="cyber-panel rounded-md p-5 sm:p-6 space-y-4">
           <div className="flex items-start gap-3">
-            <ShieldCheck className="h-5 w-5 text-[#10B981] shrink-0 mt-0.5" />
+            <ShieldCheck className="h-5 w-5 text-[#00f0ff] shrink-0 mt-0.5" />
             <div className="space-y-1">
-              <h2 className="font-display text-base font-semibold text-[#EDF1F7]">
+              <h2 className="font-display text-base font-semibold text-[#EEF5FF]">
                 Conexiones y seguridad
               </h2>
-              <p className="text-xs text-[#8B96A8] leading-relaxed">
-                Las llamadas a Gemini se ejecutan en el servidor usando la clave del entorno ({geminiConfigured ? 'Gemini disponible' : 'pendiente en Secrets'}). Tu token de Google Drive se guarda solo en memoria mientras la pestaña está abierta.
+              <p className="text-xs text-[#94A8C4] leading-relaxed">
+                Las llamadas a Gemini se ejecutan en el servidor usando la clave del entorno (
+                <span className="font-mono text-[#00f0ff]">
+                  {geminiConfigured ? 'Gemini disponible' : 'pendiente en Secrets'}
+                </span>
+                ). Tu token de Google Drive se guarda solo en memoria mientras la pestaña está abierta.
               </p>
             </div>
           </div>
 
-          <div className="space-y-3 pt-3 border-t border-white/10">
+          <div className="space-y-3 pt-3 border-t border-[#00f0ff]/20">
             <div className="text-xs">
-              <p className="font-medium text-[#EDF1F7]">Cuenta de Google Drive</p>
-              <p className="mt-0.5 text-[#8B96A8]">
+              <p className="font-medium text-[#EEF5FF]">Cuenta de Google Drive</p>
+              <p className="mt-0.5 font-mono text-[#94A8C4]">
                 {user ? `Conectada como ${user.email}` : 'No conectada todavía'}
               </p>
             </div>
@@ -385,7 +403,7 @@ export function SettingsView({
               <button
                 type="button"
                 onClick={onGoogleLogout}
-                className="h-9 w-full rounded-lg border border-white/10 px-3 text-xs font-medium text-[#EDF1F7] hover:bg-white/[0.05] transition-colors"
+                className="h-10 w-full rounded-md border border-[#ff2a85]/40 bg-[#ff2a85]/10 px-3 text-xs font-medium text-[#EEF5FF] hover:bg-[#ff2a85]/20 transition-colors"
               >
                 Desconectar Google Drive
               </button>
@@ -398,25 +416,25 @@ export function SettingsView({
         {/* IndexedDB Local Video Cache */}
         <section
           data-testid="video-cache-card"
-          className="rounded-xl border border-white/10 bg-[#121216] p-6 space-y-4"
+          className="cyber-panel rounded-md p-5 sm:p-6 space-y-4"
         >
           <div className="flex items-start gap-3">
-            <HardDrive className="h-5 w-5 text-[#38BDF8] shrink-0 mt-0.5" />
+            <HardDrive className="h-5 w-5 text-[#00f0ff] shrink-0 mt-0.5" />
             <div className="space-y-1">
-              <h2 className="font-display text-base font-semibold text-[#EDF1F7]">
+              <h2 className="font-display text-base font-semibold text-[#EEF5FF]">
                 Caché local de vídeos (IndexedDB)
               </h2>
-              <p className="text-xs text-[#8B96A8] leading-relaxed">
+              <p className="text-xs text-[#94A8C4] leading-relaxed">
                 Los últimos {cacheStats.maxItems} MP4 renderizados se guardan en tu dispositivo para reproducirlos y descargarlos incluso tras recargar la app. Los más antiguos se limpian automáticamente sin borrar los metadatos ni tus enlaces de Drive.
               </p>
             </div>
           </div>
 
-          <div className="flex items-center justify-between rounded-lg border border-white/10 bg-[#09090b] px-4 py-3 text-xs">
-            <span className="text-[#8B96A8]">Espacio usado</span>
+          <div className="flex items-center justify-between rounded-md border border-[#00f0ff]/25 bg-[#05060a] px-4 py-3 text-xs">
+            <span className="text-[#8EA2BD]">Espacio usado</span>
             <span
               data-testid="video-cache-stats"
-              className="font-mono font-medium tabular-nums text-[#EDF1F7]"
+              className="font-mono font-semibold tabular-nums text-[#fcee0a]"
             >
               {cacheStats.count} / {cacheStats.maxItems} vídeos · {formatBytes(cacheStats.totalBytes)}
             </span>
@@ -427,29 +445,29 @@ export function SettingsView({
             onClick={onClearVideoCache}
             disabled={cacheStats.count === 0 || isClearingCache}
             data-testid="clear-video-cache-btn"
-            className="inline-flex h-9 w-full items-center justify-center gap-2 rounded-lg border border-white/10 bg-[#18181f] px-3 text-xs font-medium text-[#EDF1F7] hover:bg-[#22222b] disabled:opacity-45 transition-colors"
+            className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-md border border-[#ff2a85]/35 bg-[#05060a] px-3 text-xs font-medium text-[#EEF5FF] hover:border-[#ff2a85]/70 hover:bg-[#ff2a85]/12 disabled:opacity-45 transition-colors"
           >
-            <Trash2 className="h-3.5 w-3.5 text-[#F87171]" />
+            <Trash2 className="h-3.5 w-3.5 text-[#ff2a85]" />
             {isClearingCache ? 'Vaciando caché...' : 'Vaciar caché de vídeos'}
           </button>
         </section>
 
-        <section className="rounded-xl border border-white/10 bg-[#121216] p-6 space-y-3">
-          <h2 className="font-display text-sm font-semibold text-[#EDF1F7]">
+        <section className="cyber-panel rounded-md p-5 sm:p-6 space-y-3">
+          <h2 className="font-display text-sm font-semibold text-[#EEF5FF]">
             Cómo obtener el ID de tu carpeta
           </h2>
-          <ol className="space-y-2.5 text-xs text-[#8B96A8] leading-relaxed list-decimal list-inside">
+          <ol className="space-y-2.5 text-xs text-[#94A8C4] leading-relaxed list-decimal list-inside">
             <li>Abre tu carpeta de vídeos brutos en Google Drive.</li>
             <li>
               Copia la URL de la barra del navegador, por ejemplo{' '}
-              <span className="font-mono text-[#C8D0DC] break-all">
+              <span className="font-mono text-[#00f0ff] break-all">
                 drive.google.com/drive/folders/1A2B3C...
               </span>
               .
             </li>
             <li>Pégala arriba y la aplicación extraerá el ID automáticamente.</li>
           </ol>
-          <p className="pt-2 border-t border-white/10 text-[11px] text-[#687487] leading-relaxed">
+          <p className="pt-2 border-t border-[#00f0ff]/20 text-[11px] text-[#8EA2BD] leading-relaxed">
             Consejo para iPhone/Android: activa el modo rápido móvil (720p) para renderizar clips largos sin agotar la memoria del navegador.
           </p>
         </section>

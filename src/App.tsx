@@ -1382,7 +1382,7 @@ export default function App() {
       : 'Ajustes';
 
   return (
-    <div className="min-h-dvh-app bg-[#09090b] text-[#EDF1F7] flex">
+    <div className="min-h-dvh-app cyber-canvas-bg text-[#EEF5FF] flex">
       <Sidebar
         activeView={activeView}
         onSelectView={setActiveView}
@@ -1397,27 +1397,27 @@ export default function App() {
       />
 
       <div className="flex-1 min-w-0 flex flex-col">
-        {/* Top Bar with iOS Safe Area Top Padding (never hides behind Dynamic Island / status bar) */}
-        <header className="sticky top-0 z-30 border-b border-white/10 bg-[#09090b]/90 backdrop-blur-xl pt-safe px-safe">
-          <div className="flex h-14 sm:h-16 items-center justify-between gap-3 px-4 sm:px-8">
-            <div className="flex items-center gap-2 text-sm min-w-0">
-              <span className="hidden sm:inline text-[#687487] whitespace-nowrap">
-                AutoCut Drive AI
+        {/* Clean non-interactive mobile header with generous iOS standalone safe-area clearance; desktop CTA stays right-aligned */}
+        <header className="sticky top-0 z-30 border-b border-[#00f0ff]/25 bg-[#05060a]/92 backdrop-blur-xl pt-safe-header px-safe">
+          <div className="flex min-h-[3.5rem] sm:min-h-[4rem] items-center justify-between gap-3 px-4 sm:px-8 py-2">
+            <div className="flex items-center gap-2.5 text-sm min-w-0">
+              <span className="font-mono text-[11px] font-semibold tracking-wider text-[#00f0ff] uppercase whitespace-nowrap">
+                AutoCut AI
               </span>
-              <span className="hidden sm:inline text-[#4B5565]" aria-hidden="true">
+              <span className="text-[#00f0ff]/40 font-mono" aria-hidden="true">
                 /
               </span>
-              <h1 className="font-display text-base font-semibold text-[#EDF1F7] truncate">
+              <h1 className="font-display text-base font-semibold text-[#EEF5FF] truncate">
                 {viewTitle}
               </h1>
             </div>
 
-            <div className="flex items-center gap-2.5 shrink-0">
+            <div className="hidden md:flex items-center gap-2.5 shrink-0">
               <button
                 type="button"
                 onClick={handleScanFolder}
                 disabled={isScanning}
-                className="inline-flex h-9 items-center gap-2 rounded-lg bg-[#E11D48] px-3.5 sm:px-4 text-xs font-medium text-white hover:bg-[#BE123C] disabled:opacity-50 transition-colors whitespace-nowrap shrink-0"
+                className="inline-flex h-9 items-center gap-2 cyber-btn-primary px-4 text-xs disabled:opacity-50 whitespace-nowrap shrink-0"
               >
                 <RefreshCw className={`h-3.5 w-3.5 ${isScanning ? 'animate-spin' : ''}`} />
                 {isScanning ? 'Escaneando...' : 'Escanear carpeta'}
@@ -1431,17 +1431,17 @@ export default function App() {
           {bannerError && (
             <div
               role="alert"
-              className="flex items-start justify-between gap-3 rounded-lg border border-[#EF4444]/35 bg-[#EF4444]/10 px-4 py-3 text-xs text-[#FCA5A5]"
+              className="flex items-start justify-between gap-3 rounded-md border border-[#ff2a85]/50 bg-[#ff2a85]/12 px-4 py-3 text-xs text-[#ffb3d1] shadow-[0_0_20px_rgba(255,42,133,0.14)]"
             >
               <span className="flex items-start gap-2.5 leading-relaxed">
-                <AlertCircle className="h-4 w-4 shrink-0 text-[#EF4444] mt-0.5" />
+                <AlertCircle className="h-4 w-4 shrink-0 text-[#ff2a85] mt-0.5" />
                 <span>{bannerError}</span>
               </span>
               <button
                 type="button"
                 onClick={() => setBannerError(null)}
                 aria-label="Cerrar aviso"
-                className="rounded p-0.5 text-[#FCA5A5] hover:bg-white/[0.08] hover:text-white shrink-0"
+                className="flex h-7 w-7 items-center justify-center rounded-md text-[#ffb3d1] hover:bg-[#ff2a85]/20 hover:text-white shrink-0"
               >
                 <X className="h-3.5 w-3.5" />
               </button>

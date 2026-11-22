@@ -8,7 +8,7 @@ import { GoogleGenAI, Type, createPartFromUri } from '@google/genai';
 import {
   buildGeminiSystemPrompt,
   normalizeStylePreset,
-} from './src/utils/videoPipeline';
+} from './src/utils/videoPipeline.ts';
 
 const PORT = Number(process.env.PORT) || 3000;
 const ALLOWED_MODELS = new Set(['gemini-2.5-flash', 'gemini-2.5-pro']);

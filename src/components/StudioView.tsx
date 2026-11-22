@@ -116,7 +116,6 @@ export function StudioView({
     setActiveCutId(enabledCuts[0]?.id ?? null);
   }, [currentItem?.id]);
 
-  // Interactive storyboard playback for demo items (no real MP4 blob)
   useEffect(() => {
     if (!demoPlaying || !currentItem || currentItem.editedUrl || enabledCuts.length === 0) {
       return;
@@ -133,20 +132,20 @@ export function StudioView({
 
   if (!currentItem || !currentItem.analysis) {
     return (
-      <div className="rounded-xl border border-white/10 bg-[#121216] px-6 py-16 text-center">
-        <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl border border-white/10 bg-[#18181f] text-[#8B96A8]">
+      <div className="cyber-panel rounded-md px-6 py-16 text-center">
+        <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-md border border-[#00f0ff]/30 bg-[#05060a] text-[#00f0ff]">
           <Film className="h-5 w-5" />
         </div>
-        <h2 className="mt-4 font-display text-lg font-semibold text-[#EDF1F7]">
+        <h2 className="mt-4 font-display text-lg font-semibold text-[#EEF5FF]">
           Ningún vídeo analizado seleccionado
         </h2>
-        <p className="mx-auto mt-2 max-w-md text-sm text-[#8B96A8]">
+        <p className="mx-auto mt-2 max-w-md text-sm text-[#94A8C4]">
           Procesa un vídeo desde tu carpeta de Google Drive o carga una sesión de ejemplo en la cola para revisar y ajustar los jump cuts aquí.
         </p>
         <button
           type="button"
           onClick={onBackToQueue}
-          className="mt-6 inline-flex h-10 items-center gap-2 rounded-lg bg-[#E11D48] px-4 text-sm font-medium text-white hover:bg-[#BE123C] transition-colors whitespace-nowrap"
+          className="cyber-btn-primary mt-6 inline-flex h-11 items-center gap-2 px-5 text-sm whitespace-nowrap"
         >
           Volver a la cola
         </button>
@@ -187,7 +186,6 @@ export function StudioView({
       setDemoCutIndex(enabledIdx);
     }
 
-    // If playing the rendered edited video, compute cumulative offset of that cut in the edited timeline
     if (videoRef.current && currentItem.editedUrl && enabledIdx >= 0) {
       let offset = 0;
       for (let i = 0; i < enabledIdx; i += 1) {
@@ -218,10 +216,10 @@ export function StudioView({
                 key={item.id}
                 type="button"
                 onClick={() => onSelectItem(item.id)}
-                className={`rounded-lg px-3 py-1.5 text-xs font-medium border transition-colors whitespace-nowrap shrink-0 ${
+                className={`min-h-[38px] rounded-md px-3 py-1.5 font-mono text-xs font-medium border transition-colors whitespace-nowrap shrink-0 ${
                   active
-                    ? 'border-[#E11D48]/60 bg-[#E11D48]/10 text-white'
-                    : 'border-white/10 bg-[#121216] text-[#8B96A8] hover:text-white'
+                    ? 'border-[#00f0ff] bg-[#00f0ff]/12 text-[#00f0ff]'
+                    : 'border-[#00f0ff]/20 bg-[#0c0f1a]/90 text-[#8EA2BD] hover:border-[#00f0ff]/45 hover:text-white'
                 }`}
               >
                 {item.originalName}
@@ -234,24 +232,24 @@ export function StudioView({
       {/* Balanced 2-column Studio Split */}
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-stretch">
         {/* Left Column: 9:16 Vertical Preview Stage */}
-        <section className="xl:col-span-5 flex flex-col rounded-xl border border-white/10 bg-[#121216] p-5">
-          <div className="flex items-center justify-between gap-2 pb-4 border-b border-white/10">
-            <div>
-              <h2 className="font-display text-sm font-semibold text-[#EDF1F7]">
+        <section className="xl:col-span-5 cyber-panel flex flex-col rounded-md p-5">
+          <div className="flex items-center justify-between gap-2 pb-4 border-b border-[#00f0ff]/20">
+            <div className="min-w-0">
+              <h2 className="font-display text-sm font-semibold text-[#EEF5FF]">
                 Vista previa vertical (9:16)
               </h2>
-              <p className="text-xs text-[#8B96A8] font-mono truncate max-w-[260px]">
+              <p className="text-xs text-[#8EA2BD] font-mono truncate max-w-[260px]">
                 {targetOutputName}
               </p>
             </div>
-            <span className="font-mono text-xs tabular-nums text-[#C8D0DC]">
+            <span className="font-mono text-xs font-semibold tabular-nums text-[#00f0ff]">
               {formatSeconds(selectedDurationSec)}
             </span>
           </div>
 
           {/* 9:16 Frame */}
           <div className="my-5 flex justify-center">
-            <div className="relative w-full max-w-[280px] aspect-[9/16] overflow-hidden rounded-xl border border-white/[0.12] bg-[#07090C] flex flex-col">
+            <div className="relative w-full max-w-[280px] aspect-[9/16] overflow-hidden rounded-md border border-[#00f0ff]/35 bg-[#05060a] flex flex-col shadow-[0_0_24px_rgba(0,240,255,0.1)]">
               {currentItem.editedUrl ? (
                 <video
                   ref={videoRef}
@@ -269,11 +267,10 @@ export function StudioView({
                   className="h-full w-full object-contain bg-black"
                 />
               ) : (
-                /* Interactive storyboard preview for sample session */
-                <div className="relative flex h-full w-full flex-col justify-between bg-gradient-to-b from-[#161B24] via-[#0D1016] to-[#080A0D] p-4">
-                  <div className="flex items-center justify-between text-[11px] font-mono text-[#8B96A8]">
+                <div className="relative flex h-full w-full flex-col justify-between bg-gradient-to-b from-[#0e1424] via-[#080a12] to-[#05060a] p-4">
+                  <div className="flex items-center justify-between text-[11px] font-mono text-[#8EA2BD]">
                     <span>9:16 MP4 · H.264</span>
-                    <span className="tabular-nums text-[#F43F5E]">
+                    <span className="tabular-nums text-[#00f0ff]">
                       {activeDemoCut
                         ? `${formatSeconds(activeDemoCut.start_sec)} – ${formatSeconds(activeDemoCut.end_sec)}`
                         : '0:00.0'}
@@ -281,11 +278,11 @@ export function StudioView({
                   </div>
 
                   <div className="my-auto space-y-3 text-center px-2">
-                    <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full border border-white/[0.12] bg-white/[0.04]">
-                      <Scissors className="h-5 w-5 text-[#F43F5E]" />
+                    <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-md border border-[#ff2a85]/45 bg-[#ff2a85]/10">
+                      <Scissors className="h-5 w-5 text-[#ff2a85]" />
                     </div>
                     {currentItem.isMultiClip && activeDemoCut && (
-                      <p className="font-mono text-[11px] font-medium text-[#F43F5E]">
+                      <p className="font-mono text-[11px] font-medium text-[#fcee0a]">
                         {getClipDisplayLabel(activeDemoCut.clip_index).short}
                         {getClipDisplayLabel(activeDemoCut.clip_index).name
                           ? ` · ${getClipDisplayLabel(activeDemoCut.clip_index).name}`
@@ -296,20 +293,20 @@ export function StudioView({
                       {plan.titulo_interno}
                     </p>
                     {activeDemoCut ? (
-                      <p className="text-xs leading-relaxed text-[#B8C2D1]">
+                      <p className="text-xs leading-relaxed text-[#C8D7EC]">
                         {activeDemoCut.motivo}
                       </p>
                     ) : (
-                      <p className="text-xs text-[#8B96A8]">
+                      <p className="text-xs text-[#8EA2BD]">
                         Activa al menos un corte para previsualizar.
                       </p>
                     )}
                   </div>
 
-                  <div className="space-y-3 bg-gradient-to-t from-black/80 via-black/40 to-transparent pt-4">
-                    <div className="flex items-center justify-between text-[11px] font-mono text-[#8B96A8]">
+                  <div className="space-y-3 bg-gradient-to-t from-black/85 via-black/45 to-transparent pt-4">
+                    <div className="flex items-center justify-between text-[11px] font-mono text-[#8EA2BD]">
                       <span>Sesión de muestra</span>
-                      <span className="tabular-nums">
+                      <span className="tabular-nums text-[#fcee0a]">
                         Corte {enabledCuts.length > 0 ? demoCutIndex + 1 : 0}/{enabledCuts.length}
                       </span>
                     </div>
@@ -317,7 +314,7 @@ export function StudioView({
                       type="button"
                       disabled={enabledCuts.length === 0}
                       onClick={() => setDemoPlaying((prev) => !prev)}
-                      className="flex w-full items-center justify-center gap-2 rounded-lg bg-white/[0.1] px-3 py-2 text-xs font-medium text-white hover:bg-white/[0.16] disabled:opacity-40 transition-colors"
+                      className="flex w-full min-h-[40px] items-center justify-center gap-2 rounded-md border border-[#00f0ff]/35 bg-[#00f0ff]/12 px-3 py-2 text-xs font-medium text-[#00f0ff] hover:bg-[#00f0ff]/20 disabled:opacity-40 transition-colors"
                     >
                       {demoPlaying ? (
                         <>
@@ -337,21 +334,21 @@ export function StudioView({
             </div>
           </div>
 
-          {/* FFmpeg Render Progress Bar */}
+          {/* FFmpeg Energy Render Progress Bar */}
           {isRendering && renderProgress && (
-            <div className="mb-4 rounded-lg border border-white/[0.08] bg-[#151921] p-3 space-y-2">
+            <div className="mb-4 rounded-md border border-[#00f0ff]/30 bg-[#05060a] p-3 space-y-2">
               <div className="flex items-center justify-between gap-2 text-xs">
-                <span className="flex items-center gap-2 text-[#EDF1F7] truncate">
-                  <Loader2 className="h-3.5 w-3.5 animate-spin text-[#F59E0B] shrink-0" />
+                <span className="flex items-center gap-2 text-[#EEF5FF] truncate">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-[#fcee0a] shrink-0" />
                   <span className="truncate">{renderProgress.message}</span>
                 </span>
-                <span className="font-mono tabular-nums text-[#F59E0B] shrink-0">
+                <span className="font-mono font-semibold tabular-nums text-[#fcee0a] shrink-0">
                   {renderProgress.percent}%
                 </span>
               </div>
-              <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/[0.08]">
+              <div className="h-2 w-full overflow-hidden rounded-sm border border-[#00f0ff]/25 bg-[#0c0f1a]">
                 <div
-                  className="h-full rounded-full bg-[#F59E0B] transition-transform duration-150 origin-left"
+                  className="h-full cyber-energy-bar transition-transform duration-150 origin-left"
                   style={{ transform: `scaleX(${Math.max(0.04, renderProgress.percent / 100)})` }}
                 />
               </div>
@@ -361,8 +358,8 @@ export function StudioView({
           {/* Action Buttons */}
           <div className="mt-auto space-y-2.5">
             {/* Quick Render Quality Toggle */}
-            <div className="flex items-center justify-between gap-2 rounded-lg border border-white/10 bg-[#09090b] px-2.5 py-1.5">
-              <span className="text-[11px] font-medium text-[#8B96A8]">Salida FFmpeg</span>
+            <div className="flex items-center justify-between gap-2 rounded-md border border-[#00f0ff]/25 bg-[#05060a] px-2.5 py-1.5">
+              <span className="text-[11px] font-medium text-[#8EA2BD]">Salida FFmpeg</span>
               <div
                 role="group"
                 aria-label="Calidad de renderizado en Estudio"
@@ -372,10 +369,10 @@ export function StudioView({
                   type="button"
                   onClick={() => onChangeExportQuality('mobile_fast')}
                   aria-pressed={exportQuality === 'mobile_fast'}
-                  className={`rounded-md px-2.5 py-1 font-mono text-[11px] font-medium transition-colors whitespace-nowrap ${
+                  className={`min-h-[32px] rounded-sm px-2.5 py-1 font-mono text-[11px] font-medium transition-colors whitespace-nowrap ${
                     exportQuality === 'mobile_fast'
-                      ? 'bg-[#E11D48]/20 text-white border border-[#E11D48]/50'
-                      : 'text-[#8B96A8] hover:text-white border border-transparent'
+                      ? 'bg-[#00f0ff]/18 text-[#00f0ff] border border-[#00f0ff]/45'
+                      : 'text-[#8EA2BD] hover:text-white border border-transparent'
                   }`}
                 >
                   720p móvil
@@ -384,10 +381,10 @@ export function StudioView({
                   type="button"
                   onClick={() => onChangeExportQuality('high_1080p')}
                   aria-pressed={exportQuality === 'high_1080p'}
-                  className={`rounded-md px-2.5 py-1 font-mono text-[11px] font-medium transition-colors whitespace-nowrap ${
+                  className={`min-h-[32px] rounded-sm px-2.5 py-1 font-mono text-[11px] font-medium transition-colors whitespace-nowrap ${
                     exportQuality === 'high_1080p'
-                      ? 'bg-[#E11D48]/20 text-white border border-[#E11D48]/50'
-                      : 'text-[#8B96A8] hover:text-white border border-transparent'
+                      ? 'bg-[#00f0ff]/18 text-[#00f0ff] border border-[#00f0ff]/45'
+                      : 'text-[#8EA2BD] hover:text-white border border-transparent'
                   }`}
                 >
                   1080p HD
@@ -404,7 +401,7 @@ export function StudioView({
                   ? 'Disponible para vídeos reales descargados de Drive o cargados localmente'
                   : undefined
               }
-              className="flex h-10 w-full items-center justify-center gap-2 rounded-lg bg-[#E11D48] px-4 text-sm font-medium text-white hover:bg-[#BE123C] disabled:opacity-45 transition-colors whitespace-nowrap"
+              className="cyber-btn-primary flex h-11 w-full items-center justify-center gap-2 px-4 text-sm disabled:opacity-45 whitespace-nowrap"
             >
               <RefreshCw className={`h-4 w-4 ${isRendering ? 'animate-spin' : ''}`} />
               Re-renderizar cortes ({enabledCuts.length})
@@ -415,9 +412,9 @@ export function StudioView({
                 type="button"
                 onClick={handleDownloadEdited}
                 disabled={!currentItem.editedUrl}
-                className="flex h-9 items-center justify-center gap-2 rounded-lg border border-white/10 bg-[#18181f] px-3 text-xs font-medium text-[#EDF1F7] hover:bg-[#22222b] disabled:opacity-40 transition-colors whitespace-nowrap"
+                className="flex h-10 items-center justify-center gap-2 rounded-md border border-[#00f0ff]/30 bg-[#05060a] px-3 text-xs font-medium text-[#EEF5FF] hover:border-[#00f0ff]/65 hover:text-[#00f0ff] disabled:opacity-40 transition-colors whitespace-nowrap"
               >
-                <Download className="h-3.5 w-3.5" />
+                <Download className="h-3.5 w-3.5 text-[#00f0ff]" />
                 Descargar MP4
               </button>
 
@@ -425,15 +422,15 @@ export function StudioView({
                 type="button"
                 onClick={() => onRequestDriveUpload(currentItem.id)}
                 disabled={isRendering || enabledCuts.length === 0}
-                className="flex h-9 items-center justify-center gap-2 rounded-lg border border-white/10 bg-[#18181f] px-3 text-xs font-medium text-[#EDF1F7] hover:bg-[#22222b] disabled:opacity-40 transition-colors whitespace-nowrap"
+                className="flex h-10 items-center justify-center gap-2 rounded-md border border-[#ff2a85]/35 bg-[#05060a] px-3 text-xs font-medium text-[#EEF5FF] hover:border-[#ff2a85]/70 hover:text-[#ff85b8] disabled:opacity-40 transition-colors whitespace-nowrap"
               >
-                <CloudUpload className="h-3.5 w-3.5 text-[#38BDF8]" />
+                <CloudUpload className="h-3.5 w-3.5 text-[#ff2a85]" />
                 Subir a Drive
               </button>
             </div>
 
             {!canUploadToDrive && (
-              <p className="text-[11px] text-[#8B96A8] text-center">
+              <p className="text-[11px] text-[#8EA2BD] text-center">
                 Conecta Google Drive y define un ID de carpeta en Ajustes para subir el MP4 final.
               </p>
             )}
@@ -441,11 +438,11 @@ export function StudioView({
         </section>
 
         {/* Right Column: AI Edit Plan, Visual Timeline, and Interactive Cut List */}
-        <section className="xl:col-span-7 flex flex-col rounded-xl border border-white/10 bg-[#121216] p-5">
-          {/* Header Metadata (Zero-Pill clean typographic separators) */}
-          <div className="border-b border-white/10 pb-4">
-            <div className="flex flex-wrap items-center gap-2 text-xs text-[#8B96A8]">
-              <span className="font-mono font-semibold text-[#F43F5E]">{plan.etiqueta}</span>
+        <section className="xl:col-span-7 cyber-panel flex flex-col rounded-md p-5">
+          {/* Header Metadata */}
+          <div className="border-b border-[#00f0ff]/20 pb-4">
+            <div className="flex flex-wrap items-center gap-2 text-xs text-[#8EA2BD]">
+              <span className="font-mono font-semibold text-[#fcee0a]">{plan.etiqueta}</span>
               <span aria-hidden="true">·</span>
               <span>{currentItem.originalName}</span>
               <span aria-hidden="true">·</span>
@@ -453,28 +450,28 @@ export function StudioView({
               {currentItem.geminiFileCleaned && (
                 <>
                   <span aria-hidden="true">·</span>
-                  <span className="text-[#10B981]">Temporal de Gemini eliminado</span>
+                  <span className="font-mono text-[#00f0ff]">Temporal de Gemini eliminado</span>
                 </>
               )}
             </div>
 
-            <h2 className="mt-2 font-display text-xl font-semibold text-[#EDF1F7]">
+            <h2 className="mt-2 font-display text-xl font-semibold text-[#EEF5FF]">
               {plan.titulo_interno}
             </h2>
 
-            <div className="mt-3 flex flex-wrap items-center gap-x-6 gap-y-2 text-xs text-[#8B96A8]">
+            <div className="mt-3 flex flex-wrap items-center gap-x-6 gap-y-2 text-xs text-[#8EA2BD]">
               <div>
                 <span>Duración seleccionada: </span>
                 <strong
                   data-testid="selected-duration"
-                  className="font-mono tabular-nums text-[#EDF1F7]"
+                  className="font-mono tabular-nums text-[#00f0ff]"
                 >
                   {formatSeconds(selectedDurationSec)}
                 </strong>
               </div>
               <div>
                 <span>Objetivo IA: </span>
-                <strong className="font-mono tabular-nums text-[#C8D0DC]">
+                <strong className="font-mono tabular-nums text-[#fcee0a]">
                   {plan.duracion_objetivo_seg}s
                 </strong>
               </div>
@@ -482,7 +479,7 @@ export function StudioView({
                 <span>Cortes activos: </span>
                 <strong
                   data-testid="active-cuts-count"
-                  className="font-mono tabular-nums text-[#EDF1F7]"
+                  className="font-mono tabular-nums text-[#EEF5FF]"
                 >
                   {enabledCuts.length} / {plan.cortes.length}
                 </strong>
@@ -491,20 +488,20 @@ export function StudioView({
           </div>
 
           {/* Visual Timeline Track */}
-          <div className="py-4 border-b border-white/[0.08]">
-            <div className="flex items-center justify-between text-[11px] text-[#8B96A8] mb-2">
+          <div className="py-4 border-b border-[#00f0ff]/20">
+            <div className="flex items-center justify-between text-[11px] text-[#8EA2BD] mb-2">
               <span>
                 {currentItem.isMultiClip
                   ? `Línea de tiempo combinada (${timelineMeta.clipOffsets.length} clips)`
                   : 'Línea de tiempo de cortes sobre bruto'}
               </span>
-              <span className="font-mono tabular-nums">
+              <span className="font-mono tabular-nums text-[#C8D7EC]">
                 0:00.0 — {formatSeconds(timelineMeta.totalSec)}
               </span>
             </div>
             <div
               data-testid="studio-timeline-track"
-              className="relative h-7 w-full overflow-hidden rounded-md bg-[#090B0E] border border-white/[0.08]"
+              className="relative h-8 w-full overflow-hidden rounded-sm bg-[#05060a] border border-[#00f0ff]/30"
             >
               {currentItem.isMultiClip &&
                 timelineMeta.clipOffsets.slice(1).map((offsetSec, idx) => {
@@ -517,7 +514,7 @@ export function StudioView({
                       key={`clip-divider-${idx + 1}`}
                       aria-hidden="true"
                       style={{ left: `${dividerLeftPct}%` }}
-                      className="pointer-events-none absolute top-0 bottom-0 w-px bg-white/[0.18]"
+                      className="pointer-events-none absolute top-0 bottom-0 w-px bg-[#fcee0a]/45"
                     />
                   );
                 })}
@@ -545,12 +542,12 @@ export function StudioView({
                     title={`${clipTag}${formatSeconds(cut.start_sec)} – ${formatSeconds(cut.end_sec)}`}
                     aria-label={`Ir al corte ${clipTag}${formatSeconds(cut.start_sec)} a ${formatSeconds(cut.end_sec)}`}
                     style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
-                    className={`absolute top-1 bottom-1 rounded-[3px] transition-opacity ${
+                    className={`absolute top-1 bottom-1 rounded-[2px] transition-opacity ${
                       !cut.enabled
-                        ? 'bg-white/[0.12] opacity-40'
+                        ? 'bg-white/[0.12] opacity-35'
                         : isSelected
-                        ? 'bg-[#FB7185] ring-1 ring-white'
-                        : 'bg-[#E11D48] hover:bg-[#F43F5E]'
+                        ? 'bg-[#00f0ff] ring-1 ring-white shadow-[0_0_10px_rgba(0,240,255,0.6)]'
+                        : 'bg-[#ff2a85] hover:bg-[#ff5c9f]'
                     }`}
                   />
                 );
@@ -560,13 +557,13 @@ export function StudioView({
 
           {/* Cut List Controls */}
           <div className="flex items-center justify-between py-3">
-            <h3 className="font-display text-sm font-semibold text-[#EDF1F7]">
+            <h3 className="font-display text-sm font-semibold text-[#EEF5FF]">
               Cortes sugeridos por Gemini
             </h3>
             <button
               type="button"
               onClick={() => onSelectAllCuts(currentItem.id, !allEnabled)}
-              className="inline-flex items-center gap-1.5 text-xs font-medium text-[#8B96A8] hover:text-white transition-colors"
+              className="inline-flex items-center gap-1.5 font-mono text-xs font-medium text-[#00f0ff] hover:text-[#7df7ff] transition-colors"
             >
               {allEnabled ? (
                 <>
@@ -583,24 +580,24 @@ export function StudioView({
           </div>
 
           {/* Interactive Cut Rows */}
-          <div className="flex-1 divide-y divide-white/[0.06] overflow-y-auto max-h-[460px] pr-1">
+          <div className="flex-1 divide-y divide-[#00f0ff]/12 overflow-y-auto max-h-[460px] pr-1">
             {plan.cortes.map((cut, index) => {
               const clipDuration = Math.max(0, cut.end_sec - cut.start_sec);
               const isFocused = activeCutId === cut.id;
               return (
                 <div
                   key={cut.id}
-                  className={`flex items-start gap-3.5 py-3.5 px-2 rounded-lg transition-colors ${
-                    isFocused ? 'bg-white/[0.04]' : 'hover:bg-white/[0.02]'
+                  className={`flex items-start gap-3.5 py-3.5 px-2.5 rounded-sm transition-colors ${
+                    isFocused ? 'bg-[#00f0ff]/[0.08]' : 'hover:bg-[#00f0ff]/[0.03]'
                   }`}
                 >
-                  <label className="mt-0.5 flex items-center">
+                  <label className="mt-0.5 flex h-6 w-6 items-center justify-center shrink-0">
                     <input
                       type="checkbox"
                       checked={cut.enabled}
                       onChange={() => onToggleCut(currentItem.id, cut.id)}
                       aria-label={`Activar corte ${index + 1}: ${cut.motivo}`}
-                      className="h-4 w-4 rounded border-white/25 bg-[#171B22] accent-[#E11D48]"
+                      className="h-4 w-4 rounded-sm border-[#00f0ff]/40 bg-[#05060a] accent-[#00f0ff]"
                     />
                   </label>
 
@@ -612,8 +609,8 @@ export function StudioView({
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="flex flex-wrap items-center gap-2 min-w-0">
                         <span
-                          className={`font-mono text-xs tabular-nums font-medium ${
-                            cut.enabled ? 'text-[#EDF1F7]' : 'text-[#687487] line-through'
+                          className={`font-mono text-xs tabular-nums font-semibold ${
+                            cut.enabled ? 'text-[#00f0ff]' : 'text-[#5A6C86] line-through'
                           }`}
                         >
                           {String(index + 1).padStart(2, '0')}. {formatSeconds(cut.start_sec)} –{' '}
@@ -621,12 +618,12 @@ export function StudioView({
                         </span>
                         {currentItem.isMultiClip && (
                           <>
-                            <span className="text-[#4B5565]" aria-hidden="true">
+                            <span className="text-[#4F627D]" aria-hidden="true">
                               ·
                             </span>
                             <span
                               data-testid={`cut-clip-label-${index}`}
-                              className="font-mono text-[11px] font-medium text-[#F43F5E] truncate max-w-[200px]"
+                              className="font-mono text-[11px] font-medium text-[#fcee0a] truncate max-w-[200px]"
                               title={getClipDisplayLabel(cut.clip_index).name}
                             >
                               {getClipDisplayLabel(cut.clip_index).short}
@@ -637,13 +634,13 @@ export function StudioView({
                           </>
                         )}
                       </div>
-                      <span className="font-mono text-xs tabular-nums text-[#8B96A8]">
+                      <span className="font-mono text-xs tabular-nums text-[#C8D7EC]">
                         {clipDuration.toFixed(1)}s
                       </span>
                     </div>
                     <p
                       className={`mt-1 text-xs leading-relaxed ${
-                        cut.enabled ? 'text-[#B8C2D1]' : 'text-[#5C6778]'
+                        cut.enabled ? 'text-[#C8D7EC]' : 'text-[#5A6C86]'
                       }`}
                     >
                       {cut.motivo}

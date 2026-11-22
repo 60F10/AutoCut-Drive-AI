@@ -35,20 +35,18 @@ export function EditStyleControls({
     <section
       aria-label="Estilo de edición e instrucción rápida para Gemini"
       data-testid="edit-style-controls"
-      className={`rounded-xl border border-white/10 bg-[#121216] ${
-        compact ? 'p-4' : 'p-4 sm:p-5'
-      }`}
+      className={`cyber-panel rounded-md ${compact ? 'p-4' : 'p-4 sm:p-5'}`}
     >
       {/* Header Row */}
       <div className="flex flex-wrap items-center justify-between gap-2.5">
         <div className="flex items-center gap-2 min-w-0">
-          <Sparkles className="h-4 w-4 text-[#F43F5E] shrink-0" aria-hidden="true" />
+          <Sparkles className="h-4 w-4 text-[#00f0ff] shrink-0" aria-hidden="true" />
           <div className="min-w-0">
-            <h2 className="font-display text-sm font-semibold text-[#EDF1F7]">
+            <h2 className="font-display text-sm font-semibold text-[#EEF5FF]">
               Estilo de edición Gemini
             </h2>
             {!expanded && (
-              <p className="text-[11px] text-[#8B96A8] truncate">
+              <p className="font-mono text-[11px] text-[#8EA2BD] truncate">
                 {activePresetMeta.label}
                 {customInstruction.trim() ? ` · "${customInstruction.trim()}"` : ''}
               </p>
@@ -62,20 +60,20 @@ export function EditStyleControls({
             <div
               role="group"
               aria-label="Calidad de renderizado FFmpeg"
-              className="inline-flex items-center rounded-lg border border-white/10 bg-[#09090b] p-0.5"
+              className="inline-flex items-center rounded-md border border-[#00f0ff]/25 bg-[#05060a] p-0.5"
             >
               <button
                 type="button"
                 onClick={() => onChangeExportQuality('mobile_fast')}
                 aria-pressed={exportQuality === 'mobile_fast'}
                 data-testid="quality-toggle-mobile"
-                className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors whitespace-nowrap ${
+                className={`inline-flex min-h-[32px] items-center gap-1 rounded-sm px-2.5 py-1 font-mono text-[11px] font-medium transition-colors whitespace-nowrap ${
                   exportQuality === 'mobile_fast'
-                    ? 'bg-[#1D232E] text-white'
-                    : 'text-[#8B96A8] hover:text-[#EDF1F7]'
+                    ? 'bg-[#00f0ff]/18 text-[#00f0ff]'
+                    : 'text-[#8EA2BD] hover:text-[#EEF5FF]'
                 }`}
               >
-                <Zap className="h-3 w-3 text-[#10B981]" aria-hidden="true" />
+                <Zap className="h-3 w-3 text-[#fcee0a]" aria-hidden="true" />
                 720p móvil
               </button>
               <button
@@ -83,10 +81,10 @@ export function EditStyleControls({
                 onClick={() => onChangeExportQuality('high_1080p')}
                 aria-pressed={exportQuality === 'high_1080p'}
                 data-testid="quality-toggle-1080p"
-                className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors whitespace-nowrap ${
+                className={`inline-flex min-h-[32px] items-center gap-1 rounded-sm px-2.5 py-1 font-mono text-[11px] font-medium transition-colors whitespace-nowrap ${
                   exportQuality === 'high_1080p'
-                    ? 'bg-[#1D232E] text-white'
-                    : 'text-[#8B96A8] hover:text-[#EDF1F7]'
+                    ? 'bg-[#00f0ff]/18 text-[#00f0ff]'
+                    : 'text-[#8EA2BD] hover:text-[#EEF5FF]'
                 }`}
               >
                 1080p HD
@@ -99,14 +97,14 @@ export function EditStyleControls({
               type="button"
               onClick={() => setExpanded((prev) => !prev)}
               aria-expanded={expanded}
-              className="inline-flex h-8 items-center gap-1 rounded-lg border border-white/10 bg-[#09090b] px-2.5 text-xs font-medium text-[#C8D0DC] hover:bg-white/[0.05] transition-colors whitespace-nowrap"
+              className="inline-flex h-8 items-center gap-1 rounded-md border border-[#00f0ff]/25 bg-[#05060a] px-2.5 text-xs font-medium text-[#C8D7EC] hover:border-[#00f0ff]/55 hover:text-white transition-colors whitespace-nowrap"
             >
-              <SlidersHorizontal className="h-3.5 w-3.5 text-[#8B96A8]" aria-hidden="true" />
+              <SlidersHorizontal className="h-3.5 w-3.5 text-[#00f0ff]" aria-hidden="true" />
               <span className="hidden sm:inline">{expanded ? 'Ocultar' : 'Personalizar'}</span>
               {expanded ? (
-                <ChevronUp className="h-3.5 w-3.5 text-[#8B96A8]" />
+                <ChevronUp className="h-3.5 w-3.5 text-[#8EA2BD]" />
               ) : (
-                <ChevronDown className="h-3.5 w-3.5 text-[#8B96A8]" />
+                <ChevronDown className="h-3.5 w-3.5 text-[#8EA2BD]" />
               )}
             </button>
           )}
@@ -131,19 +129,25 @@ export function EditStyleControls({
                   aria-checked={selected}
                   data-testid={`style-preset-${preset.id}`}
                   onClick={() => onChangeStylePreset(preset.id)}
-                  className={`min-h-[44px] rounded-lg border px-3.5 py-2.5 text-left transition-colors ${
+                  className={`min-h-[44px] rounded-md border px-3.5 py-2.5 text-left transition-all ${
                     selected
-                      ? 'border-[#E11D48] bg-[#E11D48]/10 text-white'
-                      : 'border-white/10 bg-[#09090b] text-[#C8D0DC] hover:border-white/20 hover:bg-white/[0.03]'
+                      ? 'border-[#00f0ff] bg-[#00f0ff]/10 text-white shadow-[0_0_16px_rgba(0,240,255,0.16)]'
+                      : 'border-[#00f0ff]/20 bg-[#05060a]/85 text-[#C8D7EC] hover:border-[#00f0ff]/45 hover:bg-[#00f0ff]/[0.04]'
                   }`}
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <span className="text-xs font-semibold text-[#EDF1F7]">{preset.label}</span>
-                    <span className="font-mono text-[10px] text-[#8B96A8] tabular-nums shrink-0">
+                    <span
+                      className={`text-xs font-semibold ${
+                        selected ? 'text-[#00f0ff]' : 'text-[#EEF5FF]'
+                      }`}
+                    >
+                      {preset.label}
+                    </span>
+                    <span className="font-mono text-[10px] font-medium text-[#fcee0a] tabular-nums shrink-0">
                       {preset.targetDurationHint}
                     </span>
                   </div>
-                  <p className="mt-1 text-[11px] leading-snug text-[#8B96A8]">
+                  <p className="mt-1 text-[11px] leading-snug text-[#94A8C4]">
                     {preset.description}
                   </p>
                 </button>
@@ -156,7 +160,7 @@ export function EditStyleControls({
             <div className="flex items-center justify-between gap-2">
               <label
                 htmlFor={compact ? 'quick-instruction-modal' : 'quick-instruction-queue'}
-                className="text-xs font-medium text-[#C8D0DC]"
+                className="text-xs font-medium text-[#C8D7EC]"
               >
                 Instrucción rápida para Gemini (opcional)
               </label>
@@ -164,7 +168,7 @@ export function EditStyleControls({
                 <button
                   type="button"
                   onClick={() => onChangeCustomInstruction('')}
-                  className="text-[11px] text-[#8B96A8] hover:text-white transition-colors"
+                  className="font-mono text-[11px] text-[#ff2a85] hover:text-[#ff6ca9] transition-colors"
                 >
                   Limpiar
                 </button>
@@ -177,7 +181,7 @@ export function EditStyleControls({
               value={customInstruction}
               onChange={(e) => onChangeCustomInstruction(e.target.value)}
               placeholder="Ej: Deja sí o sí la parte en la que se cae la taza, máximo 25 seg"
-              className="w-full resize-none rounded-lg border border-white/10 bg-[#09090b] px-3 py-2 text-xs text-[#EDF1F7] placeholder:text-[#687487] focus:border-[#E11D48] focus:outline-none leading-relaxed"
+              className="w-full resize-none rounded-md border border-[#00f0ff]/25 bg-[#05060a] px-3 py-2 text-xs text-[#EEF5FF] placeholder:text-[#667A96] focus:border-[#00f0ff] focus:outline-none leading-relaxed"
             />
           </div>
         </div>
