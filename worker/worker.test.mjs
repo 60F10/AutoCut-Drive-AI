@@ -33,10 +33,12 @@ import {
   shouldCloudWorkerClaimJob,
 } from './cloud-worker.mjs';
 import {
+  PHASE_B_SCHEMA,
   claimJobAtomically,
   convertPlanSegmentsToCuts,
   enforceTargetDuration,
   formatSentencesForPrompt,
+  runPhaseBWithValidationRetry,
   sortClipsChronologically,
   splitTranscriptIntoSentences,
   splitWordsBySilencePauses,
@@ -787,7 +789,7 @@ test('enforceTargetDuration trims lowest-scored "desarrollo" cuts first when > +
   assert.ok(under.notes[0].includes('10.0 s'));
 });
 
-test('convertPlanSegmentsToCuts throws controlled [Análisis IA] error on non-existent phrase ID', () => {
+test('convertPlanSegmentsToCuts validates tolerantly: discards invalid IDs, routes empty-ID recurso with valid times, discards recurso without times, and generates notes', () => {
   const sentencesByClip = new Map([
     [
       0,
@@ -796,32 +798,269 @@ test('convertPlanSegmentsToCuts throws controlled [Análisis IA] error on non-ex
           id: 'C1-F001',
           clipIndex: 0,
           start: 0.5,
-          end: 2.0,
-          text: 'Única frase.',
-          words: [{ start: 0.5, end: 2.0, text: 'Única frase.' }],
+          end: 2.5,
+          text: 'Primera frase válida.',
+          words: [
+            { start: 0.5, end: 1.2, text: 'Primera' },
+            { start: 1.25, end: 1.8, text: 'frase' },
+            { start: 1.85, end: 2.5, text: 'válida.' },
+          ],
+        },
+        {
+          id: 'C1-F002',
+          clipIndex: 0,
+          start: 4.0,
+          end: 6.0,
+          text: 'Segunda frase válida.',
+          words: [
+            { start: 4.0, end: 4.7, text: 'Segunda' },
+            { start: 4.75, end: 5.3, text: 'frase' },
+            { start: 5.35, end: 6.0, text: 'válida.' },
+          ],
         },
       ],
     ],
   ]);
 
-  assert.throws(
-    () =>
-      convertPlanSegmentsToCuts({
+  // Verify PHASE_B_SCHEMA documents C{clip}-F{nnn} and empty-only-for-recurso rule
+  const segProps = PHASE_B_SCHEMA.properties.segmentos.items.properties;
+  assert.match(segProps.desde_frase.description, /C\{clip\}-F\{nnn\}/);
+  assert.match(segProps.desde_frase.description, /recurso/i);
+  assert.match(segProps.hasta_frase.description, /C\{clip\}-F\{nnn\}/);
+  assert.match(segProps.hasta_frase.description, /recurso/i);
+
+  const converted = convertPlanSegmentsToCuts({
+    segmentos: [
+      {
+        tipo: 'frases',
+        desde_frase: 'C1-F001',
+        hasta_frase: 'C1-F001',
+        funcion: 'gancho',
+        motivo: 'Gancho válido',
+      },
+      {
+        tipo: 'frases',
+        desde_frase: '',
+        hasta_frase: '',
+        funcion: 'desarrollo',
+        motivo: 'Corte normal con ID vacío',
+      },
+      {
+        tipo: 'frases',
+        desde_frase: 'C1-F001',
+        hasta_frase: 'C1-F999',
+        funcion: 'desarrollo',
+        motivo: 'Corte con ID inexistente',
+      },
+      {
+        // Even if Gemini puts tipo: 'frases' with empty ID and funcion: 'recurso' + valid clip/times -> survives as recurso
+        tipo: 'frases',
+        desde_frase: '',
+        hasta_frase: '',
+        clip_index: 0,
+        desde: 8.0,
+        hasta: 15.0, // clamped to 4.0 s (RECURSO_MAX_SEC)
+        funcion: 'recurso',
+        motivo: 'Plano recurso sin ID con tiempos válidos',
+      },
+      {
+        // Recurso without timestamps -> MUST be discarded
+        tipo: 'recurso',
+        desde_frase: '',
+        clip_index: 0,
+        funcion: 'recurso',
+        motivo: 'Plano recurso sin tiempos',
+      },
+      {
+        tipo: 'frases',
+        desde_frase: 'C1-F002',
+        hasta_frase: 'C1-F002',
+        funcion: 'cierre',
+        motivo: 'Cierre válido',
+      },
+    ],
+    sentencesByClip,
+    clipDurations: [20.0],
+    silenceTrimEnabled: false,
+    targetDurationSec: 20,
+  });
+
+  // Surviving cuts: C1-F001 (gancho), valid recurso (8..12s), C1-F002 (cierre)
+  assert.equal(converted.cortes.length, 3);
+  assert.equal(converted.cortes[0].funcion, 'gancho');
+  assert.equal(converted.cortes[0].texto, 'Primera frase válida.');
+  assert.equal(converted.cortes[1].funcion, 'recurso');
+  assert.equal(converted.cortes[1].start_sec, 8.0);
+  assert.equal(converted.cortes[1].end_sec, 12.0);
+  assert.equal(converted.cortes[2].funcion, 'cierre');
+  assert.equal(converted.cortes[2].texto, 'Segunda frase válida.');
+
+  // 3 discarded out of 6 segments = 50%
+  assert.equal(converted.totalSegments, 6);
+  assert.equal(converted.discardedCount, 3);
+  assert.equal(converted.discardRatio, 0.5);
+  assert.ok(converted.invalidIds.includes(''));
+  assert.ok(converted.invalidIds.includes('C1-F999'));
+  assert.equal(converted.validationNotes.length, 3);
+  assert.ok(converted.validationNotes.some((n) => n.includes('ID vacío')));
+  assert.ok(converted.validationNotes.some((n) => n.includes('C1-F999')));
+  assert.ok(converted.validationNotes.some((n) => n.includes('recurso sin clip o tiempos válidos')));
+});
+
+test('runPhaseBWithValidationRetry retries ONLY when discarded > 30% or script is empty, passes invalid IDs feedback, and throws after 2 empty attempts', async () => {
+  const sentencesByClip = new Map([
+    [
+      0,
+      [
+        {
+          id: 'C1-F001',
+          clipIndex: 0,
+          start: 0.5,
+          end: 3.0,
+          text: 'Frase uno.',
+          words: [{ start: 0.5, end: 3.0, text: 'Frase uno.' }],
+        },
+        {
+          id: 'C1-F002',
+          clipIndex: 0,
+          start: 4.0,
+          end: 6.5,
+          text: 'Frase dos.',
+          words: [{ start: 4.0, end: 6.5, text: 'Frase dos.' }],
+        },
+        {
+          id: 'C1-F003',
+          clipIndex: 0,
+          start: 7.5,
+          end: 10.0,
+          text: 'Frase tres.',
+          words: [{ start: 7.5, end: 10.0, text: 'Frase tres.' }],
+        },
+      ],
+    ],
+  ]);
+
+  // 1. Exactly 25% discarded (1 of 4 <= 30%) -> NO retry!
+  let lowDiscardCalls = 0;
+  const lowDiscardRes = await runPhaseBWithValidationRetry({
+    runPhaseB: async () => {
+      lowDiscardCalls += 1;
+      return {
+        titulo: 'Test 25%',
         segmentos: [
-          {
-            tipo: 'frases',
-            clip_index: 0,
-            desde_frase: 'C1-F001',
-            hasta_frase: 'C1-F999',
-            funcion: 'gancho',
-            motivo: 'Alucinación de ID',
-          },
+          { tipo: 'frases', desde_frase: 'C1-F001', hasta_frase: 'C1-F001', funcion: 'gancho', motivo: 'ok' },
+          { tipo: 'frases', desde_frase: 'C1-F002', hasta_frase: 'C1-F002', funcion: 'desarrollo', motivo: 'ok' },
+          { tipo: 'frases', desde_frase: 'C1-F003', hasta_frase: 'C1-F003', funcion: 'cierre', motivo: 'ok' },
+          { tipo: 'frases', desde_frase: 'C1-F999', hasta_frase: 'C1-F999', funcion: 'desarrollo', motivo: 'bad' },
         ],
+      };
+    },
+    sentencesByClip,
+    clipDurations: [20],
+    silenceTrimEnabled: false,
+    targetDurationSec: 15,
+  });
+  assert.equal(lowDiscardCalls, 1, 'Must NOT retry when discarded ratio is <= 30%');
+  assert.equal(lowDiscardRes.validationRetried, false);
+  assert.equal(lowDiscardRes.converted.cortes.length, 3);
+  assert.equal(lowDiscardRes.converted.validationNotes.length, 1);
+
+  // 2. Exactly 30% discarded (3 of 10 = 0.30, NOT > 30%) -> NO retry!
+  let boundaryCalls = 0;
+  const boundaryRes = await runPhaseBWithValidationRetry({
+    runPhaseB: async () => {
+      boundaryCalls += 1;
+      return {
+        titulo: 'Test 30% exacto',
+        segmentos: [
+          ...Array.from({ length: 7 }, () => ({
+            tipo: 'frases',
+            desde_frase: 'C1-F001',
+            hasta_frase: 'C1-F001',
+            funcion: 'desarrollo',
+            motivo: 'ok',
+          })),
+          ...Array.from({ length: 3 }, () => ({
+            tipo: 'frases',
+            desde_frase: '',
+            funcion: 'desarrollo',
+            motivo: 'vacío',
+          })),
+        ],
+      };
+    },
+    sentencesByClip,
+    clipDurations: [20],
+    silenceTrimEnabled: false,
+    targetDurationSec: 30,
+  });
+  assert.equal(boundaryCalls, 1, 'Must NOT retry at exact 30% boundary');
+  assert.equal(boundaryRes.validationRetried, false);
+
+  // 3. > 30% discarded (2 of 4 = 50%) -> retries ONCE with invalid IDs feedback
+  let retryCalls = 0;
+  let capturedFeedback = null;
+  const retryRes = await runPhaseBWithValidationRetry({
+    runPhaseB: async (feedback) => {
+      retryCalls += 1;
+      if (retryCalls === 1) {
+        return {
+          titulo: 'Intento 1',
+          segmentos: [
+            { tipo: 'frases', desde_frase: 'C1-F001', hasta_frase: 'C1-F001', funcion: 'gancho', motivo: 'ok' },
+            { tipo: 'frases', desde_frase: '', funcion: 'desarrollo', motivo: 'vacío' },
+            { tipo: 'frases', desde_frase: 'C1-F888', funcion: 'desarrollo', motivo: 'inexistente' },
+            { tipo: 'recurso', clip_index: 0, desde: 12.0, hasta: 14.0, funcion: 'recurso', motivo: 'ok recurso' },
+          ],
+        };
+      }
+      capturedFeedback = feedback;
+      return {
+        titulo: 'Intento 2 corregido',
+        segmentos: [
+          { tipo: 'frases', desde_frase: 'C1-F001', hasta_frase: 'C1-F001', funcion: 'gancho', motivo: 'ok' },
+          { tipo: 'frases', desde_frase: 'C1-F002', hasta_frase: 'C1-F002', funcion: 'cierre', motivo: 'ok' },
+        ],
+      };
+    },
+    sentencesByClip,
+    clipDurations: [20],
+    silenceTrimEnabled: false,
+    targetDurationSec: 15,
+  });
+  assert.equal(retryCalls, 2, 'Must retry once when discarded > 30%');
+  assert.equal(retryRes.validationRetried, true);
+  assert.equal(retryRes.converted.cortes.length, 2);
+  assert.ok(capturedFeedback, 'Retry must receive guided feedback');
+  const feedbackBlob = [...capturedFeedback.problemas, ...capturedFeedback.cambios].join(' ');
+  assert.ok(feedbackBlob.includes('C1-F888'), 'Feedback must include invalid phrase ID');
+  assert.ok(feedbackBlob.includes('C{clip}-F{nnn}'), 'Feedback must instruct valid ID format');
+  assert.ok(feedbackBlob.includes('recurso'), 'Feedback must mention recurso fallback with clip/times');
+
+  // 4. Both attempts empty -> throws exact Spanish error with invalid count
+  let failCalls = 0;
+  await assert.rejects(
+    () =>
+      runPhaseBWithValidationRetry({
+        runPhaseB: async () => {
+          failCalls += 1;
+          return {
+            titulo: 'Todo inválido',
+            segmentos: [
+              { tipo: 'frases', desde_frase: '', funcion: 'gancho', motivo: 'bad 1' },
+              { tipo: 'frases', desde_frase: 'C9-F999', funcion: 'cierre', motivo: 'bad 2' },
+              { tipo: 'recurso', clip_index: 0, funcion: 'recurso', motivo: 'sin tiempos' },
+            ],
+          };
+        },
         sentencesByClip,
-        clipDurations: [10],
+        clipDurations: [20],
+        silenceTrimEnabled: false,
+        targetDurationSec: 15,
       }),
-    /\[Análisis IA\] Frase inexistente referenciada en el guion: "C1-F999"/
+    /\[Análisis IA\] Gemini no devolvió un guion válido tras 2 intentos \(3 cortes inválidos\)\./
   );
+  assert.equal(failCalls, 2);
 });
 
 test('kind: "analyze" manifests route strictly to analyze (never render), are claimed by cloud-worker, and ignored by pc-worker', () => {

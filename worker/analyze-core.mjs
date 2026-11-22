@@ -655,7 +655,7 @@ const PHASE_A_SCHEMA = {
   required: ['resumen', 'lugar', 'momentos', 'frases_destacadas'],
 };
 
-const PHASE_B_SCHEMA = {
+export const PHASE_B_SCHEMA = {
   type: 'OBJECT',
   properties: {
     titulo: { type: 'STRING' },
@@ -668,8 +668,16 @@ const PHASE_B_SCHEMA = {
         type: 'OBJECT',
         properties: {
           tipo: { type: 'STRING', enum: ['frases', 'recurso'] },
-          desde_frase: { type: 'STRING' },
-          hasta_frase: { type: 'STRING' },
+          desde_frase: {
+            type: 'STRING',
+            description:
+              'ID de frase existente en la transcripción con formato exacto C{clip}-F{nnn} (ej. C1-F004), o vacío solo si funcion es "recurso".',
+          },
+          hasta_frase: {
+            type: 'STRING',
+            description:
+              'ID de frase existente del mismo clip con formato exacto C{clip}-F{nnn} (>= desde_frase), o vacío solo si funcion es "recurso".',
+          },
           clip_index: { type: 'INTEGER' },
           desde: { type: 'NUMBER' },
           hasta: { type: 'NUMBER' },
@@ -959,9 +967,19 @@ export function enforceTargetDuration(cuts, targetDurationSec) {
   };
 }
 
+export const PHASE_B_MAX_DISCARD_RATIO = 0.3;
+
+function parseOptionalFiniteNumber(value) {
+  if (value === undefined || value === null || value === '') return NaN;
+  const num = Number(value);
+  return Number.isFinite(num) ? num : NaN;
+}
+
 /**
- * Deterministic converter from Gemini Phase B segments (`frases` / `recurso`) into exact `PlanCut[]`.
- * Throws a controlled `[Análisis IA]` error if any segment references a non-existent phrase ID.
+ * Tolerant deterministic converter from Gemini Phase B segments (`frases` / `recurso`) into `PlanCut[]`.
+ * Evaluates every segment, routes empty-ID `funcion: "recurso"` segments through the visual resource path
+ * when clip + timestamps are valid, discards invalid entries without aborting the entire script, and
+ * returns human-readable Spanish `validationNotes` plus discard metrics for guided Phase B retry.
  */
 export function convertPlanSegmentsToCuts({
   segmentos,
@@ -971,9 +989,8 @@ export function convertPlanSegmentsToCuts({
   silenceTrimEnabled = true,
   targetDurationSec = 45,
 }) {
-  if (!Array.isArray(segmentos) || segmentos.length === 0) {
-    throw new Error('[Análisis IA] El guion global no devolvió ningún segmento montable.');
-  }
+  const safeSegmentos = Array.isArray(segmentos) ? segmentos : [];
+  const totalSegments = safeSegmentos.length;
 
   // Index every sentence by ID and its position within its clip
   const sentenceLookup = new Map();
@@ -988,35 +1005,176 @@ export function convertPlanSegmentsToCuts({
   }
 
   const rawCuts = [];
+  const invalidSegments = [];
+  const invalidIdsSet = new Set();
+  const validationNotes = [];
   let cutCounter = 1;
 
-  for (const seg of segmentos) {
+  const recordDiscard = ({ index, reason, note, invalidId, tipo, funcion }) => {
+    invalidSegments.push({
+      index,
+      reason,
+      invalidId: invalidId ?? null,
+      tipo: tipo ?? null,
+      funcion: funcion ?? null,
+    });
+    if (invalidId !== undefined && invalidId !== null) {
+      invalidIdsSet.add(String(invalidId));
+    }
+    if (note) {
+      validationNotes.push(note);
+    }
+  };
+
+  for (let segIdx = 0; segIdx < safeSegmentos.length; segIdx += 1) {
+    const seg = safeSegmentos[segIdx];
     const tipo = seg?.tipo;
     const funcion = VALID_FUNCTIONS.has(seg?.funcion) ? seg.funcion : 'desarrollo';
     const motivo = String(seg?.motivo || 'Momento seleccionado').trim();
 
-    if (tipo === 'frases') {
-      const startId = String(seg?.desde_frase || '').trim();
-      const endId = String(seg?.hasta_frase || startId).trim();
+    const startId = String(seg?.desde_frase || '').trim();
+    const rawEndId = String(seg?.hasta_frase || '').trim();
+    const routeAsRecurso = tipo === 'recurso' || (funcion === 'recurso' && !startId);
 
+    if (routeAsRecurso) {
+      const rawClip = seg?.clip_index;
+      const clipIndex =
+        rawClip !== undefined && rawClip !== null && rawClip !== '' ? Number(rawClip) : NaN;
+      const validClip =
+        Number.isInteger(clipIndex) && clipIndex >= 0 && clipIndex < clipDurations.length;
+
+      if (!validClip) {
+        recordDiscard({
+          index: segIdx,
+          reason: 'recurso_clip_invalido',
+          note: 'Se descartó 1 corte de recurso sin clip válido.',
+          tipo,
+          funcion,
+        });
+        continue;
+      }
+
+      const clipDur = Math.max(0, Number(clipDurations[clipIndex]) || 0);
+      const rawStart = parseOptionalFiniteNumber(seg?.desde ?? seg?.start_sec);
+      const rawEnd = parseOptionalFiniteNumber(seg?.hasta ?? seg?.end_sec);
+
+      if (
+        clipDur < 0.5 ||
+        !Number.isFinite(rawStart) ||
+        !Number.isFinite(rawEnd) ||
+        rawStart < 0 ||
+        rawEnd <= rawStart ||
+        rawStart >= clipDur
+      ) {
+        recordDiscard({
+          index: segIdx,
+          reason: 'recurso_tiempos_invalidos',
+          note: 'Se descartó 1 corte de recurso sin clip o tiempos válidos.',
+          tipo,
+          funcion,
+        });
+        continue;
+      }
+
+      let startSec = Math.max(0, Math.min(clipDur - 0.5, rawStart));
+      let endSec = Math.min(clipDur, rawEnd);
+
+      // Enforce 1..4 s window inside [0, clipDur]
+      if (endSec - startSec > RECURSO_MAX_SEC) {
+        endSec = startSec + RECURSO_MAX_SEC;
+      }
+      if (endSec - startSec < RECURSO_MIN_SEC) {
+        endSec = Math.min(clipDur, startSec + RECURSO_MIN_SEC);
+        if (endSec - startSec < RECURSO_MIN_SEC) {
+          startSec = Math.max(0, endSec - RECURSO_MIN_SEC);
+        }
+      }
+      endSec = Math.min(clipDur, endSec);
+      if (endSec - startSec < 0.5) {
+        recordDiscard({
+          index: segIdx,
+          reason: 'recurso_duracion_insuficiente',
+          note: 'Se descartó 1 corte de recurso sin tiempos válidos suficientes.',
+          tipo,
+          funcion,
+        });
+        continue;
+      }
+
+      rawCuts.push({
+        id: `cut-${String(cutCounter++).padStart(3, '0')}`,
+        clip_index: clipIndex,
+        start_sec: round3(startSec),
+        end_sec: round3(endSec),
+        funcion: funcion === 'gancho' || funcion === 'cierre' ? funcion : 'recurso',
+        motivo,
+        texto: '',
+        words: [],
+        puntuacion_interes: funcion === 'gancho' ? 8 : 6,
+      });
+      continue;
+    }
+
+    if (tipo === 'frases' || !tipo) {
+      if (!startId) {
+        recordDiscard({
+          index: segIdx,
+          reason: 'frase_vacia',
+          invalidId: '',
+          note: 'Se descartó 1 corte con referencia de frase inválida (ID vacío).',
+          tipo,
+          funcion,
+        });
+        continue;
+      }
+
+      const endId = rawEndId || startId;
       const startEntry = sentenceLookup.get(startId);
       const endEntry = sentenceLookup.get(endId);
 
       if (!startEntry) {
-        throw new Error(`[Análisis IA] Frase inexistente referenciada en el guion: "${startId}".`);
+        recordDiscard({
+          index: segIdx,
+          reason: 'frase_inexistente',
+          invalidId: startId,
+          note: `Se descartó 1 corte con referencia de frase inválida ("${startId}").`,
+          tipo,
+          funcion,
+        });
+        continue;
       }
       if (!endEntry) {
-        throw new Error(`[Análisis IA] Frase inexistente referenciada en el guion: "${endId}".`);
+        recordDiscard({
+          index: segIdx,
+          reason: 'frase_inexistente',
+          invalidId: endId,
+          note: `Se descartó 1 corte con referencia de frase inválida ("${endId}").`,
+          tipo,
+          funcion,
+        });
+        continue;
       }
       if (startEntry.clipIndex !== endEntry.clipIndex) {
-        throw new Error(
-          `[Análisis IA] Rango de frases inválido entre clips distintos (${startId} → ${endId}).`
-        );
+        recordDiscard({
+          index: segIdx,
+          reason: 'rango_clips_distintos',
+          invalidId: `${startId}→${endId}`,
+          note: `Se descartó 1 corte con rango de frases inválido entre clips distintos ("${startId}" → "${endId}").`,
+          tipo,
+          funcion,
+        });
+        continue;
       }
       if (endEntry.pos < startEntry.pos) {
-        throw new Error(
-          `[Análisis IA] Rango de frases invertido en el guion (${startId} → ${endId}).`
-        );
+        recordDiscard({
+          index: segIdx,
+          reason: 'rango_invertido',
+          invalidId: `${startId}→${endId}`,
+          note: `Se descartó 1 corte con rango de frases invertido ("${startId}" → "${endId}").`,
+          tipo,
+          funcion,
+        });
+        continue;
       }
 
       const clipIndex = startEntry.clipIndex;
@@ -1028,7 +1186,17 @@ export function convertPlanSegmentsToCuts({
 
       const includedSentences = clipSentences.slice(startEntry.pos, endEntry.pos + 1);
       const includedWords = includedSentences.flatMap((s) => s.words || []);
-      if (includedWords.length === 0) continue;
+      if (includedWords.length === 0) {
+        recordDiscard({
+          index: segIdx,
+          reason: 'frase_sin_palabras',
+          invalidId: startId,
+          note: `Se descartó 1 corte con referencia de frase sin palabras ("${startId}").`,
+          tipo,
+          funcion,
+        });
+        continue;
+      }
 
       const prevSentence = startEntry.pos > 0 ? clipSentences[startEntry.pos - 1] : null;
       const nextSentence =
@@ -1048,7 +1216,17 @@ export function convertPlanSegmentsToCuts({
         Math.max(lastWordEnd, Math.min(maxAllowedEnd, lastWordEnd + PHRASE_POST_MARGIN_SEC))
       );
 
-      if (endSec - startSec < 0.2) continue;
+      if (endSec - startSec < 0.2) {
+        recordDiscard({
+          index: segIdx,
+          reason: 'frase_duracion_insuficiente',
+          invalidId: startId,
+          note: `Se descartó 1 corte demasiado corto ("${startId}").`,
+          tipo,
+          funcion,
+        });
+        continue;
+      }
 
       // Best score among included featured sentences
       let bestScore =
@@ -1088,54 +1266,35 @@ export function convertPlanSegmentsToCuts({
           puntuacion_interes: Math.max(1, Math.min(10, Math.round(bestScore))),
         });
       }
-    } else if (tipo === 'recurso') {
-      const clipIndex = Number(seg?.clip_index);
-      if (!Number.isInteger(clipIndex) || clipIndex < 0 || clipIndex >= clipDurations.length) {
-        throw new Error(
-          `[Análisis IA] Clip inválido en segmento de recurso visual: clip_index=${String(seg?.clip_index)}.`
-        );
-      }
-      const clipDur = Math.max(0, Number(clipDurations[clipIndex]) || 0);
-      if (clipDur < 0.5) continue;
-
-      const rawStart = Number(seg?.desde ?? seg?.start_sec);
-      let startSec = Math.max(0, Math.min(clipDur - 0.5, Number.isFinite(rawStart) ? rawStart : 0));
-      let endSec = Number(seg?.hasta ?? seg?.end_sec);
-      if (!Number.isFinite(endSec) || endSec <= startSec) {
-        endSec = startSec + 2.0;
-      }
-
-      // Enforce 1..4 s window inside [0, clipDur]
-      if (endSec - startSec > RECURSO_MAX_SEC) {
-        endSec = startSec + RECURSO_MAX_SEC;
-      }
-      if (endSec - startSec < RECURSO_MIN_SEC) {
-        endSec = Math.min(clipDur, startSec + RECURSO_MIN_SEC);
-        if (endSec - startSec < RECURSO_MIN_SEC) {
-          startSec = Math.max(0, endSec - RECURSO_MIN_SEC);
-        }
-      }
-      endSec = Math.min(clipDur, endSec);
-      if (endSec - startSec < 0.5) continue;
-
-      rawCuts.push({
-        id: `cut-${String(cutCounter++).padStart(3, '0')}`,
-        clip_index: clipIndex,
-        start_sec: round3(startSec),
-        end_sec: round3(endSec),
-        funcion: funcion === 'gancho' || funcion === 'cierre' ? funcion : 'recurso',
-        motivo,
-        texto: '',
-        words: [],
-        puntuacion_interes: funcion === 'gancho' ? 8 : 6,
-      });
-    } else {
-      throw new Error(`[Análisis IA] Tipo de segmento desconocido en el guion: "${String(tipo)}".`);
+      continue;
     }
+
+    recordDiscard({
+      index: segIdx,
+      reason: 'tipo_desconocido',
+      note: `Se descartó 1 corte con tipo de segmento inválido ("${String(tipo)}").`,
+      tipo,
+      funcion,
+    });
   }
 
+  const discardedCount = invalidSegments.length;
+  const discardRatio = totalSegments > 0 ? discardedCount / totalSegments : 1;
+  const invalidIds = Array.from(invalidIdsSet);
+
   if (rawCuts.length === 0) {
-    throw new Error('[Análisis IA] Ningún segmento del guion produjo cortes válidos.');
+    return {
+      cortes: [],
+      duracionTotalSec: 0,
+      guionResultante: '',
+      durationNotes: [],
+      validationNotes,
+      invalidSegments,
+      invalidIds,
+      totalSegments,
+      discardedCount,
+      discardRatio,
+    };
   }
 
   const enforced = enforceTargetDuration(rawCuts, targetDurationSec);
@@ -1148,6 +1307,89 @@ export function convertPlanSegmentsToCuts({
     duracionTotalSec: enforced.duracionTotalSec,
     guionResultante,
     durationNotes: enforced.notes,
+    validationNotes,
+    invalidSegments,
+    invalidIds,
+    totalSegments,
+    discardedCount,
+    discardRatio,
+  };
+}
+
+/**
+ * Executes Phase B script generation with tolerant validation and 1 guided retry
+ * whenever > 30% of segments are discarded or the resulting script is empty.
+ * Counted independently from Phase C's narrative coherence retry.
+ */
+export async function runPhaseBWithValidationRetry({
+  runPhaseB,
+  sentencesByClip,
+  clipDurations,
+  featuredScoresById = new Map(),
+  silenceTrimEnabled = true,
+  targetDurationSec = 45,
+  baseFeedback = null,
+}) {
+  const executeAndValidate = async (feedback) => {
+    const phaseBResult = await runPhaseB(feedback);
+    const converted = convertPlanSegmentsToCuts({
+      segmentos: phaseBResult?.segmentos,
+      sentencesByClip,
+      clipDurations,
+      featuredScoresById,
+      silenceTrimEnabled,
+      targetDurationSec,
+    });
+    return { phaseBResult, converted };
+  };
+
+  const first = await executeAndValidate(baseFeedback);
+  const needsGuidedRetry =
+    first.converted.cortes.length === 0 ||
+    first.converted.discardRatio > PHASE_B_MAX_DISCARD_RATIO;
+
+  if (!needsGuidedRetry) {
+    return {
+      phaseBResult: first.phaseBResult,
+      converted: first.converted,
+      validationRetried: false,
+    };
+  }
+
+  const invalidIdsText =
+    first.converted.invalidIds.length > 0
+      ? first.converted.invalidIds
+          .map((id) => (id === '' ? '"" (vacío)' : `"${id}"`))
+          .join(', ')
+      : '(sin IDs válidos o recursos sin clip/tiempos)';
+
+  const guidedFeedback = {
+    problemas: [
+      ...(Array.isArray(baseFeedback?.problemas) ? baseFeedback.problemas : []),
+      `Se descartaron ${first.converted.discardedCount} de ${first.converted.totalSegments} cortes por referencias inválidas. IDs inválidos detectados: ${invalidIdsText}.`,
+    ],
+    cambios: [
+      ...(Array.isArray(baseFeedback?.cambios) ? baseFeedback.cambios : []),
+      'Usa solo los IDs C{clip}-F{nnn} proporcionados en la lista de frases, o funcion "recurso" (tipo "recurso") con clip_index, desde y hasta válidos (1-4 s).',
+    ],
+  };
+
+  const second = await executeAndValidate(guidedFeedback);
+
+  if (second.converted.cortes.length === 0) {
+    const invalidCount =
+      second.converted.discardedCount > 0
+        ? second.converted.discardedCount
+        : first.converted.discardedCount;
+    throw new Error(
+      `[Análisis IA] Gemini no devolvió un guion válido tras 2 intentos (${invalidCount} cortes inválidos).`
+    );
+  }
+
+  return {
+    phaseBResult: second.phaseBResult,
+    converted: second.converted,
+    validationRetried: true,
   };
 }
 
@@ -1345,30 +1587,34 @@ export async function analyzeCloudJob({
     await report('vision', pct);
   }
 
-  // 4. Script stage — Phase B global script (80..92)
+  // 4. Script stage — Phase B global script (80..92), with tolerant validation & 1 guided retry (>30% invalid or empty)
   await report('guion', 82);
-  let phaseBResult = await runPhaseBGlobalScript({
-    apiKey,
-    model,
-    stylePreset,
-    customInstruction,
-    targetDurationSec,
-    orderedClipIndices: ordenClips,
-    clipLogsByIndex,
-    sentencesByClip,
-    clipDurations,
-  });
+  const invokePhaseB = (feedback = null) =>
+    runPhaseBGlobalScript({
+      apiKey,
+      model,
+      stylePreset,
+      customInstruction,
+      targetDurationSec,
+      orderedClipIndices: ordenClips,
+      clipLogsByIndex,
+      sentencesByClip,
+      clipDurations,
+      revisionFeedback: feedback,
+    });
 
-  let converted = convertPlanSegmentsToCuts({
-    segmentos: phaseBResult.segmentos,
+  let phaseBAttempt = await runPhaseBWithValidationRetry({
+    runPhaseB: invokePhaseB,
     sentencesByClip,
     clipDurations,
     featuredScoresById,
     silenceTrimEnabled,
     targetDurationSec,
   });
+  let phaseBResult = phaseBAttempt.phaseBResult;
+  let converted = phaseBAttempt.converted;
 
-  // 5. Review stage — Phase C (92..100), max 1 Phase B retry if coherente === false
+  // 5. Review stage — Phase C (92..100), max 1 Phase B coherence retry if coherente === false (separate from validation retry)
   await report('revision', 92);
   let review = await runPhaseCScriptReview({
     apiKey,
@@ -1379,27 +1625,17 @@ export async function analyzeCloudJob({
 
   if (review && review.coherente === false) {
     await report('revision', 95);
-    phaseBResult = await runPhaseBGlobalScript({
-      apiKey,
-      model,
-      stylePreset,
-      customInstruction,
-      targetDurationSec,
-      orderedClipIndices: ordenClips,
-      clipLogsByIndex,
-      sentencesByClip,
-      clipDurations,
-      revisionFeedback: review,
-    });
-
-    converted = convertPlanSegmentsToCuts({
-      segmentos: phaseBResult.segmentos,
+    phaseBAttempt = await runPhaseBWithValidationRetry({
+      runPhaseB: invokePhaseB,
       sentencesByClip,
       clipDurations,
       featuredScoresById,
       silenceTrimEnabled,
       targetDurationSec,
+      baseFeedback: review,
     });
+    phaseBResult = phaseBAttempt.phaseBResult;
+    converted = phaseBAttempt.converted;
 
     review = await runPhaseCScriptReview({
       apiKey,
@@ -1410,6 +1646,7 @@ export async function analyzeCloudJob({
   }
 
   const notas = [
+    ...(Array.isArray(converted.validationNotes) ? converted.validationNotes : []),
     ...converted.durationNotes,
     ...(Array.isArray(review?.problemas) ? review.problemas.filter(Boolean) : []),
     ...(Array.isArray(review?.cambios) ? review.cambios.filter(Boolean) : []),
