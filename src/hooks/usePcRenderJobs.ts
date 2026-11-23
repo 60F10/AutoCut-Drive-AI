@@ -24,6 +24,7 @@ import type {
   RenderJobSourceFile,
   RenderJobTarget,
   SourceClipRef,
+  SubtitleStyleProfile,
   TikTokEditOptions,
   WhisperModelId,
 } from '../types';
@@ -77,6 +78,7 @@ interface UsePcRenderJobsParams {
   customInstruction: string;
   exportQuality: ExportQuality;
   tiktokOptions: TikTokEditOptions;
+  defaultSubtitleStyle: SubtitleStyleProfile;
   voiceoverBrollEnabled: boolean;
   brollDensity: BrollDensity;
   brollSmoothPanEnabled: boolean;
@@ -128,6 +130,7 @@ export function usePcRenderJobs({
   customInstruction,
   exportQuality,
   tiktokOptions,
+  defaultSubtitleStyle,
   voiceoverBrollEnabled,
   brollDensity,
   brollSmoothPanEnabled,
@@ -1349,7 +1352,10 @@ export function usePcRenderJobs({
   );
 
   const sendItemToPc = useCallback(
-    async (itemId: string): Promise<RenderJobManifest | null> => {
+    async (
+      itemId: string,
+      subtitleStyleOverride?: SubtitleStyleProfile
+    ): Promise<RenderJobManifest | null> => {
       const token = resolveDriveToken();
       if (!token) {
         onError('Inicia sesión con Google Drive para enviar el render al PC.');
@@ -1416,6 +1422,7 @@ export function usePcRenderJobs({
           item,
           exportQuality,
           tiktokOptions,
+          subtitleStyle: subtitleStyleOverride || defaultSubtitleStyle,
           voiceoverBrollEnabled,
           brollDensity,
           brollSmoothPanEnabled,
@@ -1492,6 +1499,7 @@ export function usePcRenderJobs({
       itemsRef,
       exportQuality,
       tiktokOptions,
+      defaultSubtitleStyle,
       voiceoverBrollEnabled,
       brollDensity,
       brollSmoothPanEnabled,
@@ -1504,7 +1512,10 @@ export function usePcRenderJobs({
   );
 
   const sendItemToCloud = useCallback(
-    async (itemId: string): Promise<RenderJobManifest | null> => {
+    async (
+      itemId: string,
+      subtitleStyleOverride?: SubtitleStyleProfile
+    ): Promise<RenderJobManifest | null> => {
       if (!cloudRenderConfigured) {
         onError({
           message:
@@ -1569,6 +1580,7 @@ export function usePcRenderJobs({
           item,
           exportQuality,
           tiktokOptions,
+          subtitleStyle: subtitleStyleOverride || defaultSubtitleStyle,
           voiceoverBrollEnabled,
           brollDensity,
           brollSmoothPanEnabled,
@@ -1681,6 +1693,7 @@ export function usePcRenderJobs({
       itemsRef,
       exportQuality,
       tiktokOptions,
+      defaultSubtitleStyle,
       voiceoverBrollEnabled,
       brollDensity,
       brollSmoothPanEnabled,
@@ -1693,7 +1706,10 @@ export function usePcRenderJobs({
   );
 
   const sendItemToRender = useCallback(
-    async (itemId: string): Promise<RenderJobManifest | null> => {
+    async (
+      itemId: string,
+      subtitleStyleOverride?: SubtitleStyleProfile
+    ): Promise<RenderJobManifest | null> => {
       const target = resolveProcessTarget({ processEngine, pcOnline: isPcOnline });
       logInfo(target === 'pc' ? 'PC' : 'Nube', 'Decisión de enrutado de render', {
         motor: processEngine,
@@ -1701,9 +1717,9 @@ export function usePcRenderJobs({
         destino: target,
       });
       if (target === 'pc') {
-        return sendItemToPc(itemId);
+        return sendItemToPc(itemId, subtitleStyleOverride);
       }
-      return sendItemToCloud(itemId);
+      return sendItemToCloud(itemId, subtitleStyleOverride);
     },
     [processEngine, isPcOnline, sendItemToPc, sendItemToCloud]
   );

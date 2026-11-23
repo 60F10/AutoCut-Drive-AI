@@ -1,6 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  BUILTIN_SUBTITLE_STYLES,
+  DEFAULT_SUBTITLE_STYLE_ID,
+  duplicateSubtitleStyleProfile,
+  hexToAssColor,
+  isBuiltInSubtitleStyleId,
+  mergeSubtitleStyleProfiles,
+} from './subtitleStyles';
+import {
   AI_FRAME_JPEG_QUALITY,
   AI_FRAME_MAX_COUNT,
   AI_FRAME_MIN_COUNT,
@@ -1481,6 +1489,63 @@ test('Voz sobre recursos PWA contract: analyze/render manifests carry B-roll opt
   assert.equal(renderNoBroll.overlays, undefined);
   assert.equal(renderNoBroll.options.voiceoverBrollEnabled, false);
 });
+
+test('SubtitleStyleProfile built-in presets, non-deletable guards, and full job manifest snapshot', () => {
+  assert.equal(BUILTIN_SUBTITLE_STYLES.length, 4);
+  assert.equal(BUILTIN_SUBTITLE_STYLES[0].id, DEFAULT_SUBTITLE_STYLE_ID);
+  assert.equal(isBuiltInSubtitleStyleId('clasico-tiktok'), true);
+  assert.equal(isBuiltInSubtitleStyleId('karaoke-amarillo'), true);
+  assert.equal(isBuiltInSubtitleStyleId('minimal'), true);
+  assert.equal(isBuiltInSubtitleStyleId('caja-negra'), true);
+  assert.equal(isBuiltInSubtitleStyleId('mi-perfil-custom'), false);
+
+  assert.equal(hexToAssColor('#FFE500', 1), '&H0000E5FF');
+  assert.equal(hexToAssColor('#000000', 0.78), '&H38000000');
+
+  const karaokePreset = BUILTIN_SUBTITLE_STYLES.find((p) => p.id === 'karaoke-amarillo')!;
+  const duplicated = duplicateSubtitleStyleProfile(
+    karaokePreset,
+    BUILTIN_SUBTITLE_STYLES.map((p) => p.id),
+    'Mi Karaoke Verde'
+  );
+  assert.equal(duplicated.id, 'mi-karaoke-verde');
+  assert.equal(isBuiltInSubtitleStyleId(duplicated.id), false);
+  duplicated.highlightColor = '#22C55E';
+
+  const merged = mergeSubtitleStyleProfiles([duplicated]);
+  assert.equal(merged.length, 5);
+
+  const manifest = buildRenderJobManifest({
+    jobId: 'job_style_snapshot',
+    exportQuality: 'high_1080p',
+    tiktokOptions: {
+      subtitlesEnabled: true,
+      silenceTrimEnabled: true,
+      audioNormalizeEnabled: true,
+      framingMode: 'center_crop',
+    },
+    subtitleStyle: duplicated,
+    item: {
+      id: 'item-style',
+      originalName: 'Clip.mp4',
+      driveFileId: 'drive-1',
+      analysis: {
+        etiqueta: 'VLOG',
+        titulo_interno: 'Test',
+        duracion_objetivo_seg: 10,
+        cortes: [{ id: 'c1', clip_index: 0, start_sec: 0, end_sec: 5, motivo: 'Inicio', enabled: true }],
+      },
+    },
+  });
+
+  // Mutate original profile after manifest creation -> manifest snapshot MUST remain untouched
+  duplicated.highlightColor = '#FF0000';
+  assert.equal(manifest.options.subtitleStyle?.id, 'mi-karaoke-verde');
+  assert.equal(manifest.options.subtitleStyle?.highlightColor, '#22C55E');
+  assert.equal(manifest.options.subtitleStyle?.highlightMode, 'karaoke');
+  assert.equal(manifest.options.subtitleStyle?.popAnimation, true);
+});
+
 
 
 

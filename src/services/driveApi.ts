@@ -780,3 +780,155 @@ export async function listPcRenderJobsAndOutputs(
 
   return { jobs, analyzeJobs, outputs, pcWorkerStatus, jobsFolderId, outputFolderId };
 }
+
+export const STYLES_ROOT_SUBFOLDER = '_AutoCut_Styles';
+export const STYLES_SUBTITLES_SUBFOLDER = 'subtitulos';
+export const STYLES_FONTS_SUBFOLDER = 'fonts';
+
+export interface DriveSubtitleStylesSnapshot {
+  profiles: import('../types').SubtitleStyleProfile[];
+  fileIdByProfileId: Record<string, string>;
+  fonts: string[];
+}
+
+/**
+ * Ensures `<root>/_AutoCut_Styles/subtitulos` exists and returns its Drive folder ID.
+ */
+export async function ensureSubtitleStylesSubfolder(
+  rootFolderId: string,
+  accessToken: string
+): Promise<string> {
+  const stylesRootId = await ensureDriveSubfolder(rootFolderId, STYLES_ROOT_SUBFOLDER, accessToken);
+  return ensureDriveSubfolder(stylesRootId, STYLES_SUBTITLES_SUBFOLDER, accessToken);
+}
+
+/**
+ * Lists custom subtitle style JSON files in `<root>/_AutoCut_Styles/subtitulos/`
+ * and available `.ttf`/`.otf` font files in `<root>/_AutoCut_Styles/fonts/`.
+ */
+export async function listDriveSubtitleStylesAndFonts(
+  rootFolderId: string,
+  accessToken: string
+): Promise<DriveSubtitleStylesSnapshot> {
+  const stylesRootId = await findDriveSubfolder(rootFolderId, STYLES_ROOT_SUBFOLDER, accessToken);
+  if (!stylesRootId) {
+    return { profiles: [], fileIdByProfileId: {}, fonts: [] };
+  }
+
+  const [subtitulosFolderId, fontsFolderId] = await Promise.all([
+    findDriveSubfolder(stylesRootId, STYLES_SUBTITLES_SUBFOLDER, accessToken),
+    findDriveSubfolder(stylesRootId, STYLES_FONTS_SUBFOLDER, accessToken),
+  ]);
+
+  const [styleFiles, fontFiles] = await Promise.all([
+    subtitulosFolderId ? listDriveFolderFiles(subtitulosFolderId, accessToken) : Promise.resolve([]),
+    fontsFolderId ? listDriveFolderFiles(fontsFolderId, accessToken) : Promise.resolve([]),
+  ]);
+
+  const jsonFiles = styleFiles.filter((f) => /\.json$/i.test(f.name)).slice(0, 50);
+  const profiles: import('../types').SubtitleStyleProfile[] = [];
+  const fileIdByProfileId: Record<string, string> = {};
+
+  await Promise.all(
+    jsonFiles.map(async (file) => {
+      try {
+        const res = await fetch(
+          `${DRIVE_API_BASE}/files/${encodeURIComponent(file.id)}?alt=media`,
+          {
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+            },
+          }
+        );
+        if (!res.ok) return;
+        const parsed = (await res.json()) as import('../types').SubtitleStyleProfile;
+        if (!parsed || typeof parsed !== 'object' || !parsed.id || !parsed.nombre) return;
+        profiles.push(parsed);
+        fileIdByProfileId[parsed.id] = file.id;
+      } catch {
+        // Ignore unreadable or partially synced style JSON files
+      }
+    })
+  );
+
+  const fonts = fontFiles
+    .map((f) => f.name)
+    .filter((name) => /\.(ttf|otf)$/i.test(name))
+    .sort((a, b) => a.localeCompare(b));
+
+  return { profiles, fileIdByProfileId, fonts };
+}
+
+/**
+ * Creates or updates `<root>/_AutoCut_Styles/subtitulos/<id>.json` in Google Drive.
+ */
+export async function saveDriveSubtitleStyle(
+  rootFolderId: string,
+  profile: import('../types').SubtitleStyleProfile,
+  accessToken: string,
+  existingFileId?: string
+): Promise<{ fileId: string }> {
+  if (existingFileId) {
+    await patchDriveJsonFile(existingFileId, profile, accessToken);
+    logInfo('Drive', 'Perfil de subtítulos actualizado en Drive', { id: profile.id });
+    return { fileId: existingFileId };
+  }
+
+  const subtitulosFolderId = await ensureSubtitleStylesSubfolder(rootFolderId, accessToken);
+  const fileName = `${profile.id}.json`;
+
+  // Check if a file with the same name already exists in the folder to avoid duplicates
+  const existingFiles = await listDriveFolderFiles(subtitulosFolderId, accessToken);
+  const existingByName = existingFiles.find(
+    (f) => f.name.toLowerCase() === fileName.toLowerCase()
+  );
+  if (existingByName) {
+    await patchDriveJsonFile(existingByName.id, profile, accessToken);
+    logInfo('Drive', 'Perfil de subtítulos sobrescrito en Drive', { id: profile.id });
+    return { fileId: existingByName.id };
+  }
+
+  const boundary = `autocut_style_${Date.now()}`;
+  const metadata = {
+    name: fileName,
+    parents: [subtitulosFolderId],
+    mimeType: 'application/json',
+  };
+  const jsonContent = JSON.stringify(profile, null, 2);
+
+  const multipartBody =
+    `--${boundary}\r\n` +
+    'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
+    `${JSON.stringify(metadata)}\r\n` +
+    `--${boundary}\r\n` +
+    'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
+    `${jsonContent}\r\n` +
+    `--${boundary}--`;
+
+  const url = `${DRIVE_UPLOAD_BASE}/files?uploadType=multipart&fields=id,name`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': `multipart/related; boundary=${boundary}`,
+    },
+    body: multipartBody,
+  });
+
+  await assertDriveOk(res, 'Guardar perfil de subtítulos en Drive');
+  const created = (await res.json()) as { id: string; name: string };
+  logInfo('Drive', 'Perfil de subtítulos guardado en Drive', { id: profile.id });
+  return { fileId: created.id };
+}
+
+/**
+ * Deletes a custom subtitle style JSON file from `<root>/_AutoCut_Styles/subtitulos/`.
+ */
+export async function deleteDriveSubtitleStyle(
+  fileId: string,
+  accessToken: string
+): Promise<void> {
+  await deleteDriveFile(fileId, accessToken);
+  logInfo('Drive', 'Perfil de subtítulos eliminado de Drive');
+}
+

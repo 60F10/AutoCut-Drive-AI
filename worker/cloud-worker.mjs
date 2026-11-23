@@ -44,6 +44,8 @@ const DRIVE_UPLOAD_BASE = 'https://www.googleapis.com/upload/drive/v3';
 const DRIVE_FOLDER_MIME = 'application/vnd.google-apps.folder';
 const JOBS_SUBFOLDER = '_AutoCut_Jobs';
 const OUTPUT_SUBFOLDER = '_AutoCut_Output';
+const STYLES_SUBFOLDER = '_AutoCut_Styles';
+const FONTS_SUBFOLDER = 'fonts';
 const CACHE_SUBFOLDER = '_cache';
 
 const TOKEN_REFRESH_AGE_MS = 45 * 60 * 1000; // Refresh proactively after 45 min
@@ -233,7 +235,7 @@ function escapeDriveQuery(val) {
   return String(val).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
 
-async function findOrCreateSubfolder(tokenManager, parentId, folderName) {
+async function findSubfolder(tokenManager, parentId, folderName) {
   const q = encodeURIComponent(
     `'${escapeDriveQuery(parentId)}' in parents and name = '${escapeDriveQuery(
       folderName
@@ -245,8 +247,13 @@ async function findOrCreateSubfolder(tokenManager, parentId, folderName) {
     { method: 'GET' }
   );
   const data = await res.json();
-  if (data?.files?.[0]?.id) {
-    return data.files[0].id;
+  return data?.files?.[0]?.id || null;
+}
+
+async function findOrCreateSubfolder(tokenManager, parentId, folderName) {
+  const existingId = await findSubfolder(tokenManager, parentId, folderName);
+  if (existingId) {
+    return existingId;
   }
 
   const createRes = await driveFetch(tokenManager, `${DRIVE_API_BASE}/files?fields=id`, {
@@ -260,6 +267,41 @@ async function findOrCreateSubfolder(tokenManager, parentId, folderName) {
   });
   const created = await createRes.json();
   return created.id;
+}
+
+async function downloadCloudStyleFonts(tokenManager, rootFolderId, workDir, jobId) {
+  if (!rootFolderId) return null;
+  try {
+    const stylesFolderId = await findSubfolder(tokenManager, rootFolderId, STYLES_SUBFOLDER);
+    if (!stylesFolderId) return null;
+    const fontsFolderId = await findSubfolder(tokenManager, stylesFolderId, FONTS_SUBFOLDER);
+    if (!fontsFolderId) return null;
+
+    const q = encodeURIComponent(`'${escapeDriveQuery(fontsFolderId)}' in parents and trashed = false`);
+    const res = await driveFetch(
+      tokenManager,
+      `${DRIVE_API_BASE}/files?q=${q}&fields=files(id,name)&pageSize=50`,
+      { method: 'GET' }
+    );
+    const data = await res.json();
+    const files = Array.isArray(data?.files)
+      ? data.files.filter((f) => typeof f?.name === 'string' && /\.(ttf|otf)$/i.test(f.name))
+      : [];
+    if (files.length === 0) return null;
+
+    const localFontsDir = path.join(workDir, 'fonts');
+    await fsp.mkdir(localFontsDir, { recursive: true });
+    for (const file of files) {
+      const safeName = path.basename(file.name).replace(/[<>:"/\\|?*\x00-\x1F]/g, '');
+      if (!safeName) continue;
+      await streamDownloadDriveFile(tokenManager, file.id, path.join(localFontsDir, safeName));
+    }
+    logSafe('INFO', 'subtitle_fonts_downloaded', { jobId, clips: files.length });
+    return localFontsDir;
+  } catch {
+    logSafe('WARN', 'subtitle_fonts_download_failed', { jobId });
+    return null;
+  }
 }
 
 async function readJobManifestById(tokenManager, fileId) {
@@ -639,7 +681,7 @@ async function processAnalyzeJob({ tokenManager, jobFileId, manifest, jobsFolder
   }
 }
 
-async function processCloudJob({ tokenManager, jobFileId, manifest, outputFolderId }) {
+async function processCloudJob({ tokenManager, jobFileId, manifest, outputFolderId, rootFolderId }) {
   if (isAnalyzeManifest(manifest)) {
     throw new PhaseError('Sistema', 'Un manifiesto kind="analyze" no puede entrar en el flujo de render.');
   }
@@ -734,6 +776,12 @@ async function processCloudJob({ tokenManager, jobFileId, manifest, outputFolder
       });
     }
 
+    let preparedFontsDir = null;
+    const requestedFontFile = claimedManifest.options?.subtitleStyle?.fontFile;
+    if (typeof requestedFontFile === 'string' && requestedFontFile.trim()) {
+      preparedFontsDir = await downloadCloudStyleFonts(tokenManager, rootFolderId, workDir, jobId);
+    }
+
     const tRenderStart = Date.now();
     let finalLocalPath;
     try {
@@ -744,9 +792,13 @@ async function processCloudJob({ tokenManager, jobFileId, manifest, outputFolder
         ffmpegBin: process.env.AUTOCUT_FFMPEG_BIN || 'ffmpeg',
         ffprobeBin: process.env.AUTOCUT_FFPROBE_BIN || undefined,
         zscaleAvailable: true,
+        fontsDir: preparedFontsDir,
         encoder: {
           codec: 'libx264',
           cpuPreset: (q) => getCloudCpuPreset(q),
+        },
+        onWarning: (code) => {
+          logSafe('WARN', code || 'render_warning', { jobId });
         },
         onProgress: async (evt) => {
           const clamped = Math.max(10, Math.min(88, Math.round(evt.percent)));
@@ -890,6 +942,7 @@ async function main() {
           jobFileId: entry.fileId,
           manifest: entry.manifest,
           outputFolderId,
+          rootFolderId,
         });
       }
     } catch {

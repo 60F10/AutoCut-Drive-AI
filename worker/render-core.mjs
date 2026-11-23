@@ -109,15 +109,204 @@ function formatAssTime(seconds) {
   ).padStart(2, '0')}`;
 }
 
+export const BUILTIN_SUBTITLE_STYLES = [
+  {
+    id: 'clasico-tiktok',
+    nombre: 'Clásico TikTok',
+    fontName: 'DejaVu Sans',
+    fontSizePct: 4.0625,
+    bold: true,
+    uppercase: false,
+    primaryColor: '#FFFFFF',
+    highlightColor: '#FFE500',
+    outlineColor: '#000000',
+    outlineWidth: 0.3125,
+    shadow: 0,
+    backgroundBox: 'none',
+    boxColor: '#000000',
+    boxOpacity: 0,
+    positionPct: 32.29,
+    maxWordsPerBlock: 4,
+    maxCharsPerBlock: 26,
+    highlightMode: 'longest_word',
+    popAnimation: false,
+  },
+  {
+    id: 'karaoke-amarillo',
+    nombre: 'Karaoke amarillo',
+    fontName: 'DejaVu Sans',
+    fontSizePct: 4.3,
+    bold: true,
+    uppercase: true,
+    primaryColor: '#FFFFFF',
+    highlightColor: '#FFE500',
+    outlineColor: '#000000',
+    outlineWidth: 0.35,
+    shadow: 0.12,
+    backgroundBox: 'none',
+    boxColor: '#000000',
+    boxOpacity: 0,
+    positionPct: 30,
+    maxWordsPerBlock: 3,
+    maxCharsPerBlock: 22,
+    highlightMode: 'karaoke',
+    popAnimation: true,
+  },
+  {
+    id: 'minimal',
+    nombre: 'Minimal',
+    fontName: 'DejaVu Sans',
+    fontSizePct: 3.1,
+    bold: false,
+    uppercase: false,
+    primaryColor: '#F8FAFC',
+    highlightColor: '#38BDF8',
+    outlineColor: '#0F172A',
+    outlineWidth: 0.14,
+    shadow: 0.16,
+    backgroundBox: 'none',
+    boxColor: '#000000',
+    boxOpacity: 0,
+    positionPct: 22,
+    maxWordsPerBlock: 5,
+    maxCharsPerBlock: 34,
+    highlightMode: 'none',
+    popAnimation: false,
+  },
+  {
+    id: 'caja-negra',
+    nombre: 'Caja negra',
+    fontName: 'DejaVu Sans',
+    fontSizePct: 3.4,
+    bold: true,
+    uppercase: false,
+    primaryColor: '#FFFFFF',
+    highlightColor: '#FACC15',
+    outlineColor: '#000000',
+    outlineWidth: 0.6,
+    shadow: 0,
+    backgroundBox: 'box',
+    boxColor: '#000000',
+    boxOpacity: 0.78,
+    positionPct: 26,
+    maxWordsPerBlock: 4,
+    maxCharsPerBlock: 28,
+    highlightMode: 'longest_word',
+    popAnimation: false,
+  },
+];
+
+export const DEFAULT_SUBTITLE_STYLE = BUILTIN_SUBTITLE_STYLES[0];
+
+function normalizeHexColor(value, fallback) {
+  const str = String(value ?? '').trim();
+  if (/^#[0-9a-fA-F]{6}$/.test(str)) return str.toUpperCase();
+  if (/^[0-9a-fA-F]{6}$/.test(str)) return `#${str.toUpperCase()}`;
+  if (/^#[0-9a-fA-F]{3}$/.test(str)) {
+    return `#${str[1]}${str[1]}${str[2]}${str[2]}${str[3]}${str[3]}`.toUpperCase();
+  }
+  return fallback.toUpperCase();
+}
+
+function clampStyleNumber(value, min, max, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
+
+function sanitizeFontFileName(raw) {
+  if (typeof raw !== 'string') return undefined;
+  const trimmed = raw.trim().replace(/^.*[/\\]/, '');
+  if (!trimmed || !/\.(ttf|otf)$/i.test(trimmed)) return undefined;
+  const safe = trimmed.replace(/[<>:"/\\|?*\x00-\x1F]/g, '');
+  return safe || undefined;
+}
+
 /**
- * Highlights the longest word in a subtitle block in yellow (`&H0000E5FF&`),
- * returning white (`&H00FFFFFF&`) for the rest, without altering any word text.
+ * Normalizes a `SubtitleStyleProfile` object, falling back safely to Clásico TikTok defaults.
  */
-export function highlightLongestWordAss(text) {
+export function normalizeSubtitleStyle(raw, fallback = DEFAULT_SUBTITLE_STYLE) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const fontName =
+    typeof src.fontName === 'string' && src.fontName.trim()
+      ? src.fontName.trim().replace(/[,;\r\n]/g, '').slice(0, 64) || fallback.fontName
+      : fallback.fontName;
+  const fontFile = sanitizeFontFileName(src.fontFile);
+  const backgroundBox = src.backgroundBox === 'box' ? 'box' : 'none';
+  const highlightMode =
+    src.highlightMode === 'none' ||
+    src.highlightMode === 'karaoke' ||
+    src.highlightMode === 'longest_word'
+      ? src.highlightMode
+      : fallback.highlightMode;
+
+  return {
+    id: typeof src.id === 'string' && src.id.trim() ? src.id.trim().slice(0, 64) : fallback.id,
+    nombre:
+      typeof src.nombre === 'string' && src.nombre.trim()
+        ? src.nombre.trim().slice(0, 64)
+        : fallback.nombre,
+    fontName,
+    ...(fontFile ? { fontFile } : {}),
+    fontSizePct: clampStyleNumber(src.fontSizePct, 1.2, 10, fallback.fontSizePct),
+    bold: typeof src.bold === 'boolean' ? src.bold : fallback.bold,
+    uppercase: typeof src.uppercase === 'boolean' ? src.uppercase : fallback.uppercase,
+    primaryColor: normalizeHexColor(src.primaryColor, fallback.primaryColor),
+    highlightColor: normalizeHexColor(src.highlightColor, fallback.highlightColor),
+    outlineColor: normalizeHexColor(src.outlineColor, fallback.outlineColor),
+    outlineWidth: clampStyleNumber(src.outlineWidth, 0, 2.5, fallback.outlineWidth),
+    shadow: clampStyleNumber(src.shadow, 0, 1.5, fallback.shadow),
+    backgroundBox,
+    boxColor: normalizeHexColor(src.boxColor, fallback.boxColor),
+    boxOpacity: clampStyleNumber(src.boxOpacity, 0, 1, fallback.boxOpacity),
+    positionPct: clampStyleNumber(src.positionPct, 4, 85, fallback.positionPct),
+    maxWordsPerBlock: Math.round(
+      clampStyleNumber(src.maxWordsPerBlock, 1, 10, fallback.maxWordsPerBlock)
+    ),
+    maxCharsPerBlock: Math.round(
+      clampStyleNumber(src.maxCharsPerBlock, 8, 60, fallback.maxCharsPerBlock)
+    ),
+    highlightMode,
+    popAnimation:
+      typeof src.popAnimation === 'boolean' ? src.popAnimation : fallback.popAnimation,
+  };
+}
+
+/**
+ * Converts a `#RRGGBB` color + opacity (0..1, where 1 = opaque) to ASS `&HAABBGGRR`.
+ */
+export function hexToAssColor(hex, opacity = 1) {
+  const norm = normalizeHexColor(hex, '#FFFFFF');
+  const r = norm.slice(1, 3);
+  const g = norm.slice(3, 5);
+  const b = norm.slice(5, 7);
+  const clamped = Math.max(0, Math.min(1, Number.isFinite(Number(opacity)) ? Number(opacity) : 1));
+  const aa = Math.round((1 - clamped) * 255)
+    .toString(16)
+    .toUpperCase()
+    .padStart(2, '0');
+  return `&H${aa}${b}${g}${r}`;
+}
+
+function sanitizeAssText(text, uppercase = false) {
   const safe = String(text || '')
     .replace(/[{}]/g, '')
     .replace(/\r?\n/g, ' ')
     .trim();
+  return uppercase ? safe.toUpperCase() : safe;
+}
+
+/**
+ * Highlights the longest word in a subtitle block using `highlightAss` (default yellow `&H0000E5FF`),
+ * restoring `primaryAss` (default white `&H00FFFFFF`) for the rest, without altering any word text.
+ */
+export function highlightLongestWordAss(
+  text,
+  primaryAss = '&H00FFFFFF',
+  highlightAss = '&H0000E5FF',
+  uppercase = false
+) {
+  const safe = sanitizeAssText(text, uppercase);
   if (!safe) return '';
 
   const tokens = safe.split(/\s+/).filter(Boolean);
@@ -126,7 +315,8 @@ export function highlightLongestWordAss(text) {
   let longestIdx = 0;
   let longestLen = -1;
   for (let i = 0; i < tokens.length; i += 1) {
-    const cleanLen = tokens[i].replace(/^[¡¿"'«(\[]+|[.,?!:;"'»)\]]+$/g, '').length || tokens[i].length;
+    const cleanLen =
+      tokens[i].replace(/^[¡¿"'«(\[]+|[.,?!:;"'»)\]]+$/g, '').length || tokens[i].length;
     if (cleanLen > longestLen) {
       longestLen = cleanLen;
       longestIdx = i;
@@ -135,24 +325,139 @@ export function highlightLongestWordAss(text) {
 
   return tokens
     .map((tok, idx) =>
-      idx === longestIdx ? `{\\c&H0000E5FF&}${tok}{\\c&H00FFFFFF&}` : tok
+      idx === longestIdx ? `{\\c${highlightAss}&}${tok}{\\c${primaryAss}&}` : tok
     )
     .join(' ');
 }
 
+const POP_ANIMATION_TAG = '{\\fscx80\\fscy80\\t(0,120,\\fscx100\\fscy100)}';
+
+function buildKaraokeDialogueLines(block, style, primaryAss, highlightAss) {
+  const blockStart = Math.max(0, Number(block?.start) || 0);
+  const blockEnd = Math.max(blockStart + 0.05, Number(block?.end) || blockStart + 0.05);
+  const rawWords =
+    Array.isArray(block?.words) && block.words.length > 0
+      ? block.words
+          .map((w) => ({
+            start: Number(w?.start),
+            end: Number(w?.end),
+            text: sanitizeAssText(w?.text, style.uppercase),
+          }))
+          .filter((w) => Boolean(w.text) && Number.isFinite(w.start) && Number.isFinite(w.end))
+      : [];
+
+  let wordEntries = rawWords;
+  if (wordEntries.length === 0) {
+    const safe = sanitizeAssText(block?.text, style.uppercase);
+    const tokens = safe.split(/\s+/).filter(Boolean);
+    if (tokens.length === 0) return [];
+    const step = (blockEnd - blockStart) / tokens.length;
+    wordEntries = tokens.map((tok, idx) => ({
+      start: blockStart + idx * step,
+      end: blockStart + (idx + 1) * step,
+      text: tok,
+    }));
+  }
+
+  const lines = [];
+  const count = wordEntries.length;
+  for (let i = 0; i < count; i += 1) {
+    const evStart =
+      i === 0
+        ? blockStart
+        : Math.max(blockStart, Math.min(blockEnd - 0.02, wordEntries[i].start));
+    const nextStart = i < count - 1 ? wordEntries[i + 1].start : blockEnd;
+    const evEnd =
+      i < count - 1
+        ? Math.max(evStart + 0.02, Math.min(blockEnd, nextStart))
+        : Math.max(evStart + 0.02, blockEnd);
+
+    const rendered = wordEntries
+      .map((entry, idx) =>
+        idx === i ? `{\\c${highlightAss}&}${entry.text}{\\c${primaryAss}&}` : entry.text
+      )
+      .join(' ');
+
+    const popPrefix = style.popAnimation && i === 0 ? POP_ANIMATION_TAG : '';
+    lines.push(
+      `Dialogue: 0,${formatAssTime(evStart)},${formatAssTime(evEnd)},TikTok,,0,0,0,,${popPrefix}${rendered}`
+    );
+  }
+  return lines;
+}
+
 /**
- * Builds TikTok/Reels-styled ASS subtitle file scaled proportionally from 1080×1920:
- * - Font: DejaVu Sans Bold, size 78 @ 1080p (proportional @ 720p)
- * - White primary text, black 6 px outline, shadow 0, Alignment=2, MarginV=620 @ 1080p
- * - Longest word in each block highlighted in yellow (&H0000E5FF&)
+ * Resolves a subtitle style profile against an optional `fontsDir`.
+ * If `style.fontFile` is set and exists inside `fontsDir`, returns `effectiveFontsDir = fontsDir`.
+ * If `style.fontFile` is missing, falls back to the default font (`DejaVu Sans`) and calls `onWarning`.
  */
-export function buildAssFileContent(blocks, width = 1080, height = 1920) {
-  const scale = width / 1080;
-  const fontSize = Math.max(24, Math.round(78 * scale));
-  const outline = Math.max(2, Math.round(6 * scale));
-  const marginV = Math.max(120, Math.round(620 * scale));
-  const marginH = Math.max(24, Math.round(48 * scale));
-  const fontName = 'DejaVu Sans';
+export async function resolveSubtitleStyleWithFonts({
+  style,
+  fontsDir = null,
+  onWarning = null,
+}) {
+  const normalized = normalizeSubtitleStyle(style);
+  if (!normalized.fontFile) {
+    return {
+      effectiveStyle: normalized,
+      effectiveFontsDir: null,
+      fontFallbackUsed: false,
+    };
+  }
+
+  const safeFile = path.basename(normalized.fontFile);
+  if (fontsDir) {
+    try {
+      const stat = await fsp.stat(path.join(fontsDir, safeFile));
+      if (stat.isFile() && stat.size > 0) {
+        return {
+          effectiveStyle: normalized,
+          effectiveFontsDir: fontsDir,
+          fontFallbackUsed: false,
+        };
+      }
+    } catch {
+      // Missing font file -> fall back cleanly
+    }
+  }
+
+  if (typeof onWarning === 'function') {
+    onWarning('subtitle_font_missing');
+  }
+
+  const fallbackStyle = {
+    ...normalized,
+    fontName: DEFAULT_SUBTITLE_STYLE.fontName,
+  };
+  delete fallbackStyle.fontFile;
+
+  return {
+    effectiveStyle: fallbackStyle,
+    effectiveFontsDir: null,
+    fontFallbackUsed: true,
+  };
+}
+
+/**
+ * Builds an ASS subtitle file from a `SubtitleStyleProfile` (defaults to "Clásico TikTok").
+ * All sizes and vertical margins scale from `height` percentages so 720p and 1080p match cleanly.
+ * With the default "Clásico TikTok" profile, output is byte-for-byte identical to the legacy builder.
+ */
+export function buildAssFileContent(blocks, width = 1080, height = 1920, style = null) {
+  const s = normalizeSubtitleStyle(style);
+  const fontSize = Math.max(16, Math.round((height * s.fontSizePct) / 100));
+  const outline = s.outlineWidth <= 0 ? 0 : Math.max(1, Math.round((height * s.outlineWidth) / 100));
+  const shadow = s.shadow <= 0 ? 0 : Math.max(1, Math.round((height * s.shadow) / 100));
+  const marginV = Math.max(20, Math.round((height * s.positionPct) / 100));
+  const marginH = Math.max(24, Math.round(height * 0.025));
+
+  const primaryAss = hexToAssColor(s.primaryColor, 1);
+  const highlightAss = hexToAssColor(s.highlightColor, 1);
+  const borderStyle = s.backgroundBox === 'box' ? 3 : 1;
+  const boxAss = hexToAssColor(s.boxColor, s.boxOpacity);
+  const outlineAss = s.backgroundBox === 'box' ? boxAss : hexToAssColor(s.outlineColor, 1);
+  const backAss = s.backgroundBox === 'box' ? boxAss : '&H00000000';
+  const boldFlag = s.bold ? -1 : 0;
 
   const header = `[Script Info]
 ScriptType: v4.00+
@@ -162,18 +467,31 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: TikTok,${fontName},${fontSize},&H00FFFFFF,&H0000E5FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,${outline},0,2,${marginH},${marginH},${marginV},1
+Style: TikTok,${s.fontName},${fontSize},${primaryAss},${highlightAss},${outlineAss},${backAss},${boldFlag},0,0,0,100,100,0,0,${borderStyle},${outline},${shadow},2,${marginH},${marginH},${marginV},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`;
 
-  const lines = blocks
-    .map((b) => {
-      const highlighted = highlightLongestWordAss(b.text);
-      if (!highlighted) return null;
-      return `Dialogue: 0,${formatAssTime(b.start)},${formatAssTime(b.end)},TikTok,,0,0,0,,${highlighted}`;
-    })
-    .filter(Boolean);
+  const lines = [];
+  for (const b of Array.isArray(blocks) ? blocks : []) {
+    if (s.highlightMode === 'karaoke') {
+      lines.push(...buildKaraokeDialogueLines(b, s, primaryAss, highlightAss));
+      continue;
+    }
+
+    let formattedText = '';
+    if (s.highlightMode === 'none') {
+      formattedText = sanitizeAssText(b?.text, s.uppercase);
+    } else {
+      formattedText = highlightLongestWordAss(b?.text, primaryAss, highlightAss, s.uppercase);
+    }
+    if (!formattedText) continue;
+
+    const popPrefix = s.popAnimation ? POP_ANIMATION_TAG : '';
+    lines.push(
+      `Dialogue: 0,${formatAssTime(b.start)},${formatAssTime(b.end)},TikTok,,0,0,0,,${popPrefix}${formattedText}`
+    );
+  }
 
   return `${header}\n${lines.join('\n')}\n`;
 }
@@ -191,8 +509,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
  * - Each block ends at next block's start if gap < 0.25 s; otherwise at last word end + 0.15 s.
  * - Preserves exact word text verbatim (no rewriting/invention).
  */
-export function buildSubtitlesFromCutWords(cuts) {
+export function buildSubtitlesFromCutWords(cuts, style = null) {
   if (!Array.isArray(cuts) || cuts.length === 0) return [];
+  const s = normalizeSubtitleStyle(style);
+  const maxWordsPerBlock = s.maxWordsPerBlock;
+  const maxCharsPerBlock = s.maxCharsPerBlock;
 
   const rawBlocks = [];
   let cursor = 0;
@@ -233,18 +554,25 @@ export function buildSubtitlesFromCutWords(cuts) {
         start: current[0].start,
         rawEnd: current[current.length - 1].end,
         text: current.map((w) => w.text).join(' '),
+        words: current.map((w) => ({
+          start: Number(w.start.toFixed(3)),
+          end: Number(w.end.toFixed(3)),
+          text: w.text,
+        })),
       });
       current = [];
     };
+
+    const maxBlockDuration = Math.max(1.6, maxWordsPerBlock * 0.4);
 
     for (const word of inCutWords) {
       if (current.length > 0) {
         const candidateText = `${current.map((w) => w.text).join(' ')} ${word.text}`;
         const candidateDuration = word.end - current[0].start;
         if (
-          current.length >= 4 ||
-          candidateText.length > 26 ||
-          candidateDuration > 1.6
+          current.length >= maxWordsPerBlock ||
+          candidateText.length > maxCharsPerBlock ||
+          candidateDuration > maxBlockDuration + 1e-6
         ) {
           flushCurrent();
         }
@@ -272,6 +600,7 @@ export function buildSubtitlesFromCutWords(cuts) {
       start: Number(block.start.toFixed(3)),
       end: Number(Math.max(block.start + 0.05, computedEnd).toFixed(3)),
       text: block.text,
+      words: block.words,
     };
   });
 }
@@ -979,6 +1308,7 @@ export function buildFinalAssemblyFfmpegArgs({
   normalizeAudio = true,
   loudnormMeasurements = null,
   subtitleAssPath = null,
+  fontsDir = null,
 }) {
   const args = ['-y', '-hide_banner', '-loglevel', 'error', '-i', joinedPath, '-map', '0:v:0'];
 
@@ -990,9 +1320,13 @@ export function buildFinalAssemblyFfmpegArgs({
 
   if (subtitleAssPath) {
     const escapedAss = escapePathForFfmpegFilter(subtitleAssPath);
+    const vfArg =
+      fontsDir && String(fontsDir).trim()
+        ? `ass='${escapedAss}':fontsdir='${escapePathForFfmpegFilter(String(fontsDir).trim())}'`
+        : `ass='${escapedAss}'`;
     args.push(
       '-vf',
-      `ass='${escapedAss}'`,
+      vfArg,
       ...buildVideoCodecArgs(encoderCodec, profile, cpuPreset),
       '-pix_fmt',
       'yuv420p',
@@ -1047,14 +1381,15 @@ export function buildFinalAssemblyFfmpegArgs({
  * Priority 1: real word-level timestamps on `manifest.cuts` (`buildSubtitlesFromCutWords`).
  * Priority 2: legacy `manifest.options.subtitlesData`.
  */
-export function resolveFinalSubtitles(manifest) {
+export function resolveFinalSubtitles(manifest, styleOverride = null) {
   const options = manifest?.options || {};
   if (!options.subtitlesEnabled) return [];
 
+  const effectiveStyle = normalizeSubtitleStyle(styleOverride || options.subtitleStyle);
   const cuts = Array.isArray(manifest?.cuts) ? manifest.cuts : [];
   const hasWordLevelSubs = cuts.some((c) => Array.isArray(c?.words) && c.words.length > 0);
   if (hasWordLevelSubs) {
-    return buildSubtitlesFromCutWords(cuts);
+    return buildSubtitlesFromCutWords(cuts, effectiveStyle);
   }
 
   if (Array.isArray(options.subtitlesData) && options.subtitlesData.length > 0) {
@@ -1082,7 +1417,9 @@ export async function renderJob({
   ffprobeBin,
   encoder,
   zscaleAvailable,
+  fontsDir = null,
   onProgress,
+  onWarning,
 }) {
   if (!Array.isArray(sourcePaths) || sourcePaths.length === 0) {
     throw new Error('No se recibieron rutas locales de vídeo fuente (sourcePaths).');
@@ -1257,13 +1594,18 @@ export async function renderJob({
   }
 
   // 2. Final pass over joined.mp4: 2-pass loudnorm + optional final-timeline ASS subtitles
-  const finalSubtitles = resolveFinalSubtitles(manifest);
+  const { effectiveStyle, effectiveFontsDir } = await resolveSubtitleStyleWithFonts({
+    style: options.subtitleStyle,
+    fontsDir,
+    onWarning,
+  });
+  const finalSubtitles = resolveFinalSubtitles(manifest, effectiveStyle);
   let finalAssPath = null;
   if (finalSubtitles.length > 0) {
     finalAssPath = path.join(workDir, 'final_subtitles.ass');
     await fsp.writeFile(
       finalAssPath,
-      buildAssFileContent(finalSubtitles, profile.width, profile.height),
+      buildAssFileContent(finalSubtitles, profile.width, profile.height, effectiveStyle),
       'utf8'
     );
   }
@@ -1316,6 +1658,7 @@ export async function renderJob({
     normalizeAudio,
     loudnormMeasurements,
     subtitleAssPath: finalAssPath,
+    fontsDir: effectiveFontsDir,
   });
 
   const finalRes = await runProcess(ffmpegBin, finalArgs);

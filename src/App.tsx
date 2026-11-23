@@ -22,6 +22,7 @@ import { useGoogleDriveAuth } from './hooks/useGoogleDriveAuth';
 import { useVideoQueue } from './hooks/useVideoQueue';
 import { useStudioEditor } from './hooks/useStudioEditor';
 import { usePcRenderJobs } from './hooks/usePcRenderJobs';
+import { useSubtitleStyles } from './hooks/useSubtitleStyles';
 import { Sidebar } from './components/Sidebar';
 import { MobileBottomNav } from './components/MobileBottomNav';
 import { QueueView } from './components/QueueView';
@@ -170,6 +171,26 @@ export default function App() {
     setSelectedForCombine([]);
   }, [setSelectedForCombine]);
 
+  const handleChangeDefaultSubtitleStyleId = useCallback(
+    (nextStyleId: string) => {
+      persistSettings({
+        ...settings,
+        defaultSubtitleStyleId: nextStyleId,
+      });
+    },
+    [settings, persistSettings]
+  );
+
+  const subtitleStyles = useSubtitleStyles({
+    folderId: settings.folderId,
+    accessToken,
+    isDriveConnected,
+    defaultSubtitleStyleId: settings.defaultSubtitleStyleId,
+    onChangeDefaultStyleId: handleChangeDefaultSubtitleStyleId,
+    clearAuthSession,
+    onError: reportError,
+  });
+
   const pcRender = usePcRenderJobs({
     folderId: settings.folderId,
     accessToken,
@@ -182,6 +203,7 @@ export default function App() {
     customInstruction,
     exportQuality: settings.exportQuality,
     tiktokOptions,
+    defaultSubtitleStyle: subtitleStyles.defaultProfile,
     voiceoverBrollEnabled: settings.voiceoverBrollEnabled,
     brollDensity: settings.brollDensity,
     brollSmoothPanEnabled: settings.brollSmoothPanEnabled,
@@ -521,9 +543,15 @@ export default function App() {
               onReorderCut={studio.handleReorderCut}
               onUpdateCutTiming={studio.handleUpdateCutTiming}
               onRerenderItem={studio.handleRerenderItem}
-              onRenderRemote={(itemId) => void pcRender.sendItemToRender(itemId)}
-              onSendToCloud={(itemId) => void pcRender.sendItemToCloud(itemId)}
-              onSendToPc={(itemId) => void pcRender.sendItemToPc(itemId)}
+              onRenderRemote={(itemId, subtitleStyle) =>
+                void pcRender.sendItemToRender(itemId, subtitleStyle)
+              }
+              onSendToCloud={(itemId, subtitleStyle) =>
+                void pcRender.sendItemToCloud(itemId, subtitleStyle)
+              }
+              onSendToPc={(itemId, subtitleStyle) =>
+                void pcRender.sendItemToPc(itemId, subtitleStyle)
+              }
               onRedoStory={(itemId, instruction) => void pcRender.redoCloudStory(itemId, instruction)}
               onRetryCloudDispatch={(jobFileId) => void pcRender.retryCloudDispatch(jobFileId)}
               onFallbackPcJobToCloud={(jobFileId, kind) =>
@@ -545,6 +573,8 @@ export default function App() {
               onChangeExportQuality={handleChangeExportQuality}
               tiktokOptions={tiktokOptions}
               onChangeTikTokOptions={handleChangeTikTokOptions}
+              subtitleProfiles={subtitleStyles.profiles}
+              defaultSubtitleStyleId={settings.defaultSubtitleStyleId}
               isRendering={studio.isStudioRendering}
               renderProgress={studio.studioRenderProgress}
               canUploadToDrive={Boolean(isDriveConnected && settings.folderId)}
@@ -574,6 +604,17 @@ export default function App() {
               isClearingCache={queue.isClearingCache}
               onClearVideoCache={queue.handleClearVideoCache}
               onCopyDiagnosticReport={handleCopyDiagnosticReport}
+              subtitleProfiles={subtitleStyles.profiles}
+              driveFonts={subtitleStyles.driveFonts}
+              isSyncingSubtitleStyles={subtitleStyles.isSyncingStyles}
+              isSavingSubtitleStyle={subtitleStyles.isSavingStyle}
+              subtitleStylesSyncSource={subtitleStyles.lastSyncSource}
+              onChangeDefaultSubtitleStyleId={handleChangeDefaultSubtitleStyleId}
+              onSyncSubtitleStyles={() => void subtitleStyles.syncSubtitleStyles(false)}
+              onCreateSubtitleProfile={subtitleStyles.createProfile}
+              onDuplicateSubtitleProfile={subtitleStyles.duplicateProfile}
+              onSaveSubtitleProfile={subtitleStyles.saveProfile}
+              onDeleteSubtitleProfile={subtitleStyles.deleteProfile}
             />
           )}
         </main>

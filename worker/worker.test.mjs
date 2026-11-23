@@ -5,6 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import {
+  BUILTIN_SUBTITLE_STYLES,
+  DEFAULT_SUBTITLE_STYLE,
   QUALITY_PROFILES,
   SDR_COLOR_ARGS,
   buildAssFileContent,
@@ -13,13 +15,17 @@ import {
   buildSegmentFfmpegArgs,
   buildSubtitlesFromCutWords,
   getCloudCpuPreset,
+  hexToAssColor,
+  normalizeSubtitleStyle,
   parseLoudnormMeasurements,
   resolveFinalSubtitles,
+  resolveSubtitleStyleWithFonts,
   sanitizeOutputFilename,
   verifyRenderedDurations,
 } from './render-core.mjs';
 import {
   RotatingFileLogger,
+  buildAssFileContent as pcWorkerBuildAssFileContent,
   buildWhisperEnv,
   formatSafePcLog,
   parseCliArgs,
@@ -2045,3 +2051,195 @@ test('writeFileAtomicWithRetry reintenta bloqueos transitorios y nunca deja el J
     await fs.rm(base, { recursive: true, force: true });
   }
 });
+
+test('pc-worker unifies buildAssFileContent directly from render-core (no duplicate implementation)', () => {
+  assert.equal(pcWorkerBuildAssFileContent, buildAssFileContent);
+});
+
+test('Clásico TikTok preset produces byte-for-byte identical ASS to legacy implementation at 1080p and 720p', () => {
+  const sampleBlocks = [
+    { start: 0.1, end: 0.7, text: 'Oye mira,' },
+    { start: 0.7, end: 1.85, text: 'esto es brutal de' },
+  ];
+
+  const expectedLegacy1080 = `[Script Info]
+ScriptType: v4.00+
+PlayResX: 1080
+PlayResY: 1920
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: TikTok,DejaVu Sans,78,&H00FFFFFF,&H0000E5FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,6,0,2,48,48,620,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:00.10,0:00:00.70,TikTok,,0,0,0,,Oye {\\c&H0000E5FF&}mira,{\\c&H00FFFFFF&}
+Dialogue: 0,0:00:00.70,0:00:01.85,TikTok,,0,0,0,,esto es {\\c&H0000E5FF&}brutal{\\c&H00FFFFFF&} de
+`;
+
+  const expectedLegacy720 = `[Script Info]
+ScriptType: v4.00+
+PlayResX: 720
+PlayResY: 1280
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: TikTok,DejaVu Sans,52,&H00FFFFFF,&H0000E5FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,4,0,2,32,32,413,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:00.10,0:00:00.70,TikTok,,0,0,0,,Oye {\\c&H0000E5FF&}mira,{\\c&H00FFFFFF&}
+Dialogue: 0,0:00:00.70,0:00:01.85,TikTok,,0,0,0,,esto es {\\c&H0000E5FF&}brutal{\\c&H00FFFFFF&} de
+`;
+
+  const clasico = BUILTIN_SUBTITLE_STYLES.find((s) => s.id === 'clasico-tiktok');
+  assert.ok(clasico);
+  assert.equal(buildAssFileContent(sampleBlocks, 1080, 1920), expectedLegacy1080);
+  assert.equal(buildAssFileContent(sampleBlocks, 1080, 1920, clasico), expectedLegacy1080);
+  assert.equal(buildAssFileContent(sampleBlocks, 720, 1280), expectedLegacy720);
+  assert.equal(buildAssFileContent(sampleBlocks, 720, 1280, clasico), expectedLegacy720);
+});
+
+test('ASS generation for all 4 built-in presets, karaoke word timings, popAnimation, and 720p/1080p scaling', () => {
+  assert.equal(BUILTIN_SUBTITLE_STYLES.length, 4);
+  const byId = Object.fromEntries(BUILTIN_SUBTITLE_STYLES.map((s) => [s.id, s]));
+
+  const cuts = [
+    {
+      clipIndex: 0,
+      start: 5.0,
+      end: 9.0,
+      words: [
+        { start: 5.1, end: 5.4, text: 'Hola' },
+        { start: 5.45, end: 5.85, text: 'mundo' },
+        { start: 5.9, end: 6.3, text: 'bonito' },
+        { start: 6.35, end: 6.7, text: 'hoy' },
+      ],
+    },
+  ];
+
+  // 1. Karaoke amarillo: maxWordsPerBlock=3 splits into 2 blocks; uppercase + per-word Dialogue + popAnimation on first word only
+  const karaokeStyle = byId['karaoke-amarillo'];
+  const karaokeBlocks = buildSubtitlesFromCutWords(cuts, karaokeStyle);
+  assert.deepEqual(
+    karaokeBlocks.map((b) => b.text),
+    ['Hola mundo bonito', 'hoy']
+  );
+  assert.equal(karaokeBlocks[0].words.length, 3);
+
+  const assKaraoke1080 = buildAssFileContent(karaokeBlocks, 1080, 1920, karaokeStyle);
+  const dialogueLines = assKaraoke1080
+    .split('\n')
+    .filter((l) => l.startsWith('Dialogue:'));
+  // 3 words in block 0 + 1 word in block 1 = 4 Dialogue events
+  assert.equal(dialogueLines.length, 4);
+  // First word has popAnimation tag and highlights HOLA
+  assert.ok(
+    dialogueLines[0].includes(
+      '0:00:00.10,0:00:00.45,TikTok,,0,0,0,,{\\fscx80\\fscy80\\t(0,120,\\fscx100\\fscy100)}{\\c&H0000E5FF&}HOLA{\\c&H00FFFFFF&} MUNDO BONITO'
+    )
+  );
+  // Second word highlights MUNDO without re-triggering popAnimation
+  assert.ok(
+    dialogueLines[1].includes(
+      '0:00:00.45,0:00:00.90,TikTok,,0,0,0,,HOLA {\\c&H0000E5FF&}MUNDO{\\c&H00FFFFFF&} BONITO'
+    )
+  );
+  assert.ok(!dialogueLines[1].includes('\\fscx80'));
+  // Third word highlights BONITO until block end (1.35)
+  assert.ok(
+    dialogueLines[2].includes(
+      '0:00:00.90,0:00:01.35,TikTok,,0,0,0,,HOLA MUNDO {\\c&H0000E5FF&}BONITO{\\c&H00FFFFFF&}'
+    )
+  );
+  // Next block's first word triggers popAnimation again
+  assert.ok(dialogueLines[3].includes('{\\fscx80\\fscy80\\t(0,120,\\fscx100\\fscy100)}'));
+
+  // 2. Minimal: bold=0, highlightMode=none (no inline \c override tags)
+  const minimalStyle = byId['minimal'];
+  const minimalBlocks = buildSubtitlesFromCutWords(cuts, minimalStyle);
+  assert.equal(minimalBlocks.length, 1); // maxWordsPerBlock=5 fits all 4 words
+  const assMinimal1080 = buildAssFileContent(minimalBlocks, 1080, 1920, minimalStyle);
+  const assMinimal720 = buildAssFileContent(minimalBlocks, 720, 1280, minimalStyle);
+  assert.ok(assMinimal1080.includes('Style: TikTok,DejaVu Sans,60,&H00FCFAF8,'));
+  assert.ok(assMinimal1080.includes(',0,0,0,0,100,100,0,0,1,3,3,2,48,48,422,1'));
+  assert.ok(!assMinimal1080.includes('{\\c'));
+  // 720p proportional scaling: 1280 * 3.1% = 40, 1280 * 22% = 282
+  assert.ok(assMinimal720.includes('Style: TikTok,DejaVu Sans,40,&H00FCFAF8,'));
+  assert.ok(assMinimal720.includes(',2,32,32,282,1'));
+
+  // 3. Caja negra: BorderStyle=3 with semi-transparent black boxColor (#000000 @ 0.78 -> alpha 0x38)
+  const boxStyle = byId['caja-negra'];
+  const assBox = buildAssFileContent(minimalBlocks, 1080, 1920, boxStyle);
+  assert.equal(hexToAssColor('#000000', 0.78), '&H38000000');
+  assert.ok(assBox.includes(',&H38000000,&H38000000,-1,0,0,0,100,100,0,0,3,12,0,2,48,48,499,1'));
+});
+
+test('fontsdir is appended to FFmpeg ass filter when custom font exists and falls back cleanly when missing', async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autocut-fonts-'));
+  const fontsDir = path.join(tmpDir, 'fonts');
+  try {
+    await fs.mkdir(fontsDir, { recursive: true });
+    await fs.writeFile(path.join(fontsDir, 'Montserrat-Bold.ttf'), Buffer.from('FAKE_TTF_DATA'));
+
+    const customStyle = normalizeSubtitleStyle({
+      ...DEFAULT_SUBTITLE_STYLE,
+      id: 'custom-font',
+      nombre: 'Custom Font',
+      fontName: 'Montserrat',
+      fontFile: 'Montserrat-Bold.ttf',
+    });
+
+    // Present font -> keeps fontName and returns fontsDir
+    const warningsOk = [];
+    const resolvedOk = await resolveSubtitleStyleWithFonts({
+      style: customStyle,
+      fontsDir,
+      onWarning: (w) => warningsOk.push(w),
+    });
+    assert.equal(resolvedOk.fontFallbackUsed, false);
+    assert.equal(resolvedOk.effectiveStyle.fontName, 'Montserrat');
+    assert.equal(resolvedOk.effectiveFontsDir, fontsDir);
+    assert.equal(warningsOk.length, 0);
+
+    const argsWithFontsDir = buildFinalAssemblyFfmpegArgs({
+      joinedPath: '/tmp/joined.mov',
+      outputPath: '/tmp/out.mp4',
+      profile: QUALITY_PROFILES['1080p'],
+      encoderCodec: 'libx264',
+      subtitleAssPath: '/tmp/subs.ass',
+      fontsDir: resolvedOk.effectiveFontsDir,
+    });
+    const vfWithFonts = argsWithFontsDir[argsWithFontsDir.indexOf('-vf') + 1];
+    assert.ok(vfWithFonts.includes("ass='/tmp/subs.ass':fontsdir='"));
+
+    // Missing font -> logs warning, falls back to DejaVu Sans, omits fontsdir
+    const warningsMissing = [];
+    const resolvedMissing = await resolveSubtitleStyleWithFonts({
+      style: { ...customStyle, fontFile: 'NoExiste.ttf' },
+      fontsDir,
+      onWarning: (w) => warningsMissing.push(w),
+    });
+    assert.equal(resolvedMissing.fontFallbackUsed, true);
+    assert.equal(resolvedMissing.effectiveStyle.fontName, 'DejaVu Sans');
+    assert.equal(resolvedMissing.effectiveStyle.fontFile, undefined);
+    assert.equal(resolvedMissing.effectiveFontsDir, null);
+    assert.deepEqual(warningsMissing, ['subtitle_font_missing']);
+
+    const argsWithoutFontsDir = buildFinalAssemblyFfmpegArgs({
+      joinedPath: '/tmp/joined.mov',
+      outputPath: '/tmp/out.mp4',
+      profile: QUALITY_PROFILES['1080p'],
+      encoderCodec: 'libx264',
+      subtitleAssPath: '/tmp/subs.ass',
+      fontsDir: resolvedMissing.effectiveFontsDir,
+    });
+    const vfWithoutFonts = argsWithoutFontsDir[argsWithoutFontsDir.indexOf('-vf') + 1];
+    assert.equal(vfWithoutFonts, "ass='/tmp/subs.ass'");
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});
+

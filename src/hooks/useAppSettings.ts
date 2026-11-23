@@ -20,6 +20,7 @@ import {
   normalizeWhisperModel,
   sanitizeGeminiModelName,
 } from '../utils/videoPipeline';
+import { DEFAULT_SUBTITLE_STYLE_ID, sanitizeSubtitleStyleId } from '../utils/subtitleStyles';
 import {
   MAX_CACHED_VIDEOS,
   getVideoCacheStats,
@@ -57,6 +58,7 @@ export function createDefaultSettings(): AppSettings {
     brollDensity: 'media',
     brollSmoothPanEnabled: true,
     brollAmbientAudioEnabled: false,
+    defaultSubtitleStyleId: DEFAULT_SUBTITLE_STYLE_ID,
   };
 }
 
@@ -90,6 +92,10 @@ function loadInitialSettings(): AppSettings {
       brollDensity: normalizeBrollDensity(parsed.brollDensity),
       brollSmoothPanEnabled: parsed.brollSmoothPanEnabled !== false,
       brollAmbientAudioEnabled: Boolean(parsed.brollAmbientAudioEnabled),
+      defaultSubtitleStyleId:
+        typeof parsed.defaultSubtitleStyleId === 'string' && parsed.defaultSubtitleStyleId.trim()
+          ? sanitizeSubtitleStyleId(parsed.defaultSubtitleStyleId)
+          : DEFAULT_SUBTITLE_STYLE_ID,
     };
   } catch {
     return defaults;
@@ -144,6 +150,10 @@ export function useAppSettings() {
       brollDensity: normalizeBrollDensity(next.brollDensity),
       brollSmoothPanEnabled: next.brollSmoothPanEnabled !== false,
       brollAmbientAudioEnabled: Boolean(next.brollAmbientAudioEnabled),
+      defaultSubtitleStyleId:
+        typeof next.defaultSubtitleStyleId === 'string' && next.defaultSubtitleStyleId.trim()
+          ? sanitizeSubtitleStyleId(next.defaultSubtitleStyleId)
+          : DEFAULT_SUBTITLE_STYLE_ID,
     };
     setSettings(sanitized);
     logInfo('UI', 'Ajustes guardados', {

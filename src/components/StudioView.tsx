@@ -37,8 +37,10 @@ import type {
   PlanCutFunction,
   QueueItem,
   RenderJobTarget,
+  SubtitleStyleProfile,
   TikTokEditOptions,
 } from '../types';
+import { resolveSubtitleStyleById } from '../utils/subtitleStyles';
 import {
   buildCombinedEditedFilename,
   buildEditedFilename,
@@ -71,9 +73,9 @@ interface StudioViewProps {
     patch: { start_sec?: number; end_sec?: number }
   ) => void;
   onRerenderItem: (itemId: string, qualityOverride?: ExportQuality) => void;
-  onRenderRemote: (itemId: string) => void;
-  onSendToCloud: (itemId: string) => void;
-  onSendToPc: (itemId: string) => void;
+  onRenderRemote: (itemId: string, subtitleStyle?: SubtitleStyleProfile) => void;
+  onSendToCloud: (itemId: string, subtitleStyle?: SubtitleStyleProfile) => void;
+  onSendToPc: (itemId: string, subtitleStyle?: SubtitleStyleProfile) => void;
   onRedoStory: (itemId: string, instruction: string) => void;
   onRetryCloudDispatch: (jobFileId: string) => void;
   onFallbackPcJobToCloud: (jobFileId: string, kind: 'render' | 'analyze') => void;
@@ -104,6 +106,8 @@ interface StudioViewProps {
   onChangeExportQuality: (quality: ExportQuality) => void;
   tiktokOptions: TikTokEditOptions;
   onChangeTikTokOptions: (patch: Partial<TikTokEditOptions>) => void;
+  subtitleProfiles: SubtitleStyleProfile[];
+  defaultSubtitleStyleId: string;
   isRendering: boolean;
   renderProgress: { percent: number; message: string } | null;
   canUploadToDrive: boolean;
@@ -268,6 +272,8 @@ export function StudioView({
   onChangeExportQuality,
   tiktokOptions,
   onChangeTikTokOptions,
+  subtitleProfiles,
+  defaultSubtitleStyleId,
   isRendering,
   renderProgress,
   canUploadToDrive,
@@ -275,6 +281,20 @@ export function StudioView({
   onGoToGallery,
   onGoToSettings,
 }: StudioViewProps) {
+  const [selectedSubtitleStyleId, setSelectedSubtitleStyleId] = useState<string>(
+    defaultSubtitleStyleId
+  );
+
+  useEffect(() => {
+    setSelectedSubtitleStyleId((prev) =>
+      subtitleProfiles.some((p) => p.id === prev) ? prev : defaultSubtitleStyleId
+    );
+  }, [defaultSubtitleStyleId, subtitleProfiles]);
+
+  const activeSubtitleStyle = useMemo(
+    () => resolveSubtitleStyleById(subtitleProfiles, selectedSubtitleStyleId),
+    [subtitleProfiles, selectedSubtitleStyleId]
+  );
   const analyzedItems = useMemo(() => items.filter((i) => Boolean(i.analysis)), [items]);
   const currentItem = useMemo(
     () => analyzedItems.find((i) => i.id === selectedItemId) ?? analyzedItems[0] ?? null,
@@ -812,6 +832,43 @@ export function StudioView({
                     : 'No solicitados'}
                 </button>
               </div>
+
+              {/* Subtitle Style Profile Selector before rendering */}
+              <div
+                data-testid="studio-subtitle-style-row"
+                className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-[#00f0ff]/12"
+              >
+                <label
+                  htmlFor="studio-subtitle-style-select"
+                  className="inline-flex items-center gap-1.5 font-mono text-[10px] font-medium text-[#94A8C4]"
+                >
+                  <Captions className="h-3.5 w-3.5 text-[#fcee0a]" aria-hidden="true" />
+                  Estilo subtítulos
+                </label>
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <select
+                    id="studio-subtitle-style-select"
+                    data-testid="studio-subtitle-style-select"
+                    value={activeSubtitleStyle.id}
+                    onChange={(e) => setSelectedSubtitleStyleId(e.target.value)}
+                    className="h-8 max-w-[180px] rounded-sm border border-[#00f0ff]/35 bg-[#05060a] px-2 font-mono text-[11px] text-[#EEF5FF] focus:border-[#00f0ff] focus:outline-none"
+                  >
+                    {subtitleProfiles.map((profile) => (
+                      <option key={profile.id} value={profile.id}>
+                        {profile.nombre}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    onClick={onGoToSettings}
+                    title="Editar perfiles de subtítulos en Ajustes"
+                    className="inline-flex h-8 items-center rounded-sm border border-[#00f0ff]/20 bg-[#05060a] px-2 font-mono text-[10px] text-[#00f0ff] hover:border-[#00f0ff]/55"
+                  >
+                    Editar
+                  </button>
+                </div>
+              </div>
             </div>
 
             {/* Primary CTA: Auto-routed Remote Render (PC primary + Cloud fallback) */}
@@ -843,7 +900,7 @@ export function StudioView({
               <button
                 type="button"
                 data-testid="studio-render-cloud-btn"
-                onClick={() => onRenderRemote(currentItem.id)}
+                onClick={() => onRenderRemote(currentItem.id, activeSubtitleStyle)}
                 disabled={
                   (resolvedTarget === 'cloud' && !cloudRenderConfigured) ||
                   isSendingToPc ||
@@ -1081,7 +1138,7 @@ export function StudioView({
                   <button
                     type="button"
                     data-testid="studio-send-to-pc-btn"
-                    onClick={() => onSendToPc(currentItem.id)}
+                    onClick={() => onSendToPc(currentItem.id, activeSubtitleStyle)}
                     disabled={isSendingToPc || enabledCuts.length === 0 || !canUploadToDrive}
                     title={
                       !canUploadToDrive
@@ -1107,7 +1164,7 @@ export function StudioView({
                     <button
                       type="button"
                       data-testid="studio-force-cloud-btn"
-                      onClick={() => onSendToCloud(currentItem.id)}
+                      onClick={() => onSendToCloud(currentItem.id, activeSubtitleStyle)}
                       disabled={isSendingToPc || enabledCuts.length === 0 || !canUploadToDrive}
                       title="Dispara el render directamente en GitHub Actions aunque el PC esté en línea"
                       className="flex min-h-[42px] w-full items-center justify-center gap-2 rounded-md border border-[#ff2a85]/45 bg-[#ff2a85]/10 px-3 py-2 text-xs font-semibold text-[#EEF5FF] hover:bg-[#ff2a85]/20 hover:border-[#ff2a85] disabled:opacity-45 transition-colors"

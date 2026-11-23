@@ -27,6 +27,7 @@ import type {
   PcWorkerStatus,
   ProcessEngineMode,
   RenderJobTarget,
+  SubtitleStyleProfile,
   WatchIntervalSec,
   WhisperModelId,
 } from '../types';
@@ -45,6 +46,7 @@ import {
   sanitizeGeminiModelName,
 } from '../utils/videoPipeline';
 import { GoogleSignInButton } from './GoogleSignInButton';
+import { SubtitleStyleEditor } from './SubtitleStyleEditor';
 
 interface SettingsViewProps {
   settings: AppSettings;
@@ -65,6 +67,24 @@ interface SettingsViewProps {
   isClearingCache: boolean;
   onClearVideoCache: () => void;
   onCopyDiagnosticReport: () => Promise<boolean>;
+  subtitleProfiles: SubtitleStyleProfile[];
+  driveFonts: string[];
+  isSyncingSubtitleStyles: boolean;
+  isSavingSubtitleStyle: boolean;
+  subtitleStylesSyncSource: 'local' | 'drive';
+  onChangeDefaultSubtitleStyleId: (styleId: string) => void;
+  onSyncSubtitleStyles: () => void;
+  onCreateSubtitleProfile: (
+    base?: SubtitleStyleProfile,
+    customName?: string
+  ) => Promise<SubtitleStyleProfile | null>;
+  onDuplicateSubtitleProfile: (
+    source: SubtitleStyleProfile
+  ) => Promise<SubtitleStyleProfile | null>;
+  onSaveSubtitleProfile: (
+    profile: SubtitleStyleProfile
+  ) => Promise<SubtitleStyleProfile | null>;
+  onDeleteSubtitleProfile: (profileId: string) => Promise<boolean>;
 }
 
 const CLOUD_SETUP_DOC_URL =
@@ -91,6 +111,17 @@ export function SettingsView({
   isClearingCache,
   onClearVideoCache,
   onCopyDiagnosticReport,
+  subtitleProfiles,
+  driveFonts,
+  isSyncingSubtitleStyles,
+  isSavingSubtitleStyle,
+  subtitleStylesSyncSource,
+  onChangeDefaultSubtitleStyleId,
+  onSyncSubtitleStyles,
+  onCreateSubtitleProfile,
+  onDuplicateSubtitleProfile,
+  onSaveSubtitleProfile,
+  onDeleteSubtitleProfile,
 }: SettingsViewProps) {
   const [folderInput, setFolderInput] = useState(settings.folderId);
   const [model, setModel] = useState<GeminiModelId>(settings.model);
@@ -185,6 +216,7 @@ export function SettingsView({
       brollDensity,
       brollSmoothPanEnabled,
       brollAmbientAudioEnabled,
+      defaultSubtitleStyleId: settings.defaultSubtitleStyleId,
     });
     setFolderInput(parsedFolderId);
     setModel(cleanedModel);
@@ -1088,6 +1120,24 @@ export function SettingsView({
           </p>
         </section>
       </div>
+
+      {/* Full-width Subtitle Style Profiles Editor & 9:16 Live Preview */}
+      <SubtitleStyleEditor
+        profiles={subtitleProfiles}
+        defaultStyleId={settings.defaultSubtitleStyleId}
+        driveFonts={driveFonts}
+        isDriveConnected={Boolean(user)}
+        hasFolderId={Boolean(settings.folderId)}
+        isSyncingStyles={isSyncingSubtitleStyles}
+        isSavingStyle={isSavingSubtitleStyle}
+        lastSyncSource={subtitleStylesSyncSource}
+        onChangeDefaultStyleId={onChangeDefaultSubtitleStyleId}
+        onSyncStyles={onSyncSubtitleStyles}
+        onCreateProfile={onCreateSubtitleProfile}
+        onDuplicateProfile={onDuplicateSubtitleProfile}
+        onSaveProfile={onSaveSubtitleProfile}
+        onDeleteProfile={onDeleteSubtitleProfile}
+      />
     </div>
   );
 }

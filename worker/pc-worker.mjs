@@ -59,6 +59,8 @@ export { buildAssFileContent, escapePathForFfmpegFilter, sliceSubtitlesForSegmen
 const WORKER_VERSION = '2.0.0';
 const JOBS_DIR_NAME = '_AutoCut_Jobs';
 const OUTPUT_DIR_NAME = '_AutoCut_Output';
+const STYLES_DIR_NAME = '_AutoCut_Styles';
+const FONTS_DIR_NAME = 'fonts';
 const CACHE_DIR_NAME = '_cache';
 const SOURCES_DIR_NAME = '_sources';
 const WORKER_STATUS_FILENAME = '_worker_status.json';
@@ -713,6 +715,32 @@ async function processRenderJob({
       resolvedPaths.push(found);
     }
 
+    // Stage optional custom fonts from <driveDir>/_AutoCut_Styles/fonts/ into tempWorkDir/fonts/
+    let preparedFontsDir = null;
+    const requestedFontFile = claimedManifest.options?.subtitleStyle?.fontFile;
+    if (typeof requestedFontFile === 'string' && requestedFontFile.trim()) {
+      const sourceFontsDir = path.join(driveDir, STYLES_DIR_NAME, FONTS_DIR_NAME);
+      const localFontsDir = path.join(tempWorkDir, 'fonts');
+      try {
+        const fontEntries = await fsp.readdir(sourceFontsDir, { withFileTypes: true });
+        const fontFiles = fontEntries.filter(
+          (e) => e.isFile() && /\.(ttf|otf)$/i.test(e.name)
+        );
+        if (fontFiles.length > 0) {
+          await fsp.mkdir(localFontsDir, { recursive: true });
+          for (const entry of fontFiles) {
+            await fsp.copyFile(
+              path.join(sourceFontsDir, entry.name),
+              path.join(localFontsDir, entry.name)
+            );
+          }
+          preparedFontsDir = localFontsDir;
+        }
+      } catch {
+        // Folder missing -> renderJob will fall back to default font and invoke onWarning
+      }
+    }
+
     // Preserve exact render-core.mjs invocation and encoder args (NVENC / libx264)
     const tempFinalPath = await renderJob({
       manifest: claimedManifest,
@@ -720,7 +748,11 @@ async function processRenderJob({
       workDir: tempWorkDir,
       ffmpegBin,
       zscaleAvailable,
+      fontsDir: preparedFontsDir,
       encoder: { ...encoder, cpuPreset: 'fast' },
+      onWarning: (code) => {
+        logSafe('WARN', code || 'render_warning', { jobId });
+      },
       onProgress: async (evt) => {
         workingManifest.progress = Math.max(5, Math.min(92, Math.round(evt.percent)));
         await writeJobManifest(jobFilePath, workingManifest);

@@ -17,10 +17,15 @@ import type {
   RenderJobOverlay,
   RenderJobStatus,
   SubtitleBlock,
+  SubtitleStyleProfile,
   TikTokEditOptions,
   VideoCut,
   WhisperModelId,
 } from '../types';
+import {
+  DEFAULT_SUBTITLE_STYLE,
+  normalizeSubtitleStyleProfile,
+} from './subtitleStyles';
 
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.webm']);
 const EDITED_MARKER = '_EDITADO';
@@ -1551,6 +1556,7 @@ export function buildRenderJobManifest(input: {
   >;
   exportQuality: ExportQuality;
   tiktokOptions: TikTokEditOptions;
+  subtitleStyle?: SubtitleStyleProfile;
   voiceoverBrollEnabled?: boolean;
   brollDensity?: BrollDensity;
   brollSmoothPanEnabled?: boolean;
@@ -1691,6 +1697,7 @@ export function buildRenderJobManifest(input: {
       removeSilences: normalizedOpts.silenceTrimEnabled,
       normalizeAudio: normalizedOpts.audioNormalizeEnabled,
       subtitlesEnabled: normalizedOpts.subtitlesEnabled,
+      subtitleStyle: normalizeSubtitleStyleProfile(input.subtitleStyle, DEFAULT_SUBTITLE_STYLE),
       voiceoverBrollEnabled,
       brollDensity,
       brollSmoothPanEnabled,

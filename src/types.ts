@@ -22,6 +22,33 @@ export type ProcessEngineMode = 'auto' | 'pc' | 'cloud';
 
 export type BrollDensity = 'baja' | 'media' | 'alta';
 
+export type SubtitleBackgroundBox = 'none' | 'box';
+
+export type SubtitleHighlightMode = 'none' | 'longest_word' | 'karaoke';
+
+export interface SubtitleStyleProfile {
+  id: string;
+  nombre: string;
+  fontName: string;
+  fontFile?: string;
+  fontSizePct: number;
+  bold: boolean;
+  uppercase: boolean;
+  primaryColor: string;
+  highlightColor: string;
+  outlineColor: string;
+  outlineWidth: number;
+  shadow: number;
+  backgroundBox: SubtitleBackgroundBox;
+  boxColor: string;
+  boxOpacity: number;
+  positionPct: number;
+  maxWordsPerBlock: number;
+  maxCharsPerBlock: number;
+  highlightMode: SubtitleHighlightMode;
+  popAnimation: boolean;
+}
+
 export interface PcWorkerStatus {
   lastSeen: string;
   version?: string;
@@ -74,6 +101,7 @@ export interface AppSettings {
   brollDensity: BrollDensity;
   brollSmoothPanEnabled: boolean;
   brollAmbientAudioEnabled: boolean;
+  defaultSubtitleStyleId: string;
 }
 
 export interface DriveFileMeta {
@@ -298,6 +326,7 @@ export interface RenderJobOptions {
   normalizeAudio: boolean;
   subtitlesEnabled: boolean;
   subtitlesData?: RenderJobSubtitleBlock[];
+  subtitleStyle?: SubtitleStyleProfile;
   voiceoverBrollEnabled?: boolean;
   brollDensity?: BrollDensity;
   brollSmoothPanEnabled?: boolean;
