@@ -20,9 +20,23 @@ import {
 } from './render-core.mjs';
 import {
   RotatingFileLogger,
+  buildWhisperEnv,
   formatSafePcLog,
+  parseCliArgs,
   shouldPcWorkerClaimJob,
+  writeWorkerHeartbeat,
 } from './pc-worker.mjs';
+import {
+  cleanEditedRawVideos,
+  cleanupStaleTempDirs,
+  collectStorageInfo,
+  createTempWorkDir,
+  emptyWorkDir,
+  executeCleanupScopes,
+  getWorkDirConfig,
+  processCleanupCommandFile,
+  releaseTempWorkDir,
+} from './cleanup.mjs';
 import {
   RESUMABLE_CHUNK_BYTES,
   buildTranscriptCacheFilename,
@@ -41,7 +55,9 @@ import {
   enforceTargetDuration,
   formatSentencesForPrompt,
   mapPhaseBOverlaysToCuts,
+  parseWhisperDeviceLine,
   runPhaseBWithValidationRetry,
+  stripBenignWhisperStderr,
   sortClipsChronologically,
   splitTranscriptIntoSentences,
   splitWordsBySilencePauses,
@@ -1549,3 +1565,423 @@ test('Voz sobre recursos FFmpeg args: identical without overlays, horizontal pan
 
 
 
+
+// ---------------------------------------------------------------------------
+// PC local: DLL de CUDA, carpeta de trabajo, limpieza y almacenamiento
+// ---------------------------------------------------------------------------
+
+function findPythonBin() {
+  for (const candidate of ['python3', 'python']) {
+    const check = spawnSync(candidate, ['--version'], { encoding: 'utf8' });
+    if (check.status === 0) return candidate;
+  }
+  return null;
+}
+
+async function writeFileOfSize(filePath, bytes = 1024) {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, Buffer.alloc(bytes, 1));
+}
+
+async function setAgeHours(target, hours) {
+  const when = new Date(Date.now() - hours * 3600 * 1000);
+  await fs.utimes(target, when, when);
+}
+
+async function pathExists(target) {
+  try {
+    await fs.access(target);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const MB = 1024 * 1024;
+
+test('transcribe.py registra site-packages/nvidia/*/bin con os.add_dll_directory y PATH al simular win32 (y no hace nada en otras plataformas)', async (t) => {
+  const pythonBin = findPythonBin();
+  if (!pythonBin) {
+    t.skip('Python runtime not available in test environment');
+    return;
+  }
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autocut-dll-test-'));
+  try {
+    const nvidiaRoot = path.join(tmpDir, 'site-packages', 'nvidia');
+    await fs.mkdir(path.join(nvidiaRoot, 'cublas', 'bin'), { recursive: true });
+    await fs.mkdir(path.join(nvidiaRoot, 'cudnn', 'bin'), { recursive: true });
+    await fs.mkdir(path.join(nvidiaRoot, 'cuda_runtime', 'include'), { recursive: true });
+
+    const workerDir = path.resolve(process.cwd(), 'worker');
+    const script = [
+      'import json, sys',
+      `sys.path.insert(0, ${JSON.stringify(workerDir)})`,
+      'import transcribe',
+      'class Spec:',
+      `    submodule_search_locations = [${JSON.stringify(nvidiaRoot)}]`,
+      'calls = []',
+      'env = {"PATH": "base"}',
+      'win = transcribe.register_cuda_dll_dirs(platform="win32", find_spec=lambda name: Spec() if name == "nvidia" else None, add_dll_directory=calls.append, environ=env)',
+      'env2 = {"PATH": "base"}',
+      'lin = transcribe.register_cuda_dll_dirs(platform="linux", find_spec=lambda name: Spec(), add_dll_directory=calls.append, environ=env2)',
+      'none = transcribe.register_cuda_dll_dirs(platform="win32", find_spec=lambda name: None, add_dll_directory=calls.append, environ={"PATH": "x"})',
+      'print(json.dumps({"win": win, "calls": calls, "path": env["PATH"], "lin": lin, "path2": env2["PATH"], "none": none}))',
+    ].join('\n');
+
+    const res = spawnSync(pythonBin, ['-c', script], { encoding: 'utf8' });
+    assert.equal(res.status, 0, `python failed: ${res.stderr}`);
+    const out = JSON.parse(res.stdout.trim());
+
+    const expected = [path.join(nvidiaRoot, 'cublas', 'bin'), path.join(nvidiaRoot, 'cudnn', 'bin')];
+    assert.deepEqual(out.win, expected);
+    assert.deepEqual(out.calls, expected);
+    assert.ok(out.path.startsWith(expected.join(path.delimiter)), `PATH: ${out.path}`);
+    assert.ok(out.path.endsWith('base'));
+    assert.deepEqual(out.lin, []);
+    assert.equal(out.path2, 'base');
+    assert.deepEqual(out.none, []);
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('transcribe.py escribe "whisper-device: cuda/float16" cuando CUDA carga y el filtro no cuenta el aviso de Hugging Face como error', async (t) => {
+  const pythonBin = findPythonBin();
+  if (!pythonBin) {
+    t.skip('Python runtime not available in test environment');
+    return;
+  }
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autocut-device-test-'));
+  try {
+    await fs.writeFile(
+      path.join(tmpDir, 'faster_whisper.py'),
+      [
+        'class _Info:',
+        '    language = "es"',
+        '    duration = 1.0',
+        'class WhisperModel:',
+        '    def __init__(self, model_size, device="cpu", compute_type="int8", **kwargs):',
+        '        self.device = device',
+        '    def transcribe(self, input_path, **kwargs):',
+        '        return ([], _Info())',
+      ].join('\n'),
+      'utf8'
+    );
+    const dummyAudio = path.join(tmpDir, 'dummy.wav');
+    const outJson = path.join(tmpDir, 'out.json');
+    await fs.writeFile(dummyAudio, 'dummy', 'utf8');
+
+    const res = spawnSync(
+      pythonBin,
+      [path.resolve(process.cwd(), 'worker', 'transcribe.py'), '--in', dummyAudio, '--out', outJson, '--device', 'auto'],
+      { encoding: 'utf8', env: { ...process.env, PYTHONPATH: tmpDir } }
+    );
+    assert.equal(res.status, 0, `transcribe.py failed: ${res.stderr}`);
+    assert.match(res.stderr, /whisper-device: cuda\/float16/);
+    assert.ok(!res.stderr.includes('fallback-cpu'));
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+
+  assert.deepEqual(parseWhisperDeviceLine('x\nwhisper-device: cpu/int8\n'), { device: 'cpu', computeType: 'int8' });
+  assert.deepEqual(parseWhisperDeviceLine('whisper-device: cuda/float16'), { device: 'cuda', computeType: 'float16' });
+  assert.equal(parseWhisperDeviceLine('sin linea'), null);
+
+  const noisy = [
+    'Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits.',
+    'whisper-device: cpu/int8',
+    'Traceback: boom real',
+  ].join('\n');
+  assert.equal(stripBenignWhisperStderr(noisy), 'Traceback: boom real');
+});
+
+test('AUTOCUT_WORK_DIR: se crea si no existe, aloja las carpetas temporales y HF_HOME llega a transcribe.py', async () => {
+  const base = await fs.mkdtemp(path.join(os.tmpdir(), 'autocut-workdir-test-'));
+  try {
+    const configured = path.join(base, 'no', 'existe', 'aun');
+    const cfg = getWorkDirConfig({ AUTOCUT_WORK_DIR: configured });
+    assert.equal(cfg.workDir, path.resolve(configured));
+    assert.equal(cfg.dedicated, true);
+
+    const fallback = getWorkDirConfig({});
+    assert.equal(fallback.workDir, os.tmpdir());
+    assert.equal(fallback.dedicated, false);
+
+    assert.equal(await pathExists(configured), false);
+    const tempDir = await createTempWorkDir({ workDir: cfg.workDir, prefix: 'autocut_job_abc_' });
+    assert.equal(path.dirname(tempDir), path.resolve(configured));
+    assert.ok(path.basename(tempDir).startsWith('autocut_job_abc_'));
+    assert.equal(await pathExists(tempDir), true);
+    await releaseTempWorkDir(tempDir);
+    assert.equal(await pathExists(tempDir), false);
+
+    const cli = parseCliArgs([], { AUTOCUT_WORK_DIR: configured, HF_HOME: 'E:\\cache\\hf', AUTOCUT_DRIVE_DIR: 'G:\\x' });
+    assert.equal(cli.workDir, configured);
+    assert.equal(cli.hfHome, 'E:\\cache\\hf');
+    assert.equal(buildWhisperEnv({ HF_HOME: 'E:\\cache\\hf', OTRA: '1' }).HF_HOME, 'E:\\cache\\hf');
+    assert.equal(buildWhisperEnv({ OTRA: '1' }).OTRA, '1');
+  } finally {
+    await fs.rm(base, { recursive: true, force: true });
+  }
+});
+
+test('Limpieza automática: borra autocut_* con más de 24 h salvo jobs en curso y no toca otras carpetas', async () => {
+  const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autocut-stale-test-'));
+  try {
+    const old = path.join(workDir, 'autocut_job_old_1');
+    const recent = path.join(workDir, 'autocut_job_recent_2');
+    const foreign = path.join(workDir, 'otra_carpeta_vieja');
+    for (const dir of [old, recent, foreign]) {
+      await writeFileOfSize(path.join(dir, 'f.bin'), MB);
+    }
+    const active = await createTempWorkDir({ workDir, prefix: 'autocut_pc_analyze_run_' });
+    await writeFileOfSize(path.join(active, 'f.bin'), MB);
+
+    await setAgeHours(old, 30);
+    await setAgeHours(foreign, 30);
+    await setAgeHours(active, 48); // en curso pero muy antigua: no se toca
+
+    const res = await cleanupStaleTempDirs({ workDir });
+    assert.equal(res.removed, 1);
+    assert.equal(Math.round(res.bytes / MB), 1);
+    assert.equal(await pathExists(old), false);
+    assert.equal(await pathExists(recent), true);
+    assert.equal(await pathExists(foreign), true);
+    assert.equal(await pathExists(active), true);
+
+    await releaseTempWorkDir(active);
+  } finally {
+    await fs.rm(workDir, { recursive: true, force: true });
+  }
+});
+
+async function buildDriveFixture() {
+  const driveDir = await fs.mkdtemp(path.join(os.tmpdir(), 'autocut-drive-test-'));
+  const jobsDir = path.join(driveDir, '_AutoCut_Jobs');
+  const outputDir = path.join(driveDir, '_AutoCut_Output');
+  await fs.mkdir(jobsDir, { recursive: true });
+  await fs.mkdir(outputDir, { recursive: true });
+
+  const raw = (name) => writeFileOfSize(path.join(driveDir, name), MB);
+  const out = (name) => writeFileOfSize(path.join(outputDir, name), 2048);
+  const job = (file, manifest) =>
+    fs.writeFile(path.join(jobsDir, file), JSON.stringify(manifest), 'utf8');
+  const daysAgo = (d) => new Date(Date.now() - d * 24 * 3600 * 1000).toISOString();
+
+  // Editados por job completado (fuente principal)
+  await raw('a.mp4');
+  await out('a_EDITADO_X.mp4');
+  await job('job_a.json', {
+    jobId: 'a', status: 'completed', updatedAt: daysAgo(10),
+    outputFileName: 'a_EDITADO_X.mp4', sourceFiles: [{ name: 'a.mp4' }],
+  });
+  // Multi-Clip: un MP4 sale de dos brutos
+  await raw('m1.mov');
+  await raw('m2.mov');
+  await out('proy_COMBINADO_EDITADO_Z.mp4');
+  await job('job_multi.json', {
+    jobId: 'multi', status: 'completed', updatedAt: daysAgo(1),
+    outputFileName: 'proy_COMBINADO_EDITADO_Z.mp4',
+    sourceFiles: [{ name: 'm1.mov' }, { name: 'm2.mov' }],
+  });
+  // Respaldo: regla de la PWA (sin job)
+  await raw('c.mp4');
+  await out('c_EDITADO_Y.mp4');
+  // Job completado pero MP4 final ausente: se conserva
+  await raw('b.mp4');
+  await job('job_b.json', {
+    jobId: 'b', status: 'completed', updatedAt: daysAgo(10),
+    outputFileName: 'b_EDITADO_X.mp4', sourceFiles: [{ name: 'b.mp4' }],
+  });
+  // Sin nada: se conserva
+  await raw('d.mp4');
+  // Con MP4 final pero citado por un job pendiente: se conserva
+  await raw('e.mp4');
+  await out('e_EDITADO_X.mp4');
+  await job('job_e_pending.json', {
+    jobId: 'e', status: 'pending', createdAt: daysAgo(10), sourceFiles: [{ name: 'e.mp4' }],
+  });
+  // Ambiguo: mismo nombre base con dos extensiones y sin job
+  await raw('dup.mp4');
+  await raw('dup.mov');
+  await out('dup_EDITADO_X.mp4');
+  // Fuera de la carpeta raíz: no se toca nunca
+  await writeFileOfSize(path.join(driveDir, 'sub', 'f.mp4'), MB);
+  await out('f_EDITADO_X.mp4');
+
+  // Manifiestos para jobs_terminados
+  await job('analyze_old.json', { jobId: 'o', kind: 'analyze', status: 'analyzed', updatedAt: daysAgo(9), sourceFiles: [] });
+  await job('analyze_err.json', { jobId: 'r', kind: 'analyze', status: 'error', updatedAt: daysAgo(30), sourceFiles: [] });
+  await job('analyze_recent.json', { jobId: 'n', kind: 'analyze', status: 'analyzed', updatedAt: daysAgo(2), sourceFiles: [] });
+  await job('job_old_pending.json', { jobId: 'p', status: 'pending', updatedAt: daysAgo(40), sourceFiles: [{ name: 'zzz.mp4' }] });
+
+  return { driveDir, jobsDir, outputDir };
+}
+
+test('brutos_editados solo borra brutos de la raíz con MP4 final (job completado, Multi-Clip o regla PWA) y preview no borra nada', async () => {
+  const { driveDir } = await buildDriveFixture();
+  try {
+    const shouldDelete = ['a.mp4', 'm1.mov', 'm2.mov', 'c.mp4'];
+    const shouldKeep = ['b.mp4', 'd.mp4', 'e.mp4', 'dup.mp4', 'dup.mov', path.join('sub', 'f.mp4')];
+
+    const preview = await executeCleanupScopes({
+      scopes: ['preview_brutos_editados'],
+      driveDir, workDir: path.join(driveDir, 'no-usada'), dedicated: true,
+    });
+    assert.equal(preview.status, 'done');
+    assert.equal(preview.liberadoMB, 0);
+    assert.deepEqual(preview.detalle.preview_brutos_editados, { archivos: 4, mb: 4 });
+    for (const name of [...shouldDelete, ...shouldKeep]) {
+      assert.equal(await pathExists(path.join(driveDir, name)), true, `preview no debe borrar ${name}`);
+    }
+
+    const real = await cleanEditedRawVideos({ driveDir });
+    assert.equal(real.archivos, 4);
+    for (const name of shouldDelete) {
+      assert.equal(await pathExists(path.join(driveDir, name)), false, `${name} debía borrarse`);
+    }
+    for (const name of shouldKeep) {
+      assert.equal(await pathExists(path.join(driveDir, name)), true, `${name} debía conservarse`);
+    }
+    const outputs = await fs.readdir(path.join(driveDir, '_AutoCut_Output'));
+    assert.equal(outputs.length, 6);
+  } finally {
+    await fs.rm(driveDir, { recursive: true, force: true });
+  }
+});
+
+test('jobs_terminados borra manifiestos completed/analyzed/error con más de 7 días; con ambos scopes brutos_editados corre antes', async () => {
+  const { driveDir, jobsDir } = await buildDriveFixture();
+  try {
+    const res = await executeCleanupScopes({
+      scopes: ['jobs_terminados', 'brutos_editados'], // orden invertido a propósito
+      driveDir, workDir: path.join(driveDir, 'no-usada'), dedicated: true,
+    });
+    assert.equal(res.status, 'done');
+    // Se borraron los brutos (necesitaban los job_*.json) y también los manifiestos viejos
+    assert.equal(res.detalle.brutos_editados.archivos, 4);
+    assert.equal(await pathExists(path.join(driveDir, 'a.mp4')), false);
+    assert.equal(await pathExists(path.join(driveDir, 'm1.mov')), false);
+
+    assert.equal(res.detalle.jobs_terminados.archivos, 4); // job_a, job_b, analyze_old, analyze_err
+    assert.equal(await pathExists(path.join(jobsDir, 'job_a.json')), false);
+    assert.equal(await pathExists(path.join(jobsDir, 'job_b.json')), false);
+    assert.equal(await pathExists(path.join(jobsDir, 'analyze_old.json')), false);
+    assert.equal(await pathExists(path.join(jobsDir, 'analyze_err.json')), false);
+    assert.equal(await pathExists(path.join(jobsDir, 'job_multi.json')), true); // 1 día
+    assert.equal(await pathExists(path.join(jobsDir, 'analyze_recent.json')), true); // 2 días
+    assert.equal(await pathExists(path.join(jobsDir, 'job_old_pending.json')), true); // no terminado
+    assert.equal(await pathExists(path.join(jobsDir, 'job_e_pending.json')), true);
+    assert.ok(res.liberadoMB >= 4);
+  } finally {
+    await fs.rm(driveDir, { recursive: true, force: true });
+  }
+});
+
+test('temp_pc vacía la carpeta de trabajo salvo el job en curso; sin carpeta dedicada solo toca autocut_*; rechaza solaparse con Drive', async () => {
+  const base = await fs.mkdtemp(path.join(os.tmpdir(), 'autocut-temp-pc-test-'));
+  const driveDir = path.join(base, 'drive');
+  await fs.mkdir(driveDir, { recursive: true });
+  try {
+    const workDir = path.join(base, 'work');
+    await writeFileOfSize(path.join(workDir, 'autocut_job_x_1', 'a.bin'), MB);
+    await writeFileOfSize(path.join(workDir, 'suelto.tmp'), MB);
+    const active = await createTempWorkDir({ workDir, prefix: 'autocut_job_live_' });
+    await writeFileOfSize(path.join(active, 'seg.mp4'), MB);
+
+    const res = await executeCleanupScopes({ scopes: ['temp_pc'], driveDir, workDir, dedicated: true });
+    assert.equal(res.status, 'done');
+    assert.equal(res.detalle.temp_pc.archivos, 2);
+    assert.equal(res.detalle.temp_pc.mb, 2);
+    assert.equal(await pathExists(path.join(active, 'seg.mp4')), true);
+    assert.equal(await pathExists(path.join(workDir, 'suelto.tmp')), false);
+    assert.equal(await pathExists(path.join(workDir, 'autocut_job_x_1')), false);
+    await releaseTempWorkDir(active);
+
+    // Carpeta no dedicada (equivale a os.tmpdir()): solo autocut_*
+    const shared = path.join(base, 'shared');
+    await writeFileOfSize(path.join(shared, 'autocut_job_y_1', 'a.bin'), 1024);
+    await writeFileOfSize(path.join(shared, 'documento_ajeno.txt'), 1024);
+    const soft = await emptyWorkDir({ workDir: shared, dedicated: false, driveDir });
+    assert.equal(soft.archivos, 1);
+    assert.equal(await pathExists(path.join(shared, 'documento_ajeno.txt')), true);
+
+    // Solapamiento con la carpeta de Drive: rechazado, no se borra nada
+    await writeFileOfSize(path.join(driveDir, 'bruto.mp4'), 1024);
+    const bad = await executeCleanupScopes({ scopes: ['temp_pc'], driveDir, workDir: driveDir, dedicated: true });
+    assert.equal(bad.status, 'error');
+    assert.ok(bad.detalle.temp_pc.error);
+    assert.equal(await pathExists(path.join(driveDir, 'bruto.mp4')), true);
+  } finally {
+    await fs.rm(base, { recursive: true, force: true });
+  }
+});
+
+test('cleanup_<id>.json: el worker reescribe el mismo archivo con status done/error, liberadoMB, detalle y finishedAt', async () => {
+  const { driveDir, jobsDir } = await buildDriveFixture();
+  try {
+    const commandsDir = path.join(jobsDir, '_commands');
+    await fs.mkdir(commandsDir, { recursive: true });
+    const ctx = { driveDir, workDir: path.join(driveDir, 'no-usada'), dedicated: true };
+
+    const previewFile = path.join(commandsDir, 'cleanup_p1.json');
+    // Con BOM a propósito: PowerShell 5.1 lo añade al escribir JSON en UTF-8
+    const bom = String.fromCharCode(0xfeff);
+    await fs.writeFile(previewFile, bom + JSON.stringify({ scopes: ['preview_brutos_editados'], createdAt: new Date().toISOString(), status: 'pending' }), 'utf8');
+    const done = await processCleanupCommandFile(previewFile, ctx);
+    const saved = JSON.parse(await fs.readFile(previewFile, 'utf8'));
+    assert.equal(done.status, 'done');
+    assert.equal(saved.status, 'done');
+    assert.equal(saved.liberadoMB, 0);
+    assert.equal(saved.detalle.preview_brutos_editados.archivos, 4);
+    assert.deepEqual(saved.scopes, ['preview_brutos_editados']);
+    assert.ok(Date.parse(saved.finishedAt) > 0);
+    assert.equal(await pathExists(path.join(driveDir, 'a.mp4')), true);
+
+    // Ya no está pendiente: no se vuelve a ejecutar
+    assert.equal(await processCleanupCommandFile(previewFile, ctx), null);
+
+    const badFile = path.join(commandsDir, 'cleanup_p2.json');
+    await fs.writeFile(
+      badFile,
+      JSON.stringify({ scopes: ['borrar_todo'], createdAt: new Date().toISOString(), status: 'pending' }),
+      'utf8'
+    );
+    await processCleanupCommandFile(badFile, ctx);
+    const savedBad = JSON.parse(await fs.readFile(badFile, 'utf8'));
+    assert.equal(savedBad.status, 'error');
+    assert.deepEqual(savedBad.detalle.scopes_desconocidos, ['borrar_todo']);
+    assert.equal(await pathExists(path.join(driveDir, 'd.mp4')), true);
+  } finally {
+    await fs.rm(driveDir, { recursive: true, force: true });
+  }
+});
+
+test('Latido: writeWorkerHeartbeat incluye storage { workDirMB, hfCacheMB, freeGB } y collectStorageInfo mide carpetas reales', async () => {
+  const base = await fs.mkdtemp(path.join(os.tmpdir(), 'autocut-storage-test-'));
+  try {
+    const workDir = path.join(base, 'work');
+    const hfHome = path.join(base, 'hf');
+    await writeFileOfSize(path.join(workDir, 'autocut_job_1', 'a.bin'), 2 * MB);
+    await writeFileOfSize(path.join(hfHome, 'hub', 'modelo.bin'), 3 * MB);
+
+    const storage = await collectStorageInfo({ workDir, dedicated: true, hfHome });
+    assert.equal(storage.workDirMB, 2);
+    assert.equal(storage.hfCacheMB, 3);
+    assert.equal(typeof storage.freeGB, 'number');
+    assert.ok(storage.freeGB > 0);
+
+    const payload = await writeWorkerHeartbeat({
+      jobsDir: base, encoder: 'libx264', whisperDevice: 'cuda', whisperModel: 'medium', busy: false, storage,
+    });
+    const onDisk = JSON.parse(await fs.readFile(path.join(base, '_worker_status.json'), 'utf8'));
+    assert.deepEqual(onDisk.storage, storage);
+    assert.equal(onDisk.whisperDevice, 'cuda');
+    assert.deepEqual(payload.storage, storage);
+
+    const sin = await writeWorkerHeartbeat({ jobsDir: base, encoder: 'libx264', busy: false });
+    assert.equal('storage' in sin, false);
+  } finally {
+    await fs.rm(base, { recursive: true, force: true });
+  }
+});
