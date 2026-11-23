@@ -448,6 +448,16 @@ export async function probeMediaDurations(ffprobeBin, mediaPath) {
 }
 
 /**
+ * Rounds a duration to a whole number of video frames (minimum 1 frame) so that every
+ * segment's video and PCM audio have identical lengths and concat accumulates no drift.
+ */
+export function quantizeDurationToFrames(durationSec, fps = 30) {
+  const f = Number(fps) > 0 ? Number(fps) : 30;
+  const frames = Math.max(1, Math.round((Number(durationSec) || 0) * f));
+  return frames / f;
+}
+
+/**
  * Mandatory post-render A/V sync verification:
  * - |videoDuration - expectedDuration| < 0.10 s
  * - |audioDuration - videoDuration| < 0.05 s (when audio stream is present)
@@ -647,7 +657,7 @@ export function buildSegmentFfmpegArgs({
 }) {
   const startSec = Math.max(0, Number(cut.start) || 0);
   const endSec = Math.max(startSec + 0.15, Number(cut.end) || startSec + 0.15);
-  const durationSec = Math.max(0.15, endSec - startSec);
+  const durationSec = quantizeDurationToFrames(Math.max(0.15, endSec - startSec), profile.fps);
   const startStr = startSec.toFixed(3);
   const durStr = durationSec.toFixed(3);
   const fadeOutStartStr = Math.max(0, durationSec - 0.03).toFixed(3);
@@ -757,7 +767,7 @@ export function buildSegmentFfmpegArgs({
       '-video_track_timescale',
       '90000',
       ...(finalAudioLabel
-        ? ['-c:a', 'aac', '-b:a', profile.audioBitrate, '-ar', '48000', '-ac', '2']
+        ? ['-c:a', 'pcm_s16le', '-ar', '48000', '-ac', '2']
         : []),
       '-t',
       durStr,
@@ -941,7 +951,7 @@ export function buildSegmentFfmpegArgs({
     '-video_track_timescale',
     '90000',
     ...(finalAudioLabel
-      ? ['-c:a', 'aac', '-b:a', profile.audioBitrate, '-ar', '48000', '-ac', '2']
+      ? ['-c:a', 'pcm_s16le', '-ar', '48000', '-ac', '2']
       : []),
     '-t',
     durStr,
@@ -1023,7 +1033,8 @@ export function buildFinalAssemblyFfmpegArgs({
         '2'
       );
     } else {
-      args.push('-c:a', 'copy');
+      // Intermediate segments carry PCM audio, so the final pass always encodes AAC once.
+      args.push('-c:a', 'aac', '-b:a', profile.audioBitrate, '-ar', '48000', '-ac', '2');
     }
   }
 
@@ -1150,10 +1161,11 @@ export async function renderJob({
     const audioMode = anyClipHasAudio ? (hasAudio ? 'source' : 'silent') : 'none';
     const startSec = Math.max(0, Number(cut.start) || 0);
     const endSec = Math.max(startSec + 0.15, Number(cut.end) || startSec + 0.15);
-    const cutDur = Math.max(0.15, endSec - startSec);
+    const cutDur = quantizeDurationToFrames(Math.max(0.15, endSec - startSec), profile.fps);
     expectedTotalDurationSec += cutDur;
 
-    const segPath = path.join(workDir, `seg_${String(i).padStart(3, '0')}.mp4`);
+    // .mov intermediates: PCM audio keeps every segment sample-exact (no AAC priming/padding drift).
+    const segPath = path.join(workDir, `seg_${String(i).padStart(3, '0')}.mov`);
     const args = buildSegmentFfmpegArgs({
       inputPath,
       outputPath: segPath,
@@ -1201,7 +1213,7 @@ export async function renderJob({
   }
 
   // 1. Join segments via concat demuxer (-c copy) into joined.mp4
-  const joinedPath = path.join(workDir, 'joined.mp4');
+  const joinedPath = path.join(workDir, 'joined.mov');
   if (segmentPaths.length === 1) {
     await fsp.copyFile(segmentPaths[0], joinedPath);
   } else {

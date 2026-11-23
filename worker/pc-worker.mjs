@@ -436,7 +436,33 @@ async function writeJobManifest(jobFilePath, manifest) {
     null,
     2
   );
-  await fsp.writeFile(jobFilePath, payload, 'utf8');
+  await writeFileAtomicWithRetry(jobFilePath, payload);
+}
+
+const RETRYABLE_FS_CODES = new Set(['EBUSY', 'EPERM', 'EACCES', 'EAGAIN', 'UNKNOWN']);
+
+/**
+ * Writes `payload` to a sibling temp file and renames it over the target, retrying on
+ * transient locks (Google Drive for desktop may hold the file while it syncs it).
+ * A failed attempt never leaves the target truncated.
+ */
+export async function writeFileAtomicWithRetry(filePath, payload, { attempts = 5, baseDelayMs = 400 } = {}) {
+  // Temp name must not start with job_/analyze_ so no scanner mistakes it for a real job.
+  const tmpPath = path.join(path.dirname(filePath), `~${path.basename(filePath)}.${process.pid}.tmp`);
+  let lastErr = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      await fsp.writeFile(tmpPath, payload, 'utf8');
+      await fsp.rename(tmpPath, filePath);
+      return;
+    } catch (err) {
+      lastErr = err;
+      await fsp.rm(tmpPath, { force: true }).catch(() => {});
+      if (!RETRYABLE_FS_CODES.has(err?.code) || attempt === attempts - 1) break;
+      await new Promise((resolve) => setTimeout(resolve, baseDelayMs * (attempt + 1)));
+    }
+  }
+  throw lastErr;
 }
 
 export async function writeWorkerHeartbeat({
@@ -464,7 +490,7 @@ export async function writeWorkerHeartbeat({
     };
   }
   try {
-    await fsp.writeFile(statusPath, JSON.stringify(payload, null, 2), 'utf8');
+    await writeFileAtomicWithRetry(statusPath, JSON.stringify(payload, null, 2), { attempts: 2 });
   } catch {
     logSafe('WARN', 'heartbeat_write_failed', { busy: Boolean(busy) });
   }
@@ -1025,6 +1051,20 @@ const isMainModule =
   process.argv[1] && path.resolve(fileURLToPath(import.meta.url)) === path.resolve(process.argv[1]);
 
 if (isMainModule) {
+  // Never die silently: record the error type/code (no paths or secrets) before exiting.
+  const describeFatal = (err) => ({
+    name: err?.name || typeof err,
+    code: err?.code || null,
+    syscall: err?.syscall || null,
+  });
+  process.on('unhandledRejection', (reason) => {
+    logSafe('ERROR', 'unhandled_rejection', describeFatal(reason));
+  });
+  process.on('uncaughtException', (err) => {
+    logSafe('ERROR', 'uncaught_exception', describeFatal(err));
+    process.exit(1);
+  });
+
   main().catch(() => {
     logSafe('ERROR', 'fatal_unhandled_error');
     process.exit(1);

@@ -1985,3 +1985,63 @@ test('Latido: writeWorkerHeartbeat incluye storage { workDirMB, hfCacheMB, freeG
     await fs.rm(base, { recursive: true, force: true });
   }
 });
+
+test('Sincronía exacta: segmentos cuantizados a fotogramas, audio PCM intermedio y AAC solo en el montaje final', async () => {
+  const rc = await import('./render-core.mjs');
+  const profile = rc.QUALITY_PROFILES['1080p'];
+
+  // Cuantización a fotogramas enteros (30 fps) con mínimo de 1 fotograma
+  assert.equal(rc.quantizeDurationToFrames(2.9467, 30), 88 / 30);
+  assert.equal(rc.quantizeDurationToFrames(0.001, 30), 1 / 30);
+  assert.equal(rc.quantizeDurationToFrames(1.5, 25), 38 / 25);
+
+  const args = rc.buildSegmentFfmpegArgs({
+    inputPath: '/tmp/clip_0.mov',
+    outputPath: '/tmp/seg_000.mov',
+    cut: { start: 1.0, end: 3.9467 },
+    profile,
+    framing: 'center_crop',
+    audioMode: 'source',
+    encoderCodec: 'libx264',
+  });
+  const durStr = (88 / 30).toFixed(3);
+  // -t de entrada y de salida usan la duración cuantizada
+  assert.equal(args.filter((a) => a === durStr).length >= 2, true);
+  assert.equal(args[args.indexOf('-c:a') + 1], 'pcm_s16le');
+  assert.equal(args.includes('aac'), false);
+
+  // Montaje final sin loudnorm: codifica AAC una sola vez (nunca copia el PCM al MP4)
+  const finalArgs = rc.buildFinalAssemblyFfmpegArgs({
+    joinedPath: '/tmp/joined.mov',
+    outputPath: '/tmp/final.mp4',
+    profile,
+    encoderCodec: 'libx264',
+    hasAudio: true,
+    normalizeAudio: false,
+    loudnormMeasurements: null,
+    subtitleAssPath: null,
+  });
+  assert.equal(finalArgs[finalArgs.indexOf('-c:a') + 1], 'aac');
+  assert.equal(finalArgs[finalArgs.indexOf('-c:v') + 1], 'copy');
+});
+
+test('writeFileAtomicWithRetry reintenta bloqueos transitorios y nunca deja el JSON vacío', async () => {
+  const { writeFileAtomicWithRetry } = await import('./pc-worker.mjs');
+  const base = await fs.mkdtemp(path.join(os.tmpdir(), 'autocut-atomic-'));
+  const target = path.join(base, 'job_abc.json');
+  try {
+    await fs.writeFile(target, '{"status":"processing"}', 'utf8');
+    await writeFileAtomicWithRetry(target, '{"status":"completed"}');
+    assert.equal(await fs.readFile(target, 'utf8'), '{"status":"completed"}');
+    // No quedan temporales y ninguno empieza por job_
+    const files = await fs.readdir(base);
+    assert.deepEqual(files, ['job_abc.json']);
+
+    // Destino imposible (carpeta inexistente): falla sin crear ni truncar nada
+    const missing = path.join(base, 'no_existe', 'job_x.json');
+    await assert.rejects(writeFileAtomicWithRetry(missing, '{}', { attempts: 2, baseDelayMs: 1 }));
+    assert.equal(await fs.readFile(target, 'utf8'), '{"status":"completed"}');
+  } finally {
+    await fs.rm(base, { recursive: true, force: true });
+  }
+});
