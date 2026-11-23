@@ -26,7 +26,14 @@ export interface DiagnosticContextSnapshot {
   settings?: Pick<
     AppSettings,
     'model' | 'exportQuality' | 'autoWatchEnabled' | 'watchIntervalSec' | 'autoUploadEnabled'
-  > & { hasFolderId?: boolean; processEngine?: AppSettings['processEngine'] };
+  > & {
+    hasFolderId?: boolean;
+    processEngine?: AppSettings['processEngine'];
+    voiceoverBrollEnabled?: boolean;
+    brollDensity?: AppSettings['brollDensity'];
+    brollSmoothPanEnabled?: boolean;
+    brollAmbientAudioEnabled?: boolean;
+  };
   tiktokOptions?: TikTokEditOptions;
   stylePreset?: EditStylePreset;
   queueSummary?: DiagnosticQueueSummary;
@@ -499,7 +506,18 @@ export function buildDiagnosticReport(context?: DiagnosticContextSnapshot): stri
         `Vigilancia automática: ${
           context.settings.autoWatchEnabled ? `Sí (${context.settings.watchIntervalSec}s)` : 'No'
         }`,
-        `Confirmar subida a Drive: ${context.settings.autoUploadEnabled ? 'Sí' : 'No'}`
+        `Confirmar subida a Drive: ${context.settings.autoUploadEnabled ? 'Sí' : 'No'}`,
+        ...(typeof context.settings.voiceoverBrollEnabled === 'boolean'
+          ? [
+              `Voz sobre recursos (B-roll): ${
+                context.settings.voiceoverBrollEnabled
+                  ? `Sí (densidad ${context.settings.brollDensity ?? 'media'}, paneo ${
+                      context.settings.brollSmoothPanEnabled !== false ? 'sí' : 'no'
+                    }, ambiente ${context.settings.brollAmbientAudioEnabled ? '-20 dB' : 'no'})`
+                  : 'No'
+              }`,
+            ]
+          : [])
       );
     }
     if (context.stylePreset) {

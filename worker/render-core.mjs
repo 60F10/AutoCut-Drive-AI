@@ -368,6 +368,47 @@ export async function probeVideoColorTransfer(ffprobeBin, inputPath) {
   }
 }
 
+export async function probeVideoDimensions(ffprobeBin, inputPath) {
+  try {
+    const res = await runProcess(ffprobeBin, [
+      '-v',
+      'error',
+      '-select_streams',
+      'v:0',
+      '-show_entries',
+      'stream=width,height:stream_side_data=rotation:stream_tags=rotate',
+      '-of',
+      'json',
+      inputPath,
+    ]);
+    if (res.code !== 0) {
+      return { width: 0, height: 0, isLandscape: false };
+    }
+    const parsed = JSON.parse(res.stdout || '{}');
+    const stream = Array.isArray(parsed?.streams) ? parsed.streams[0] : null;
+    let width = Math.max(0, Number(stream?.width) || 0);
+    let height = Math.max(0, Number(stream?.height) || 0);
+
+    const sideRotation = Array.isArray(stream?.side_data_list)
+      ? stream.side_data_list.find((sd) => Number.isFinite(Number(sd?.rotation)))?.rotation
+      : undefined;
+    const tagRotation = stream?.tags?.rotate;
+    const rotation = Number(sideRotation ?? tagRotation ?? 0);
+
+    if (Number.isFinite(rotation) && Math.abs(Math.round(rotation)) % 180 === 90) {
+      [width, height] = [height, width];
+    }
+
+    return {
+      width,
+      height,
+      isLandscape: width > 0 && height > 0 ? width > height : false,
+    };
+  } catch {
+    return { width: 0, height: 0, isLandscape: false };
+  }
+}
+
 export async function probeMediaDurations(ffprobeBin, mediaPath) {
   const res = await runProcess(ffprobeBin, [
     '-v',
@@ -600,6 +641,9 @@ export function buildSegmentFfmpegArgs({
   cpuPreset = 'fast',
   colorTransfer = '',
   zscaleAvailable = true,
+  overlays = [],
+  brollSmoothPan = true,
+  brollAmbientAudio = false,
 }) {
   const startSec = Math.max(0, Number(cut.start) || 0);
   const endSec = Math.max(startSec + 0.15, Number(cut.end) || startSec + 0.15);
@@ -615,41 +659,257 @@ export function buildSegmentFfmpegArgs({
   const hdrChain = buildHdrToSdrFilterChain(colorTransfer, zscaleAvailable);
   const hdrPrefix = hdrChain ? `${hdrChain},` : '';
 
-  const filterParts = [];
-  if (framing === 'blur_bg') {
-    filterParts.push(`[0:v:0]setpts=PTS-STARTPTS,${hdrPrefix}split=2[bgsrc][fgsrc]`);
-    filterParts.push(
-      `[bgsrc]scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},boxblur=24:4[bg]`
-    );
-    filterParts.push(`[fgsrc]scale=${w}:${h}:force_original_aspect_ratio=decrease[fg]`);
-    filterParts.push(`[bg][fg]overlay=(W-w)/2:(H-h)/2,fps=${fps},format=yuv420p,setsar=1[v0]`);
-  } else {
-    filterParts.push(
-      `[0:v:0]setpts=PTS-STARTPTS,${hdrPrefix}scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},fps=${fps},format=yuv420p,setsar=1[v0]`
-    );
+  // Normalize optional active B-roll overlays sorted along [0, durationSec]
+  const rawOverlays = Array.isArray(overlays) ? overlays : [];
+  const activeOverlays = [];
+  let prevOvEnd = 0;
+  for (const ov of [...rawOverlays].sort((a, b) => (Number(a?.offsetSec) || 0) - (Number(b?.offsetSec) || 0))) {
+    if (!ov || !ov.inputPath) continue;
+    const ovStart = Math.max(0, Number(ov.start) || 0);
+    const ovEnd = Math.max(ovStart, Number(ov.end) || 0);
+    const ovDur = ovEnd - ovStart;
+    const offsetSec = Math.max(0, Number(ov.offsetSec) || 0);
+    if (ovDur < 0.05 || offsetSec >= durationSec - 0.02 || offsetSec < prevOvEnd - 0.001) {
+      continue;
+    }
+    const clampedDur = Math.min(ovDur, durationSec - offsetSec);
+    if (clampedDur < 0.05) continue;
+    activeOverlays.push({
+      inputPath: ov.inputPath,
+      start: ovStart,
+      dur: clampedDur,
+      offsetSec,
+      encuadreX: Number.isFinite(Number(ov.encuadreX))
+        ? Math.max(0, Math.min(1, Number(ov.encuadreX)))
+        : 0.5,
+      colorTransfer: ov.colorTransfer || '',
+      isLandscape: Boolean(ov.isLandscape),
+      hasAudio: ov.hasAudio !== false,
+    });
+    prevOvEnd = offsetSec + clampedDur;
   }
 
-  const finalVideoLabel = '[v0]';
-  const extraInputs = [];
-  let finalAudioLabel = null;
+  // Zero-overlay baseline path (identical to original args)
+  if (activeOverlays.length === 0) {
+    const filterParts = [];
+    if (framing === 'blur_bg') {
+      filterParts.push(`[0:v:0]setpts=PTS-STARTPTS,${hdrPrefix}split=2[bgsrc][fgsrc]`);
+      filterParts.push(
+        `[bgsrc]scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},boxblur=24:4[bg]`
+      );
+      filterParts.push(`[fgsrc]scale=${w}:${h}:force_original_aspect_ratio=decrease[fg]`);
+      filterParts.push(`[bg][fg]overlay=(W-w)/2:(H-h)/2,fps=${fps},format=yuv420p,setsar=1[v0]`);
+    } else {
+      filterParts.push(
+        `[0:v:0]setpts=PTS-STARTPTS,${hdrPrefix}scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},fps=${fps},format=yuv420p,setsar=1[v0]`
+      );
+    }
 
-  if (audioMode === 'source') {
-    filterParts.push(
-      `[0:a:0]asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,afade=t=in:d=0.02,afade=t=out:st=${fadeOutStartStr}:d=0.03,apad=whole_dur=${durStr}[a0]`
-    );
-    finalAudioLabel = '[a0]';
-  } else if (audioMode === 'silent') {
-    extraInputs.push(
-      '-f',
-      'lavfi',
+    const finalVideoLabel = '[v0]';
+    const extraInputs = [];
+    let finalAudioLabel = null;
+
+    if (audioMode === 'source') {
+      filterParts.push(
+        `[0:a:0]asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,afade=t=in:d=0.02,afade=t=out:st=${fadeOutStartStr}:d=0.03,apad=whole_dur=${durStr}[a0]`
+      );
+      finalAudioLabel = '[a0]';
+    } else if (audioMode === 'silent') {
+      extraInputs.push(
+        '-f',
+        'lavfi',
+        '-t',
+        durStr,
+        '-i',
+        'anullsrc=channel_layout=stereo:sample_rate=48000'
+      );
+      filterParts.push(
+        `[1:a:0]atrim=duration=${durStr},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,apad=whole_dur=${durStr}[a0]`
+      );
+      finalAudioLabel = '[a0]';
+    }
+
+    const videoCodecArgs = buildVideoCodecArgs(encoderCodec, profile, cpuPreset);
+
+    return [
+      '-y',
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-ss',
+      startStr,
       '-t',
       durStr,
       '-i',
-      'anullsrc=channel_layout=stereo:sample_rate=48000'
-    );
-    filterParts.push(
-      `[1:a:0]atrim=duration=${durStr},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,apad=whole_dur=${durStr}[a0]`
-    );
+      inputPath,
+      ...extraInputs,
+      '-filter_complex',
+      filterParts.join(';'),
+      '-map',
+      finalVideoLabel,
+      ...(finalAudioLabel ? ['-map', finalAudioLabel] : ['-an']),
+      ...videoCodecArgs,
+      '-pix_fmt',
+      'yuv420p',
+      '-r',
+      String(fps),
+      ...SDR_COLOR_ARGS,
+      '-video_track_timescale',
+      '90000',
+      ...(finalAudioLabel
+        ? ['-c:a', 'aac', '-b:a', profile.audioBitrate, '-ar', '48000', '-ac', '2']
+        : []),
+      '-t',
+      durStr,
+      '-movflags',
+      '+faststart',
+      outputPath,
+    ];
+  }
+
+  // B-roll overlay composition path:
+  // Subsegment concat visually + continuous uncut audio from anchor input [0:a:0]
+  const filterParts = [];
+  const extraInputs = [];
+
+  for (const ov of activeOverlays) {
+    extraInputs.push('-ss', ov.start.toFixed(3), '-t', ov.dur.toFixed(3), '-i', ov.inputPath);
+  }
+
+  const pieces = [];
+  let cursor = 0;
+  for (let i = 0; i < activeOverlays.length; i += 1) {
+    const ov = activeOverlays[i];
+    if (ov.offsetSec - cursor >= 0.02) {
+      pieces.push({ type: 'anchor', start: cursor, end: ov.offsetSec });
+    }
+    pieces.push({ type: 'broll', overlayIdx: i, overlay: ov });
+    cursor = ov.offsetSec + ov.dur;
+  }
+  if (durationSec - cursor >= 0.02) {
+    pieces.push({ type: 'anchor', start: cursor, end: durationSec });
+  }
+
+  const anchorPieceIndices = [];
+  for (let pIdx = 0; pIdx < pieces.length; pIdx += 1) {
+    if (pieces[pIdx].type === 'anchor') {
+      anchorPieceIndices.push(pIdx);
+    }
+  }
+
+  if (anchorPieceIndices.length > 0) {
+    if (framing === 'blur_bg') {
+      filterParts.push(`[0:v:0]setpts=PTS-STARTPTS,${hdrPrefix}split=2[bgsrc][fgsrc]`);
+      filterParts.push(
+        `[bgsrc]scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},boxblur=24:4[bg]`
+      );
+      filterParts.push(`[fgsrc]scale=${w}:${h}:force_original_aspect_ratio=decrease[fg]`);
+      filterParts.push(
+        `[bg][fg]overlay=(W-w)/2:(H-h)/2,fps=${fps},format=yuv420p,setsar=1[anc_base]`
+      );
+    } else {
+      filterParts.push(
+        `[0:v:0]setpts=PTS-STARTPTS,${hdrPrefix}scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},fps=${fps},format=yuv420p,setsar=1[anc_base]`
+      );
+    }
+
+    if (anchorPieceIndices.length === 1) {
+      const pIdx = anchorPieceIndices[0];
+      const p = pieces[pIdx];
+      filterParts.push(
+        `[anc_base]trim=start=${p.start.toFixed(3)}:end=${p.end.toFixed(3)},setpts=PTS-STARTPTS[segv_${pIdx}]`
+      );
+    } else {
+      const splitLabels = anchorPieceIndices.map((_, k) => `[anc_s${k}]`).join('');
+      filterParts.push(`[anc_base]split=${anchorPieceIndices.length}${splitLabels}`);
+      anchorPieceIndices.forEach((pIdx, k) => {
+        const p = pieces[pIdx];
+        filterParts.push(
+          `[anc_s${k}]trim=start=${p.start.toFixed(3)}:end=${p.end.toFixed(3)},setpts=PTS-STARTPTS[segv_${pIdx}]`
+        );
+      });
+    }
+  }
+
+  for (let pIdx = 0; pIdx < pieces.length; pIdx += 1) {
+    const p = pieces[pIdx];
+    if (p.type !== 'broll') continue;
+    const ov = p.overlay;
+    const inIdx = 1 + p.overlayIdx;
+    const ovDurStr = ov.dur.toFixed(3);
+    const ovHdr = buildHdrToSdrFilterChain(ov.colorTransfer, zscaleAvailable);
+    const ovHdrPrefix = ovHdr ? `${ovHdr},` : '';
+
+    if (ov.isLandscape) {
+      let cropXExpr;
+      if (brollSmoothPan) {
+        const panStart = Math.max(0, Math.min(0.92, ov.encuadreX - 0.04));
+        cropXExpr = `'max(0,min(iw-ow,(iw-ow)*(${panStart.toFixed(4)}+0.0800*min(1,t/${ovDurStr}))))'`;
+      } else {
+        cropXExpr = `'max(0,min(iw-ow,(iw-ow)*${ov.encuadreX.toFixed(4)}))'`;
+      }
+      filterParts.push(
+        `[${inIdx}:v:0]setpts=PTS-STARTPTS,${ovHdrPrefix}scale=-2:${h},crop=${w}:${h}:${cropXExpr}:0,fps=${fps},format=yuv420p,setsar=1[segv_${pIdx}]`
+      );
+    } else {
+      filterParts.push(
+        `[${inIdx}:v:0]setpts=PTS-STARTPTS,${ovHdrPrefix}scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},fps=${fps},format=yuv420p,setsar=1[segv_${pIdx}]`
+      );
+    }
+  }
+
+  const finalVideoLabel = '[v0]';
+  if (pieces.length === 1) {
+    filterParts.push(`[segv_0]null[v0]`);
+  } else {
+    const segLabels = pieces.map((_, idx) => `[segv_${idx}]`).join('');
+    filterParts.push(`${segLabels}concat=n=${pieces.length}:v=1:a=0[v0]`);
+  }
+
+  // Continuous anchor audio (uncut) + optional -20 dB ambient mix from B-roll inputs
+  let finalAudioLabel = null;
+  const ambientOverlays =
+    brollAmbientAudio && audioMode !== 'none'
+      ? activeOverlays
+          .map((ov, ovIdx) => ({ ov, ovIdx }))
+          .filter(({ ov }) => ov.hasAudio)
+      : [];
+
+  if (audioMode === 'source' || audioMode === 'silent') {
+    let baseAudioFilter = '';
+    if (audioMode === 'source') {
+      baseAudioFilter = `[0:a:0]asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,afade=t=in:d=0.02,afade=t=out:st=${fadeOutStartStr}:d=0.03,apad=whole_dur=${durStr}`;
+    } else {
+      const silentIdx = 1 + activeOverlays.length;
+      extraInputs.push(
+        '-f',
+        'lavfi',
+        '-t',
+        durStr,
+        '-i',
+        'anullsrc=channel_layout=stereo:sample_rate=48000'
+      );
+      baseAudioFilter = `[${silentIdx}:a:0]atrim=duration=${durStr},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,apad=whole_dur=${durStr}`;
+    }
+
+    if (ambientOverlays.length === 0) {
+      filterParts.push(`${baseAudioFilter}[a0]`);
+    } else {
+      filterParts.push(`${baseAudioFilter}[a_anchor]`);
+      const ambLabels = [];
+      ambientOverlays.forEach(({ ov, ovIdx }, k) => {
+        const inIdx = 1 + ovIdx;
+        const delayMs = Math.max(0, Math.round(ov.offsetSec * 1000));
+        const label = `[a_amb_${k}]`;
+        ambLabels.push(label);
+        filterParts.push(
+          `[${inIdx}:a:0]atrim=duration=${ov.dur.toFixed(3)},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,volume=-20dB,adelay=${delayMs}|${delayMs}${label}`
+        );
+      });
+      filterParts.push(
+        `[a_anchor]${ambLabels.join('')}amix=inputs=${1 + ambLabels.length}:duration=first:normalize=0,apad=whole_dur=${durStr}[a0]`
+      );
+    }
     finalAudioLabel = '[a0]';
   }
 
@@ -846,6 +1106,38 @@ export async function renderJob({
   }
   const anyClipHasAudio = audioFlags.some(Boolean);
 
+  const voiceoverBrollEnabled = options.voiceoverBrollEnabled !== false;
+  const brollSmoothPan = options.brollSmoothPanEnabled !== false;
+  const brollAmbientAudio = Boolean(options.brollAmbientAudioEnabled);
+  const rawManifestOverlays =
+    voiceoverBrollEnabled && Array.isArray(manifest.overlays) ? manifest.overlays : [];
+
+  const dimensionInfos = [];
+  if (rawManifestOverlays.length > 0) {
+    for (const filePath of sourcePaths) {
+      dimensionInfos.push(await probeVideoDimensions(resolvedFfprobe, filePath));
+    }
+  }
+
+  const overlaysByCutIndex = new Map();
+  for (const ov of rawManifestOverlays) {
+    const cutIdx = Math.trunc(Number(ov?.cutIndex));
+    if (!Number.isInteger(cutIdx) || cutIdx < 0 || cutIdx >= manifest.cuts.length) continue;
+    const ovClipIdx = Math.max(0, Math.min(sourcePaths.length - 1, Number(ov?.clipIndex) || 0));
+    const list = overlaysByCutIndex.get(cutIdx) || [];
+    list.push({
+      inputPath: sourcePaths[ovClipIdx],
+      start: Number(ov.start) || 0,
+      end: Number(ov.end) || 0,
+      offsetSec: Number(ov.offsetSec) || 0,
+      encuadreX: Number.isFinite(Number(ov.encuadreX)) ? Number(ov.encuadreX) : 0.5,
+      colorTransfer: colorTransfers[ovClipIdx] || '',
+      isLandscape: Boolean(dimensionInfos[ovClipIdx]?.isLandscape),
+      hasAudio: Boolean(audioFlags[ovClipIdx]),
+    });
+    overlaysByCutIndex.set(cutIdx, list);
+  }
+
   const segmentPaths = [];
   let expectedTotalDurationSec = 0;
   const totalCuts = manifest.cuts.length;
@@ -873,6 +1165,9 @@ export async function renderJob({
       cpuPreset,
       colorTransfer: colorTransfers[clipIdx],
       zscaleAvailable: canUseZscale,
+      overlays: overlaysByCutIndex.get(i) || [],
+      brollSmoothPan,
+      brollAmbientAudio,
     });
 
     const pctStart = 10 + Math.round((i / totalCuts) * 62);

@@ -1346,6 +1346,143 @@ test('Cloud multimodal analysis contract: buildAnalyzeJobManifest, cloudEditPlan
   );
 });
 
+test('Voz sobre recursos PWA contract: analyze/render manifests carry B-roll options and filter disabled overlays', () => {
+  const analyzeWithBroll = buildAnalyzeJobManifest({
+    jobId: 'ana_broll_1',
+    sourceFiles: [{ name: 'clip1.mp4', driveFileId: 'd1' }],
+    model: 'gemini-3.8-flash',
+    whisperModel: 'small',
+    stylePreset: 'agile_vlog',
+    tiktokOptions: {
+      subtitlesEnabled: true,
+      silenceTrimEnabled: true,
+      audioNormalizeEnabled: true,
+      framingMode: 'center_crop',
+    },
+    voiceoverBrollEnabled: true,
+    brollDensity: 'alta',
+    brollSmoothPanEnabled: false,
+    brollAmbientAudioEnabled: true,
+  });
+  assert.equal(analyzeWithBroll.options.voiceoverBrollEnabled, true);
+  assert.equal(analyzeWithBroll.options.brollDensity, 'alta');
+  assert.equal(analyzeWithBroll.options.brollSmoothPanEnabled, false);
+  assert.equal(analyzeWithBroll.options.brollAmbientAudioEnabled, true);
+
+  const geminiFromCloud = cloudEditPlanToGeminiEditPlan({
+    etiqueta: 'VIAJE',
+    titulo: 'Ruta con recursos',
+    gancho: 'Intro gancho',
+    historia: 'Resumen breve del viaje.',
+    ordenClips: [0, 1],
+    duracionTotalSec: 13.0,
+    guionResultante: 'Hola. Mira.',
+    revision: { coherente: true, notas: [] },
+    cortes: [
+      { id: 'c1', clip_index: 0, start_sec: 1.0, end_sec: 7.0, funcion: 'gancho', motivo: 'Intro', texto: 'Hola', words: [], puntuacion_interes: 9 },
+      { id: 'c2', clip_index: 0, start_sec: 8.0, end_sec: 15.0, funcion: 'desarrollo', motivo: 'Paseo', texto: 'Mira', words: [], puntuacion_interes: 8 },
+    ],
+    overlays: [
+      {
+        id: 'ov1',
+        anchorCutId: 'c1',
+        clip_index: 1,
+        start_sec: 2.0,
+        end_sec: 4.5,
+        offsetSec: 2.0,
+        motivo: 'Plano general playa',
+        encuadreX: 0.75,
+      },
+      {
+        id: 'ov2',
+        anchorCutId: 'c2',
+        clip_index: 1,
+        start_sec: 5.0,
+        end_sec: 7.0,
+        offsetSec: 1.0,
+        motivo: 'Desactivado en estudio',
+        encuadreX: 0.5,
+        enabled: false,
+      },
+    ],
+  });
+
+  assert.equal(geminiFromCloud.overlays?.length, 2);
+  assert.equal(geminiFromCloud.overlays?.[0].enabled, true);
+  assert.equal(geminiFromCloud.overlays?.[1].enabled, false);
+
+  const renderWithBroll = buildRenderJobManifest({
+    jobId: 'ren_broll_1',
+    target: 'cloud',
+    exportQuality: 'high_1080p',
+    tiktokOptions: {
+      subtitlesEnabled: true,
+      silenceTrimEnabled: true,
+      audioNormalizeEnabled: true,
+      framingMode: 'center_crop',
+    },
+    voiceoverBrollEnabled: true,
+    brollDensity: 'media',
+    brollSmoothPanEnabled: true,
+    brollAmbientAudioEnabled: true,
+    item: {
+      id: 'item-broll',
+      originalName: 'Viaje',
+      isMultiClip: true,
+      sourceClips: [
+        { id: 's0', source: 'drive', driveFileId: 'd0', originalName: 'c0.mov', mimeType: 'video/quicktime', sizeBytes: 1000 },
+        { id: 's1', source: 'drive', driveFileId: 'd1', originalName: 'c1.mov', mimeType: 'video/quicktime', sizeBytes: 1000 },
+      ],
+      analysis: {
+        ...geminiFromCloud,
+        cortes: geminiFromCloud.cortes.map((c) => ({ ...c, enabled: true })),
+      },
+    },
+  });
+
+  // Disabled overlay ov2 MUST be filtered out; ov1 maps to cutIndex 0
+  assert.equal(renderWithBroll.overlays?.length, 1);
+  assert.deepEqual(renderWithBroll.overlays?.[0], {
+    id: 'ov1',
+    anchorCutId: 'c1',
+    cutIndex: 0,
+    clipIndex: 1,
+    start: 2.0,
+    end: 4.5,
+    offsetSec: 2.0,
+    encuadreX: 0.75,
+  });
+  assert.equal(renderWithBroll.options.voiceoverBrollEnabled, true);
+  assert.equal(renderWithBroll.options.brollSmoothPanEnabled, true);
+  assert.equal(renderWithBroll.options.brollAmbientAudioEnabled, true);
+
+  // When voiceoverBrollEnabled is false, overlays are omitted completely
+  const renderNoBroll = buildRenderJobManifest({
+    jobId: 'ren_no_broll',
+    exportQuality: 'high_1080p',
+    tiktokOptions: {
+      subtitlesEnabled: false,
+      silenceTrimEnabled: true,
+      audioNormalizeEnabled: true,
+      framingMode: 'center_crop',
+    },
+    voiceoverBrollEnabled: false,
+    item: {
+      id: 'item-no-broll',
+      originalName: 'Viaje',
+      isMultiClip: false,
+      driveFileId: 'd0',
+      analysis: {
+        ...geminiFromCloud,
+        cortes: geminiFromCloud.cortes.map((c) => ({ ...c, enabled: true })),
+      },
+    },
+  });
+  assert.equal(renderNoBroll.overlays, undefined);
+  assert.equal(renderNoBroll.options.voiceoverBrollEnabled, false);
+});
+
+
 
 
 

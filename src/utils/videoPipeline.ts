@@ -4,14 +4,17 @@ import type {
   AnalyzeJobStage,
   AnalyzeJobStatus,
   AnalyticsRecord,
+  BrollDensity,
   CloudEditPlan,
   DriveFileMeta,
   EditStylePreset,
   ExportQuality,
   FramingMode,
   GeminiEditPlan,
+  PlanOverlay,
   QueueItem,
   RenderJobManifest,
+  RenderJobOverlay,
   RenderJobStatus,
   SubtitleBlock,
   TikTokEditOptions,
@@ -1382,6 +1385,10 @@ export function generatePcRenderJobId(nowMs = Date.now()): string {
   return `${stamp}_${rand}`;
 }
 
+export function normalizeBrollDensity(raw: unknown): BrollDensity {
+  return raw === 'baja' || raw === 'alta' ? raw : 'media';
+}
+
 /**
  * Builds the canonical `analyze_<jobId>.json` manifest (`kind: "analyze"`) consumed by
  * `worker/pc-worker.mjs` (`target: "pc"`) or GitHub Actions `worker/cloud-worker.mjs` (`target: "cloud"`).
@@ -1394,6 +1401,10 @@ export function buildAnalyzeJobManifest(input: {
   customInstruction?: string;
   targetDurationSec?: number;
   tiktokOptions: TikTokEditOptions;
+  voiceoverBrollEnabled?: boolean;
+  brollDensity?: BrollDensity;
+  brollSmoothPanEnabled?: boolean;
+  brollAmbientAudioEnabled?: boolean;
   target?: import('../types').RenderJobTarget;
   queueItemId?: string;
   projectName?: string;
@@ -1438,6 +1449,10 @@ export function buildAnalyzeJobManifest(input: {
       targetDurationSec,
       silenceTrimEnabled: normalizedOpts.silenceTrimEnabled,
       subtitlesEnabled: normalizedOpts.subtitlesEnabled,
+      voiceoverBrollEnabled: input.voiceoverBrollEnabled !== false,
+      brollDensity: normalizeBrollDensity(input.brollDensity),
+      brollSmoothPanEnabled: input.brollSmoothPanEnabled !== false,
+      brollAmbientAudioEnabled: Boolean(input.brollAmbientAudioEnabled),
     },
     ...(input.queueItemId ? { queueItemId: input.queueItemId } : {}),
     ...(input.projectName ? { projectName: input.projectName } : {}),
@@ -1447,7 +1462,8 @@ export function buildAnalyzeJobManifest(input: {
 
 /**
  * Converts a completed `CloudEditPlan` returned by GitHub Actions into the Studio's `GeminiEditPlan`,
- * preserving word-level timestamps, cut functions, spoken text, hook, story summary, full script, and review notes.
+ * preserving word-level timestamps, cut functions, spoken text, hook, story summary, full script,
+ * B-roll overlays, and review notes.
  */
 export function cloudEditPlanToGeminiEditPlan(
   plan: CloudEditPlan,
@@ -1472,6 +1488,26 @@ export function cloudEditPlanToGeminiEditPlan(
       : [],
   }));
 
+  const overlays: PlanOverlay[] = Array.isArray(plan.overlays)
+    ? plan.overlays
+        .filter((ov) => ov && ov.anchorCutId)
+        .map((ov, idx) => ({
+          id: ov.id || `ov-${idx + 1}`,
+          anchorCutId: String(ov.anchorCutId),
+          clip_index: Math.max(0, Number(ov.clip_index) || 0),
+          start_sec: Number(Math.max(0, Number(ov.start_sec) || 0).toFixed(3)),
+          end_sec: Number(
+            Math.max((Number(ov.start_sec) || 0) + 0.15, Number(ov.end_sec) || 0.15).toFixed(3)
+          ),
+          offsetSec: Number(Math.max(0, Number(ov.offsetSec) || 0).toFixed(3)),
+          motivo: String(ov.motivo || 'Plano recurso sobre voz').trim(),
+          encuadreX: Number(
+            Math.max(0, Math.min(1, Number.isFinite(Number(ov.encuadreX)) ? Number(ov.encuadreX) : 0.5)).toFixed(3)
+          ),
+          enabled: ov.enabled !== false,
+        }))
+    : [];
+
   const targetSec = Math.round(
     Number(options?.targetDurationSec) || Number(plan.duracionTotalSec) || calculateSelectedDuration(cortes)
   );
@@ -1481,6 +1517,7 @@ export function cloudEditPlanToGeminiEditPlan(
     titulo_interno: String(plan.titulo || 'Historia editada en la nube').trim(),
     duracion_objetivo_seg: Math.max(5, targetSec),
     cortes,
+    ...(overlays.length > 0 ? { overlays } : {}),
     gancho: String(plan.gancho || '').trim(),
     historia: String(plan.historia || '').trim(),
     ordenClips: Array.isArray(plan.ordenClips) ? plan.ordenClips : [],
@@ -1514,6 +1551,10 @@ export function buildRenderJobManifest(input: {
   >;
   exportQuality: ExportQuality;
   tiktokOptions: TikTokEditOptions;
+  voiceoverBrollEnabled?: boolean;
+  brollDensity?: BrollDensity;
+  brollSmoothPanEnabled?: boolean;
+  brollAmbientAudioEnabled?: boolean;
   target?: import('../types').RenderJobTarget;
   sourceFilesOverride?: import('../types').RenderJobSourceFile[];
   jobId?: string;
@@ -1531,6 +1572,11 @@ export function buildRenderJobManifest(input: {
   }
 
   const normalizedOpts = normalizeTikTokOptions(tiktokOptions);
+  const voiceoverBrollEnabled = input.voiceoverBrollEnabled !== false;
+  const brollDensity = normalizeBrollDensity(input.brollDensity);
+  const brollSmoothPanEnabled = input.brollSmoothPanEnabled !== false;
+  const brollAmbientAudioEnabled = Boolean(input.brollAmbientAudioEnabled);
+
   const isMulti = Boolean(item.isMultiClip && item.sourceClips && item.sourceClips.length > 0);
   const sourceFiles =
     input.sourceFilesOverride && input.sourceFilesOverride.length > 0
@@ -1581,6 +1627,41 @@ export function buildRenderJobManifest(input: {
     };
   });
 
+  const activeCutIndexById = new Map<string, number>();
+  activeCuts.forEach((c, idx) => {
+    activeCutIndexById.set(c.id, idx);
+  });
+
+  const activeOverlays: RenderJobOverlay[] =
+    voiceoverBrollEnabled && Array.isArray(plan.overlays)
+      ? plan.overlays
+          .filter((ov) => ov && ov.enabled !== false && activeCutIndexById.has(ov.anchorCutId))
+          .map((ov) => {
+            const cutIdx = activeCutIndexById.get(ov.anchorCutId)!;
+            const anchorCut = activeCuts[cutIdx];
+            const anchorDur = Math.max(0.15, anchorCut.end_sec - anchorCut.start_sec);
+            const start = Number(Math.max(0, ov.start_sec).toFixed(3));
+            const end = Number(Math.max(start + 0.15, ov.end_sec).toFixed(3));
+            const offsetSec = Number(Math.max(0, Math.min(anchorDur - 0.15, ov.offsetSec)).toFixed(3));
+            return {
+              id: ov.id,
+              anchorCutId: ov.anchorCutId,
+              cutIndex: cutIdx,
+              clipIndex: Math.max(0, Math.min(sourceFiles.length - 1, ov.clip_index ?? 0)),
+              start,
+              end,
+              offsetSec,
+              encuadreX: Number(
+                Math.max(
+                  0,
+                  Math.min(1, Number.isFinite(Number(ov.encuadreX)) ? Number(ov.encuadreX) : 0.5)
+                ).toFixed(3)
+              ),
+            };
+          })
+          .filter((ov) => ov.offsetSec + (ov.end - ov.start) <= (activeCuts[ov.cutIndex].end_sec - activeCuts[ov.cutIndex].start_sec) + 0.05)
+      : [];
+
   let subtitlesData: RenderJobManifest['options']['subtitlesData'];
   if (normalizedOpts.subtitlesEnabled && plan.subtitulos && plan.subtitulos.length > 0) {
     const remapped = remapSubtitlesToFinalTimeline(plan.subtitulos, activeCuts);
@@ -1603,12 +1684,17 @@ export function buildRenderJobManifest(input: {
     outputFileName,
     sourceFiles,
     cuts,
+    ...(activeOverlays.length > 0 ? { overlays: activeOverlays } : {}),
     options: {
       quality: normalizeExportQuality(exportQuality) === 'mobile_fast' ? '720p' : '1080p',
       framing: normalizedOpts.framingMode === 'blur_pad' ? 'blur_bg' : 'center_crop',
       removeSilences: normalizedOpts.silenceTrimEnabled,
       normalizeAudio: normalizedOpts.audioNormalizeEnabled,
       subtitlesEnabled: normalizedOpts.subtitlesEnabled,
+      voiceoverBrollEnabled,
+      brollDensity,
+      brollSmoothPanEnabled,
+      brollAmbientAudioEnabled,
       ...(subtitlesData ? { subtitlesData } : {}),
     },
     queueItemId: item.id,

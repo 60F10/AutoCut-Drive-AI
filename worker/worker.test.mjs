@@ -34,14 +34,18 @@ import {
 } from './cloud-worker.mjs';
 import {
   PHASE_B_SCHEMA,
+  PHASE_B_WITH_OVERLAYS_SCHEMA,
+  buildPhaseBSystemInstruction,
   claimJobAtomically,
   convertPlanSegmentsToCuts,
   enforceTargetDuration,
   formatSentencesForPrompt,
+  mapPhaseBOverlaysToCuts,
   runPhaseBWithValidationRetry,
   sortClipsChronologically,
   splitTranscriptIntoSentences,
   splitWordsBySilencePauses,
+  validateAndFilterOverlays,
 } from './analyze-core.mjs';
 
 test('Segment FFmpeg args enforce exact A/V sync (0:v:0, 0:a:0, apad=whole_dur, matching -t) and forbid silenceremove/loudnorm/subtitles', () => {
@@ -1351,5 +1355,197 @@ test('formatSafePcLog redacts secrets/filenames and RotatingFileLogger rotates s
     await fs.rm(tmpDir, { recursive: true, force: true });
   }
 });
+
+test('Voz sobre recursos: validateAndFilterOverlays enforces duration, gancho, 70% coverage, overlaps, and density rules with Spanish notes', () => {
+  // Disabled mode keeps Phase B prompt identical and produces zero overlays
+  assert.equal(
+    buildPhaseBSystemInstruction('funny_jumpcut', false),
+    buildPhaseBSystemInstruction('funny_jumpcut')
+  );
+  assert.ok(PHASE_B_WITH_OVERLAYS_SCHEMA.properties.overlays);
+  assert.equal(PHASE_B_SCHEMA.properties.overlays, undefined);
+
+  const cortes = [
+    { id: 'cut-001', clip_index: 0, start_sec: 0, end_sec: 6.0, funcion: 'gancho', motivo: 'Hook', texto: 'Hola', words: [] },
+    { id: 'cut-002', clip_index: 0, start_sec: 6.0, end_sec: 16.0, funcion: 'desarrollo', motivo: 'Body 1', texto: 'Mira el paisaje', words: [] },
+    { id: 'cut-003', clip_index: 0, start_sec: 16.0, end_sec: 28.0, funcion: 'cierre', motivo: 'Body 2', texto: 'Seguimos aquí', words: [] },
+  ];
+  const clipDurations = [30.0, 20.0];
+
+  // Test rule rejections in 'alta' (6 s window)
+  const res = validateAndFilterOverlays({
+    overlays: [
+      // Rejected: gancho offset < 1.5 s
+      { anchorCutId: 'cut-001', clip_index: 1, start_sec: 1.0, end_sec: 3.0, offsetSec: 0.5, motivo: 'En primeros 1.5s del gancho', encuadreX: 0.5 },
+      // Valid on gancho: offsetSec = 2.0, dur = 2.5 (41.7% of 6s cut) -> ACCEPTED (timeline 2.0s)
+      { id: 'ov-gancho', anchorCutId: 'cut-001', clip_index: 1, start_sec: 2.0, end_sec: 4.5, offsetSec: 2.0, motivo: 'Gancho válido', encuadreX: 0.3 },
+      // Rejected: too short (< 1.5s)
+      { anchorCutId: 'cut-002', clip_index: 1, start_sec: 0.0, end_sec: 1.2, offsetSec: 4.0, motivo: 'Muy corto', encuadreX: 0.5 },
+      // Rejected: too long (> 5.0s)
+      { anchorCutId: 'cut-002', clip_index: 1, start_sec: 0.0, end_sec: 5.5, offsetSec: 4.0, motivo: 'Muy largo', encuadreX: 0.5 },
+      // Rejected: out of clip bounds (> 20s)
+      { anchorCutId: 'cut-002', clip_index: 1, start_sec: 18.0, end_sec: 20.5, offsetSec: 4.0, motivo: 'Fuera de clip', encuadreX: 0.5 },
+      // Valid on cut-002: timeline = 6 + 3 = 9s (>= 2 + 6s) -> ACCEPTED (2.5s)
+      { id: 'ov-body1', anchorCutId: 'cut-002', clip_index: 1, start_sec: 5.0, end_sec: 7.5, offsetSec: 3.0, motivo: 'Válido desarrollo', encuadreX: 0.7 },
+      // Rejected: overlaps ov-body1 (3.0..5.5 vs 4.5..6.5)
+      { anchorCutId: 'cut-002', clip_index: 1, start_sec: 8.0, end_sec: 10.0, offsetSec: 4.5, motivo: 'Solapado', encuadreX: 0.5 },
+      // Rejected: exceeds 70% on cut-002 (2.5 + 4.6 = 7.1 > 7.0) while fitting inside cut-002 (5.4 + 4.6 = 10.0)
+      { anchorCutId: 'cut-002', clip_index: 1, start_sec: 10.0, end_sec: 14.6, offsetSec: 5.4, motivo: 'Excede 70%', encuadreX: 0.5 },
+    ],
+    cortes,
+    clipDurations,
+    brollDensity: 'alta',
+    voiceoverBrollEnabled: true,
+  });
+
+  assert.deepEqual(
+    res.overlays.map((o) => o.id),
+    ['ov-gancho', 'ov-body1']
+  );
+  assert.ok(res.notas.some((n) => n.includes('gancho')));
+  assert.ok(res.notas.some((n) => n.includes('duración fuera de rango')));
+  assert.ok(res.notas.some((n) => n.includes('sale del clip')));
+  assert.ok(res.notas.some((n) => n.includes('solaparse')));
+  assert.ok(res.notas.some((n) => n.includes('70 %')));
+
+  // Density enforcement across baja (20s), media (10s), alta (6s)
+  const densityCandidates = [
+    { id: 'd1', anchorCutId: 'cut-001', clip_index: 1, start_sec: 0, end_sec: 2.0, offsetSec: 2.0, motivo: 't=2s', encuadreX: 0.5 },
+    { id: 'd2', anchorCutId: 'cut-002', clip_index: 1, start_sec: 3, end_sec: 5.0, offsetSec: 3.0, motivo: 't=9s (delta 7s)', encuadreX: 0.5 },
+    { id: 'd3', anchorCutId: 'cut-003', clip_index: 1, start_sec: 6, end_sec: 8.0, offsetSec: 0.5, motivo: 't=16.5s (delta 7.5s from d2, 14.5s from d1)', encuadreX: 0.5 },
+    { id: 'd4', anchorCutId: 'cut-003', clip_index: 1, start_sec: 9, end_sec: 11.0, offsetSec: 7.0, motivo: 't=23s (delta 21s from d1)', encuadreX: 0.5 },
+  ];
+
+  assert.deepEqual(
+    validateAndFilterOverlays({ overlays: densityCandidates, cortes, clipDurations, brollDensity: 'alta' }).overlays.map((o) => o.id),
+    ['d1', 'd2', 'd3', 'd4']
+  );
+  assert.deepEqual(
+    validateAndFilterOverlays({ overlays: densityCandidates, cortes, clipDurations, brollDensity: 'media' }).overlays.map((o) => o.id),
+    ['d1', 'd3']
+  );
+  assert.deepEqual(
+    validateAndFilterOverlays({ overlays: densityCandidates, cortes, clipDurations, brollDensity: 'baja' }).overlays.map((o) => o.id),
+    ['d1', 'd4']
+  );
+
+  // Disabled skips everything cleanly
+  assert.deepEqual(
+    validateAndFilterOverlays({ overlays: densityCandidates, cortes, clipDurations, voiceoverBrollEnabled: false }),
+    { overlays: [], notas: [] }
+  );
+
+  // Mapping anchor_frase -> anchorCutId
+  const mapped = mapPhaseBOverlaysToCuts({
+    rawOverlays: [
+      { anchor_frase: 'C1-F002', clip_index: 1, start_sec: 2.0, end_sec: 4.0, offset_sec: 1.0, motivo: 'Playa', encuadreX: 0.8 },
+    ],
+    cortes,
+    sentencesByClip: new Map([[0, [{ id: 'C1-F002', clipIndex: 0, start: 7.0, end: 11.0, text: 'Mira el paisaje' }]]]),
+  });
+  assert.equal(mapped.mappedOverlays.length, 1);
+  assert.equal(mapped.mappedOverlays[0].anchorCutId, 'cut-002');
+  assert.equal(mapped.mappedOverlays[0].offsetSec, 2.0); // 7.0 + 1.0 - cut.start_sec (6.0)
+});
+
+test('Voz sobre recursos FFmpeg args: identical without overlays, horizontal pan + HDR->SDR, vertical, and continuous anchor audio', () => {
+  const baseParams = {
+    inputPath: '/tmp/anchor.mov',
+    outputPath: '/tmp/seg_000.mp4',
+    cut: { clipIndex: 0, start: 4.0, end: 10.0 },
+    profile: QUALITY_PROFILES['1080p'],
+    framing: 'center_crop',
+    audioMode: 'source',
+    encoderCodec: 'libx264',
+    cpuPreset: 'veryfast',
+  };
+
+  // 1. Without overlays: identical args whether overlays omitted or empty []
+  const argsBaseline = buildSegmentFfmpegArgs(baseParams);
+  const argsEmptyOverlays = buildSegmentFfmpegArgs({
+    ...baseParams,
+    overlays: [],
+    brollSmoothPan: true,
+    brollAmbientAudio: true,
+  });
+  assert.deepEqual(argsEmptyOverlays, argsBaseline);
+
+  // 2. Horizontal B-roll overlay (with HDR HLG + encuadreX + 8% smooth pan, default muted ambient, uncut anchor audio)
+  const argsHorizPan = buildSegmentFfmpegArgs({
+    ...baseParams,
+    overlays: [
+      {
+        inputPath: '/tmp/broll_landscape.mov',
+        start: 1.0,
+        end: 3.5,
+        offsetSec: 2.0,
+        encuadreX: 0.7,
+        colorTransfer: 'arib-std-b67',
+        isLandscape: true,
+        hasAudio: true,
+      },
+    ],
+    brollSmoothPan: true,
+    brollAmbientAudio: false,
+  });
+
+  const fcHoriz = argsHorizPan[argsHorizPan.indexOf('-filter_complex') + 1];
+  assert.ok(argsHorizPan.includes('/tmp/broll_landscape.mov'));
+  assert.ok(fcHoriz.includes('zscale=tin=arib-std-b67'), 'B-roll HDR->SDR must apply to landscape overlay');
+  assert.ok(fcHoriz.includes('[1:v:0]setpts=PTS-STARTPTS'), 'B-roll video stream must start at PTS=0');
+  assert.ok(fcHoriz.includes('scale=-2:1920,crop=1080:1920:'), 'Landscape B-roll must scale height to 1920 and crop 1080 width');
+  assert.ok(fcHoriz.includes('0.6600+0.0800*min(1,t/2.500)'), 'Smooth pan must shift crop by 8% centered on encuadreX=0.7');
+  assert.ok(fcHoriz.includes('[segv_0][segv_1][segv_2]concat=n=3:v=1:a=0[v0]'), 'Anchor -> B-roll -> Anchor subsegments must concatenate visually');
+  // Continuous uncut anchor audio without B-roll mix
+  assert.ok(fcHoriz.includes('[0:a:0]asetpts=PTS-STARTPTS,aresample=48000'));
+  assert.ok(fcHoriz.includes('apad=whole_dur=6.000[a0]'));
+  assert.ok(!fcHoriz.includes('volume=-20dB'), 'Ambient audio must stay muted by default');
+  assert.ok(!fcHoriz.includes('amix='), 'No amix when ambient audio is OFF');
+
+  // Landscape without smooth pan -> static crop at encuadreX
+  const argsHorizStatic = buildSegmentFfmpegArgs({
+    ...baseParams,
+    overlays: [
+      {
+        inputPath: '/tmp/broll_landscape.mov',
+        start: 1.0,
+        end: 3.5,
+        offsetSec: 2.0,
+        encuadreX: 0.25,
+        isLandscape: true,
+      },
+    ],
+    brollSmoothPan: false,
+    brollAmbientAudio: false,
+  });
+  const fcStatic = argsHorizStatic[argsHorizStatic.indexOf('-filter_complex') + 1];
+  assert.ok(fcStatic.includes('(iw-ow)*0.2500'));
+  assert.ok(!fcStatic.includes('0.0800*min(1'));
+
+  // 3. Vertical B-roll overlay with ambient audio ON (-20 dB) + continuous uncut anchor voice
+  const argsVertAmbient = buildSegmentFfmpegArgs({
+    ...baseParams,
+    overlays: [
+      {
+        inputPath: '/tmp/broll_vertical.mp4',
+        start: 0.5,
+        end: 3.0,
+        offsetSec: 1.5,
+        encuadreX: 0.5,
+        isLandscape: false,
+        hasAudio: true,
+      },
+    ],
+    brollSmoothPan: true,
+    brollAmbientAudio: true,
+  });
+  const fcVert = argsVertAmbient[argsVertAmbient.indexOf('-filter_complex') + 1];
+  assert.ok(fcVert.includes('[1:v:0]setpts=PTS-STARTPTS,scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920'));
+  assert.ok(fcVert.includes('[0:a:0]asetpts=PTS-STARTPTS'), 'Anchor voice remains continuous');
+  assert.ok(fcVert.includes('[1:a:0]atrim=duration=2.500'), 'B-roll ambient trimmed to overlay duration');
+  assert.ok(fcVert.includes('volume=-20dB,adelay=1500|1500[a_amb_0]'), 'Ambient audio mixed at -20 dB and delayed to offsetSec');
+  assert.ok(fcVert.includes('[a_anchor][a_amb_0]amix=inputs=2:duration=first:normalize=0,apad=whole_dur=6.000[a0]'));
+});
+
 
 

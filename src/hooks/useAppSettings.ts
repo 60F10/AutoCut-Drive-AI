@@ -1,6 +1,7 @@
 import { useCallback, useState } from 'react';
 import type {
   AppSettings,
+  BrollDensity,
   EditStylePreset,
   ExportQuality,
   TikTokEditOptions,
@@ -38,6 +39,10 @@ export function resolveEnvDefaultGeminiModel(): string {
   return sanitizeGeminiModelName(envModel, DEFAULT_GEMINI_MODEL);
 }
 
+function normalizeBrollDensity(raw: unknown): BrollDensity {
+  return raw === 'baja' || raw === 'alta' ? raw : 'media';
+}
+
 export function createDefaultSettings(): AppSettings {
   return {
     folderId: '',
@@ -48,6 +53,10 @@ export function createDefaultSettings(): AppSettings {
     autoWatchEnabled: false,
     autoUploadEnabled: true,
     exportQuality: detectDefaultExportQuality(),
+    voiceoverBrollEnabled: true,
+    brollDensity: 'media',
+    brollSmoothPanEnabled: true,
+    brollAmbientAudioEnabled: false,
   };
 }
 
@@ -77,6 +86,10 @@ function loadInitialSettings(): AppSettings {
       autoWatchEnabled: Boolean(parsed.autoWatchEnabled),
       autoUploadEnabled: parsed.autoUploadEnabled !== false,
       exportQuality: normalizeExportQuality(validQuality),
+      voiceoverBrollEnabled: parsed.voiceoverBrollEnabled !== false,
+      brollDensity: normalizeBrollDensity(parsed.brollDensity),
+      brollSmoothPanEnabled: parsed.brollSmoothPanEnabled !== false,
+      brollAmbientAudioEnabled: Boolean(parsed.brollAmbientAudioEnabled),
     };
   } catch {
     return defaults;
@@ -127,6 +140,10 @@ export function useAppSettings() {
       processEngine: normalizeProcessEngine(next.processEngine),
       folderId: extractDriveFolderId(next.folderId),
       exportQuality: normalizeExportQuality(next.exportQuality),
+      voiceoverBrollEnabled: next.voiceoverBrollEnabled !== false,
+      brollDensity: normalizeBrollDensity(next.brollDensity),
+      brollSmoothPanEnabled: next.brollSmoothPanEnabled !== false,
+      brollAmbientAudioEnabled: Boolean(next.brollAmbientAudioEnabled),
     };
     setSettings(sanitized);
     logInfo('UI', 'Ajustes guardados', {
@@ -136,6 +153,7 @@ export function useAppSettings() {
       calidad: sanitized.exportQuality === 'mobile_fast' ? '720p' : '1080p',
       vigilancia: sanitized.autoWatchEnabled ? `${sanitized.watchIntervalSec}s` : 'off',
       carpeta: sanitized.folderId ? 'sí' : 'no',
+      vozRecursos: sanitized.voiceoverBrollEnabled ? sanitized.brollDensity : 'off',
     });
     try {
       window.localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(sanitized));

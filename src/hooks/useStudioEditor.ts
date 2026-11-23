@@ -70,6 +70,44 @@ export function useStudioEditor({
     [setItems]
   );
 
+  const handleToggleOverlay = useCallback(
+    (itemId: string, overlayId: string) => {
+      setItems((prev) =>
+        prev.map((item) => {
+          if (item.id !== itemId || !item.analysis?.overlays) return item;
+          return {
+            ...item,
+            analysis: {
+              ...item.analysis,
+              overlays: item.analysis.overlays.map((ov) =>
+                ov.id === overlayId ? { ...ov, enabled: ov.enabled === false } : ov
+              ),
+            },
+          };
+        })
+      );
+    },
+    [setItems]
+  );
+
+  const handleDeleteOverlay = useCallback(
+    (itemId: string, overlayId: string) => {
+      setItems((prev) =>
+        prev.map((item) => {
+          if (item.id !== itemId || !item.analysis?.overlays) return item;
+          return {
+            ...item,
+            analysis: {
+              ...item.analysis,
+              overlays: item.analysis.overlays.filter((ov) => ov.id !== overlayId),
+            },
+          };
+        })
+      );
+    },
+    [setItems]
+  );
+
   const handleSelectAllCuts = useCallback(
     (itemId: string, enabled: boolean) => {
       setItems((prev) =>
@@ -374,6 +412,8 @@ export function useStudioEditor({
     isStudioRendering,
     studioRenderProgress,
     handleToggleCut,
+    handleToggleOverlay,
+    handleDeleteOverlay,
     handleSelectAllCuts,
     handleReorderCut,
     handleUpdateCutTiming,

@@ -6,6 +6,7 @@ import {
   Cloud,
   Cpu,
   ExternalLink,
+  Film,
   Folder,
   HardDrive,
   Mic,
@@ -20,6 +21,7 @@ import {
 import type { User } from 'firebase/auth';
 import type {
   AppSettings,
+  BrollDensity,
   ExportQuality,
   GeminiModelId,
   PcWorkerStatus,
@@ -100,6 +102,16 @@ export function SettingsView({
   const [autoWatchEnabled, setAutoWatchEnabled] = useState(settings.autoWatchEnabled);
   const [autoUploadEnabled, setAutoUploadEnabled] = useState(settings.autoUploadEnabled);
   const [exportQuality, setExportQuality] = useState<ExportQuality>(settings.exportQuality);
+  const [voiceoverBrollEnabled, setVoiceoverBrollEnabled] = useState(
+    settings.voiceoverBrollEnabled
+  );
+  const [brollDensity, setBrollDensity] = useState<BrollDensity>(settings.brollDensity);
+  const [brollSmoothPanEnabled, setBrollSmoothPanEnabled] = useState(
+    settings.brollSmoothPanEnabled
+  );
+  const [brollAmbientAudioEnabled, setBrollAmbientAudioEnabled] = useState(
+    settings.brollAmbientAudioEnabled
+  );
   const [savedBanner, setSavedBanner] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [logStats, setLogStats] = useState<DebugLogStats>(() => getDebugLogStats());
@@ -131,6 +143,10 @@ export function SettingsView({
     setAutoWatchEnabled(settings.autoWatchEnabled);
     setAutoUploadEnabled(settings.autoUploadEnabled);
     setExportQuality(settings.exportQuality);
+    setVoiceoverBrollEnabled(settings.voiceoverBrollEnabled);
+    setBrollDensity(settings.brollDensity);
+    setBrollSmoothPanEnabled(settings.brollSmoothPanEnabled);
+    setBrollAmbientAudioEnabled(settings.brollAmbientAudioEnabled);
   }, [settings]);
 
   const parsedFolderId = extractDriveFolderId(folderInput);
@@ -165,6 +181,10 @@ export function SettingsView({
       autoWatchEnabled,
       autoUploadEnabled,
       exportQuality,
+      voiceoverBrollEnabled,
+      brollDensity,
+      brollSmoothPanEnabled,
+      brollAmbientAudioEnabled,
     });
     setFolderInput(parsedFolderId);
     setModel(cleanedModel);
@@ -515,6 +535,123 @@ export function SettingsView({
                 </button>
               );
             })}
+          </div>
+        </div>
+
+        {/* Section 2.6: Voiceover B-Roll ("Voz sobre recursos") */}
+        <div
+          data-testid="settings-broll-section"
+          className="p-5 sm:p-6 space-y-4"
+        >
+          <div className="flex items-start gap-2.5">
+            <Film className="h-4 w-4 text-[#a855f7] shrink-0 mt-0.5" aria-hidden="true" />
+            <div>
+              <h2 className="font-display text-base font-semibold text-[#EEF5FF]">
+                Voz sobre recursos (B-roll)
+              </h2>
+              <p className="mt-1 text-xs text-[#94A8C4] leading-relaxed">
+                Mientras hablas a cámara de algo que aparece en otro plano, el vídeo muestra ese recurso manteniendo tu voz continua sin cortes.
+              </p>
+            </div>
+          </div>
+
+          <label className="flex items-start gap-3 cursor-pointer">
+            <input
+              type="checkbox"
+              data-testid="settings-broll-toggle"
+              checked={voiceoverBrollEnabled}
+              onChange={(e) => setVoiceoverBrollEnabled(e.target.checked)}
+              className="mt-0.5 h-4 w-4 rounded-sm border-[#00f0ff]/40 bg-[#05060a] accent-[#00f0ff]"
+            />
+            <span>
+              <span className="block text-sm font-medium text-[#EEF5FF]">
+                Activar Voz sobre recursos
+              </span>
+              <span className="block text-xs text-[#94A8C4]">
+                Activado por defecto. Si se desactiva, el montaje conserva exactamente el comportamiento tradicional.
+              </span>
+            </span>
+          </label>
+
+          <div className={`space-y-4 transition-opacity ${voiceoverBrollEnabled ? 'opacity-100' : 'opacity-50 pointer-events-none'}`}>
+            <div className="space-y-2">
+              <label className="block text-xs font-medium text-[#C8D7EC]">
+                Densidad de recursos sobre la voz
+              </label>
+              <div
+                role="radiogroup"
+                aria-label="Densidad de recursos B-roll"
+                className="inline-flex flex-wrap items-center gap-1 rounded-md border border-[#00f0ff]/25 bg-[#05060a] p-1"
+              >
+                {(
+                  [
+                    { value: 'baja', label: 'Baja (1 cada 20s)' },
+                    { value: 'media', label: 'Media (1 cada 10s)' },
+                    { value: 'alta', label: 'Alta (1 cada 6s)' },
+                  ] as Array<{ value: BrollDensity; label: string }>
+                ).map((opt) => {
+                  const active = brollDensity === opt.value;
+                  return (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      role="radio"
+                      aria-checked={active}
+                      disabled={!voiceoverBrollEnabled}
+                      data-testid={`settings-broll-density-${opt.value}`}
+                      onClick={() => setBrollDensity(opt.value)}
+                      className={`min-h-[36px] rounded-sm px-3.5 py-1.5 font-mono text-xs font-medium transition-colors whitespace-nowrap ${
+                        active
+                          ? 'bg-[#a855f7]/22 text-[#e9d5ff] border border-[#a855f7]/50'
+                          : 'text-[#8EA2BD] hover:text-[#EEF5FF]'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              <label className="flex items-start gap-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  disabled={!voiceoverBrollEnabled}
+                  data-testid="settings-broll-pan-toggle"
+                  checked={brollSmoothPanEnabled}
+                  onChange={(e) => setBrollSmoothPanEnabled(e.target.checked)}
+                  className="mt-0.5 h-4 w-4 rounded-sm border-[#00f0ff]/40 bg-[#05060a] accent-[#00f0ff]"
+                />
+                <span>
+                  <span className="block text-sm font-medium text-[#EEF5FF]">
+                    Paneo suave en planos horizontales
+                  </span>
+                  <span className="block text-xs text-[#94A8C4]">
+                    Desplaza suavemente un 8 % el recorte 9:16 centrado en el sujeto cuando el recurso es horizontal.
+                  </span>
+                </span>
+              </label>
+
+              <label className="flex items-start gap-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  disabled={!voiceoverBrollEnabled}
+                  data-testid="settings-broll-ambient-toggle"
+                  checked={brollAmbientAudioEnabled}
+                  onChange={(e) => setBrollAmbientAudioEnabled(e.target.checked)}
+                  className="mt-0.5 h-4 w-4 rounded-sm border-[#00f0ff]/40 bg-[#05060a] accent-[#00f0ff]"
+                />
+                <span>
+                  <span className="block text-sm font-medium text-[#EEF5FF]">
+                    Sonido ambiente del recurso
+                  </span>
+                  <span className="block text-xs text-[#94A8C4]">
+                    Silenciado por defecto. Si se activa, mezcla el sonido ambiente del plano recurso a −20 dB bajo tu voz.
+                  </span>
+                </span>
+              </label>
+            </div>
           </div>
         </div>
 

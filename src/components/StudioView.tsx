@@ -13,6 +13,8 @@ import {
   CloudUpload,
   Download,
   ExternalLink,
+  Eye,
+  EyeOff,
   Film,
   Loader2,
   Monitor,
@@ -26,6 +28,7 @@ import {
   Sparkles,
   Square,
   Star,
+  Trash2,
   Wand2,
   Zap,
 } from 'lucide-react';
@@ -58,6 +61,8 @@ interface StudioViewProps {
   selectedItemId: string | null;
   onSelectItem: (id: string) => void;
   onToggleCut: (itemId: string, cutId: string) => void;
+  onToggleOverlay?: (itemId: string, overlayId: string) => void;
+  onDeleteOverlay?: (itemId: string, overlayId: string) => void;
   onSelectAllCuts: (itemId: string, enabled: boolean) => void;
   onReorderCut: (itemId: string, cutId: string, direction: -1 | 1) => void;
   onUpdateCutTiming: (
@@ -141,11 +146,102 @@ const CUT_FUNCTION_META: Record<
   },
 };
 
+export function OverlayThumbnail({
+  videoUrl,
+  seekSec,
+  clipIndex,
+}: {
+  videoUrl?: string;
+  seekSec: number;
+  clipIndex: number;
+}) {
+  const [thumbUrl, setThumbUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!videoUrl) {
+      setThumbUrl(null);
+      return;
+    }
+    let cancelled = false;
+    const video = document.createElement('video');
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = 'metadata';
+    video.src = videoUrl;
+
+    const cleanup = () => {
+      video.removeAttribute('src');
+      video.load();
+    };
+
+    const capture = () => {
+      if (cancelled || video.videoWidth <= 0 || video.videoHeight <= 0) {
+        cleanup();
+        return;
+      }
+      try {
+        const canvas = document.createElement('canvas');
+        const targetH = 96;
+        const targetW = Math.max(54, Math.round((video.videoWidth / video.videoHeight) * targetH));
+        canvas.width = targetW;
+        canvas.height = targetH;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(video, 0, 0, targetW, targetH);
+          const dataUrl = canvas.toDataURL('image/jpeg', 0.65);
+          if (!cancelled) setThumbUrl(dataUrl);
+        }
+      } catch {
+        // Fallback to styled badge
+      } finally {
+        cleanup();
+      }
+    };
+
+    video.onloadedmetadata = () => {
+      const targetTime = Math.max(
+        0,
+        Math.min(Number.isFinite(video.duration) ? Math.max(0, video.duration - 0.1) : seekSec, seekSec)
+      );
+      video.currentTime = targetTime;
+    };
+    video.onseeked = capture;
+    video.onerror = cleanup;
+
+    return () => {
+      cancelled = true;
+      cleanup();
+    };
+  }, [videoUrl, seekSec]);
+
+  if (thumbUrl) {
+    return (
+      <img
+        src={thumbUrl}
+        alt={`Miniatura recurso Clip ${clipIndex + 1} en ${formatSeconds(seekSec)}`}
+        className="h-14 w-11 shrink-0 rounded-sm border border-[#a855f7]/45 object-cover bg-[#05060a]"
+      />
+    );
+  }
+
+  return (
+    <div
+      aria-hidden="true"
+      className="flex h-14 w-11 shrink-0 flex-col items-center justify-center gap-0.5 rounded-sm border border-[#a855f7]/40 bg-[#a855f7]/12 text-[#d8b4fe]"
+    >
+      <Film className="h-3.5 w-3.5" />
+      <span className="font-mono text-[9px] font-semibold">C{clipIndex + 1}</span>
+    </div>
+  );
+}
+
 export function StudioView({
   items,
   selectedItemId,
   onSelectItem,
   onToggleCut,
+  onToggleOverlay,
+  onDeleteOverlay,
   onSelectAllCuts,
   onReorderCut,
   onUpdateCutTiming,
@@ -1685,6 +1781,108 @@ export function StudioView({
                         </button>
                       </div>
                     </div>
+
+                    {/* B-Roll Overlays anchored to this cut */}
+                    {(() => {
+                      const cutOverlays = (plan.overlays ?? []).filter(
+                        (ov) => ov.anchorCutId === cut.id
+                      );
+                      if (cutOverlays.length === 0) return null;
+
+                      return (
+                        <div
+                          data-testid={`cut-overlays-list-${index}`}
+                          className="mt-2.5 space-y-2 border-l-2 border-[#a855f7]/50 pl-3"
+                        >
+                          {cutOverlays.map((ov) => {
+                            const isOvEnabled = ov.enabled !== false;
+                            const ovClipUrl = currentItem.isMultiClip
+                              ? currentItem.sourceClips?.[ov.clip_index]?.rawUrl
+                              : currentItem.rawUrl;
+                            const ovClipInfo = getClipDisplayLabel(ov.clip_index);
+
+                            return (
+                              <div
+                                key={ov.id}
+                                data-testid={`studio-overlay-card-${ov.id}`}
+                                className={`flex flex-wrap sm:flex-nowrap items-start gap-2.5 rounded-sm border p-2.5 transition-opacity ${
+                                  isOvEnabled
+                                    ? 'border-[#a855f7]/35 bg-[#a855f7]/[0.07]'
+                                    : 'border-[#52647D]/30 bg-[#05060a]/60 opacity-55'
+                                }`}
+                              >
+                                <OverlayThumbnail
+                                  videoUrl={ovClipUrl}
+                                  seekSec={ov.start_sec}
+                                  clipIndex={ov.clip_index}
+                                />
+
+                                <div className="min-w-0 flex-1 space-y-1">
+                                  <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                                    <span className="inline-flex items-center rounded-sm border border-[#a855f7]/50 bg-[#a855f7]/15 px-1.5 py-0.5 font-mono text-[9px] font-semibold uppercase tracking-wider text-[#d8b4fe]">
+                                      Voz sobre recurso
+                                    </span>
+                                    <span
+                                      className="font-mono text-[11px] font-semibold text-[#e9d5ff]"
+                                      title={ovClipInfo.name}
+                                    >
+                                      {ovClipInfo.short}
+                                    </span>
+                                    <span
+                                      className={`font-mono text-[11px] tabular-nums ${
+                                        isOvEnabled ? 'text-[#00f0ff]' : 'text-[#6A7E99] line-through'
+                                      }`}
+                                    >
+                                      {formatSeconds(ov.start_sec)} – {formatSeconds(ov.end_sec)}
+                                    </span>
+                                    <span className="font-mono text-[10px] text-[#8EA2BD]">
+                                      (entra en +{ov.offsetSec.toFixed(1)}s)
+                                    </span>
+                                  </div>
+
+                                  <p className="text-[11px] leading-relaxed text-[#C8D7EC]">
+                                    {ov.motivo}
+                                  </p>
+                                </div>
+
+                                <div className="flex items-center gap-1.5 shrink-0">
+                                  <button
+                                    type="button"
+                                    data-testid={`studio-overlay-toggle-${ov.id}`}
+                                    aria-label={`${isOvEnabled ? 'Desactivar' : 'Activar'} recurso de ${ovClipInfo.short}`}
+                                    onClick={() => onToggleOverlay?.(currentItem.id, ov.id)}
+                                    className="inline-flex h-7 items-center gap-1 rounded-sm border border-[#00f0ff]/30 bg-[#05060a] px-2 font-mono text-[10px] font-medium text-[#C8D7EC] hover:border-[#00f0ff] hover:text-[#00f0ff] transition-colors"
+                                  >
+                                    {isOvEnabled ? (
+                                      <>
+                                        <EyeOff className="h-3 w-3" />
+                                        Desactivar
+                                      </>
+                                    ) : (
+                                      <>
+                                        <Eye className="h-3 w-3" />
+                                        Activar
+                                      </>
+                                    )}
+                                  </button>
+
+                                  <button
+                                    type="button"
+                                    data-testid={`studio-overlay-delete-${ov.id}`}
+                                    aria-label={`Eliminar recurso de ${ovClipInfo.short}`}
+                                    onClick={() => onDeleteOverlay?.(currentItem.id, ov.id)}
+                                    className="inline-flex h-7 items-center gap-1 rounded-sm border border-[#ff2a85]/35 bg-[#05060a] px-2 font-mono text-[10px] font-medium text-[#ff85b8] hover:border-[#ff2a85] hover:bg-[#ff2a85]/15 transition-colors"
+                                  >
+                                    <Trash2 className="h-3 w-3" />
+                                    Eliminar
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      );
+                    })()}
                   </div>
                 </div>
               );

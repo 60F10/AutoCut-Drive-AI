@@ -203,6 +203,30 @@ export function createDemoQueueItems(): QueueItem[] {
         enabled: true,
       },
     ],
+    overlays: [
+      {
+        id: 'demo-ov-1',
+        anchorCutId: 'demo-mc-2',
+        clip_index: 0,
+        start_sec: 22.0,
+        end_sec: 25.0,
+        offsetSec: 1.6,
+        motivo: 'Plano recurso del parabrisas bajo la tormenta mientras relata el chaparrón',
+        encuadreX: 0.5,
+        enabled: true,
+      },
+      {
+        id: 'demo-ov-2',
+        anchorCutId: 'demo-mc-4',
+        clip_index: 0,
+        start_sec: 61.5,
+        end_sec: 64.2,
+        offsetSec: 2.0,
+        motivo: 'Detalle del café humeante en el salpicadero al volver al coche',
+        encuadreX: 0.35,
+        enabled: true,
+      },
+    ],
   };
 
   return [

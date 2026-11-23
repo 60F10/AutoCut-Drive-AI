@@ -12,6 +12,7 @@ import type {
   AnalyzeJobSourceFile,
   AnalyzeJobSyncEntry,
   AppErrorBanner,
+  BrollDensity,
   DriveFileMeta,
   EditStylePreset,
   ExportQuality,
@@ -76,6 +77,10 @@ interface UsePcRenderJobsParams {
   customInstruction: string;
   exportQuality: ExportQuality;
   tiktokOptions: TikTokEditOptions;
+  voiceoverBrollEnabled: boolean;
+  brollDensity: BrollDensity;
+  brollSmoothPanEnabled: boolean;
+  brollAmbientAudioEnabled: boolean;
   itemsRef: MutableRefObject<QueueItem[]>;
   setItems: Dispatch<SetStateAction<QueueItem[]>>;
   updateQueueItem: (id: string, patch: Partial<QueueItem>) => void;
@@ -123,6 +128,10 @@ export function usePcRenderJobs({
   customInstruction,
   exportQuality,
   tiktokOptions,
+  voiceoverBrollEnabled,
+  brollDensity,
+  brollSmoothPanEnabled,
+  brollAmbientAudioEnabled,
   itemsRef,
   setItems,
   updateQueueItem,
@@ -781,6 +790,10 @@ export function usePcRenderJobs({
         stylePreset: params.preset,
         customInstruction: params.instruction,
         tiktokOptions,
+        voiceoverBrollEnabled,
+        brollDensity,
+        brollSmoothPanEnabled,
+        brollAmbientAudioEnabled,
         queueItemId: params.queueItemId,
         projectName: params.projectName,
         isMultiClip: params.isMultiClip,
@@ -881,7 +894,18 @@ export function usePcRenderJobs({
 
       return manifest;
     },
-    [folderId, geminiModel, whisperModel, tiktokOptions, updateQueueItem, onError]
+    [
+      folderId,
+      geminiModel,
+      whisperModel,
+      tiktokOptions,
+      voiceoverBrollEnabled,
+      brollDensity,
+      brollSmoothPanEnabled,
+      brollAmbientAudioEnabled,
+      updateQueueItem,
+      onError,
+    ]
   );
 
   const sendItemToCloudAnalyze = useCallback(
@@ -1392,6 +1416,10 @@ export function usePcRenderJobs({
           item,
           exportQuality,
           tiktokOptions,
+          voiceoverBrollEnabled,
+          brollDensity,
+          brollSmoothPanEnabled,
+          brollAmbientAudioEnabled,
           target: 'pc',
           sourceFilesOverride,
         });
@@ -1464,6 +1492,10 @@ export function usePcRenderJobs({
       itemsRef,
       exportQuality,
       tiktokOptions,
+      voiceoverBrollEnabled,
+      brollDensity,
+      brollSmoothPanEnabled,
+      brollAmbientAudioEnabled,
       ensureSourceFilesInDrive,
       updateQueueItem,
       clearAuthSession,
@@ -1537,6 +1569,10 @@ export function usePcRenderJobs({
           item,
           exportQuality,
           tiktokOptions,
+          voiceoverBrollEnabled,
+          brollDensity,
+          brollSmoothPanEnabled,
+          brollAmbientAudioEnabled,
           target: 'cloud',
           sourceFilesOverride: resolvedSourceFiles,
         });
@@ -1645,6 +1681,10 @@ export function usePcRenderJobs({
       itemsRef,
       exportQuality,
       tiktokOptions,
+      voiceoverBrollEnabled,
+      brollDensity,
+      brollSmoothPanEnabled,
+      brollAmbientAudioEnabled,
       ensureSourceFilesInDrive,
       updateQueueItem,
       clearAuthSession,

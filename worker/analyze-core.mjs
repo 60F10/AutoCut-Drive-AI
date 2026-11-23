@@ -42,6 +42,26 @@ const MIN_SUBCUT_DURATION_SEC = 0.35;
 const RECURSO_MIN_SEC = 1.0;
 const RECURSO_MAX_SEC = 4.0;
 
+export const OVERLAY_MIN_SEC = 1.5;
+export const OVERLAY_MAX_SEC = 5.0;
+export const OVERLAY_GANCHO_SAFE_START_SEC = 1.5;
+export const OVERLAY_MAX_ANCHOR_COVERAGE_RATIO = 0.7;
+export const OVERLAY_DENSITY_WINDOWS_SEC = {
+  baja: 20,
+  media: 10,
+  alta: 6,
+};
+
+export function normalizeBrollDensity(raw, fallback = 'media') {
+  const cleaned = String(raw || '')
+    .trim()
+    .toLowerCase();
+  if (cleaned === 'baja' || cleaned === 'media' || cleaned === 'alta') {
+    return cleaned;
+  }
+  return fallback;
+}
+
 const PRESET_GUIDANCE = {
   funny_jumpcut:
     'Estilo GRACIOSO / JUMP-CUT: ritmo ágil, prioriza comentarios divertidos, reacciones, improvisos y remates cómicos; corta pausas y rodeos sin piedad.',
@@ -655,6 +675,27 @@ const PHASE_A_SCHEMA = {
   required: ['resumen', 'lugar', 'momentos', 'frases_destacadas'],
 };
 
+const PHASE_A_WITH_RECURSOS_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    ...PHASE_A_SCHEMA.properties,
+    recursos: {
+      type: 'ARRAY',
+      items: {
+        type: 'OBJECT',
+        properties: {
+          desde: { type: 'NUMBER' },
+          hasta: { type: 'NUMBER' },
+          descripcion: { type: 'STRING' },
+          encuadreX: { type: 'NUMBER' },
+        },
+        required: ['desde', 'hasta', 'descripcion', 'encuadreX'],
+      },
+    },
+  },
+  required: [...PHASE_A_SCHEMA.required, 'recursos'],
+};
+
 export const PHASE_B_SCHEMA = {
   type: 'OBJECT',
   properties: {
@@ -695,6 +736,34 @@ export const PHASE_B_SCHEMA = {
   required: ['titulo', 'etiqueta', 'gancho', 'historia', 'segmentos', 'guion_resultante'],
 };
 
+export const PHASE_B_WITH_OVERLAYS_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    ...PHASE_B_SCHEMA.properties,
+    overlays: {
+      type: 'ARRAY',
+      items: {
+        type: 'OBJECT',
+        properties: {
+          anchor_frase: {
+            type: 'STRING',
+            description:
+              'ID de frase hablada existente (formato exacto C{clip}-F{nnn}) sobre la que se muestra este plano recurso mientras sigue sonando la voz.',
+          },
+          clip_index: { type: 'INTEGER' },
+          start_sec: { type: 'NUMBER' },
+          end_sec: { type: 'NUMBER' },
+          offset_sec: { type: 'NUMBER' },
+          motivo: { type: 'STRING' },
+          encuadreX: { type: 'NUMBER' },
+        },
+        required: ['anchor_frase', 'clip_index', 'start_sec', 'end_sec', 'motivo', 'encuadreX'],
+      },
+    },
+  },
+  required: [...PHASE_B_SCHEMA.required, 'overlays'],
+};
+
 const PHASE_C_SCHEMA = {
   type: 'OBJECT',
   properties: {
@@ -714,9 +783,13 @@ export async function runPhaseAClipLog({
   durationSec,
   fileUri,
   sentences,
+  voiceoverBrollEnabled = false,
 }) {
   const clipNum = clipIndex + 1;
   const transcriptText = formatSentencesForPrompt(sentences);
+  const brollPromptBlock = voiceoverBrollEnabled
+    ? `\n- recursos[]: inventario de planos visuales aprovechables como B-roll ("Voz sobre recursos") en este clip, con desde/hasta en segundos (tramos limpios de 1.5 a 5 s), descripcion concreta de qué objeto/lugar/acción se ve, y encuadreX (número 0..1 indicando dónde centrar horizontalmente el recorte 9:16 si el plano es horizontal, o 0.5 si es vertical/centrado).`
+    : '';
   const prompt = `Analiza el Clip ${clipNum} (duración ${durationSec.toFixed(1)} s) viendo el vídeo con audio y usando esta transcripción numerada real:
 
 ${transcriptText}
@@ -725,7 +798,7 @@ Devuelve un registro estructurado en español con:
 - resumen: 1 o 2 frases describiendo qué pasa realmente en este clip.
 - lugar: escenario/ubicación visible (ej. "cocina", "calle", "coche", "playa").
 - momentos[]: intervalos relevantes (habla, visual o transicion) con desde/hasta en segundos, descripcion breve, energia (1-10) y calidad ("ok", "movido", "oscuro", "desenfocado").
-- frases_destacadas[]: las frases más potentes usando EXCLUSIVAMENTE los IDs existentes arriba (ej. C${clipNum}-F001), con puntuacion (1-10) y por_que (gracioso, información clave, reacción, remate, gancho...).
+- frases_destacadas[]: las frases más potentes usando EXCLUSIVAMENTE los IDs existentes arriba (ej. C${clipNum}-F001), con puntuacion (1-10) y por_que (gracioso, información clave, reacción, remate, gancho...).${brollPromptBlock}
 
 REGLA ESTRICTA: NO inventes frases ni IDs. Referencia únicamente IDs presentes en la lista anterior.`;
 
@@ -738,20 +811,34 @@ REGLA ESTRICTA: NO inventes frases ni IDs. Referencia únicamente IDs presentes 
       { fileData: { fileUri, mimeType: 'video/mp4' } },
       { text: prompt },
     ],
-    responseSchema: PHASE_A_SCHEMA,
+    responseSchema: voiceoverBrollEnabled ? PHASE_A_WITH_RECURSOS_SCHEMA : PHASE_A_SCHEMA,
     mediaResolution: 'MEDIA_RESOLUTION_LOW',
   });
 }
 
 // ---------- Phase B: Global Cohesive Story Script ----------
 
-export function buildPhaseBSystemInstruction(stylePreset) {
+export function buildPhaseBSystemInstruction(
+  stylePreset,
+  voiceoverBrollEnabled = false,
+  brollDensity = 'media'
+) {
   const presetText = PRESET_GUIDANCE[stylePreset] || PRESET_GUIDANCE.funny_jumpcut;
+  const densitySec = OVERLAY_DENSITY_WINDOWS_SEC[normalizeBrollDensity(brollDensity)] || 10;
+  const brollInstruction = voiceoverBrollEnabled
+    ? `\n\nREGLA DE VOZ SOBRE RECURSOS (overlays / B-roll): Mientras la persona habla a cámara, propón entradas en \`overlays[]\` cuando mencione o describa algo que aparezca en el inventario de planos recurso de cualquier clip (puedes reutilizar tramos visuales de clips que también aparezcan en el montaje normal). Requisitos estrictos de cada overlay:
+- \`anchor_frase\`: ID exacto \`C{clip}-F{nnn}\` de una frase hablada incluida en \`segmentos\`.
+- \`offset_sec\`: segundo dentro de esa frase/corte donde entra el recurso (>= 0). En cortes \`gancho\`, nunca pongas overlay en los primeros 1.5 s (se debe ver la cara al empezar).
+- \`clip_index\`, \`start_sec\`, \`end_sec\`: tramo del clip recurso con duración entre 1.5 y 5.0 s, que no supere el 70 % de la duración de la frase/corte ancla ni se solape con otros overlays.
+- Densidad objetivo "${normalizeBrollDensity(brollDensity)}": como máximo 1 overlay cada ${densitySec} s de vídeo final.
+- \`encuadreX\`: centro horizontal (0..1) del recorte 9:16 si el plano recurso es horizontal (0.5 si es vertical).`
+    : '';
+
   return `Eres editor de vídeo vertical para TikTok/Reels. Construye UNA historia con sentido a partir de todos los clips. Estructura: GANCHO (0-3 s, la frase o imagen más potente; puedes adelantar un momento posterior) → CONTEXTO (qué está pasando y adónde vamos) → DESARROLLO (lo mejor de lo que se cuenta, en orden cronológico) → CLÍMAX o momento más gracioso → REMATE/CIERRE. Reglas: usa frases completas, nunca cortes una frase a la mitad; una idea por corte; elimina repeticiones y divagaciones; los planos sin voz (\`recurso\`) duran 1-4 s y sirven de transición entre lugares; respeta la duración objetivo ±15 %; cada corte debe hacer avanzar la historia. Si la instrucción del usuario pide algo concreto, prevalece.
 
 ${presetText}
 
-REGLA DE IDENTIDAD: Para segmentos de tipo "frases", usa EXCLUSIVAMENTE IDs exactos (desde_frase y hasta_frase) de la lista de frases numeradas proporcionada, ambos pertenecientes al mismo clip y con hasta_frase >= desde_frase. Nunca inventes IDs. Para segmentos "recurso", indica clip_index (0-based), desde y hasta en segundos (1-4 s).`;
+REGLA DE IDENTIDAD: Para segmentos de tipo "frases", usa EXCLUSIVAMENTE IDs exactos (desde_frase y hasta_frase) de la lista de frases numeradas proporcionada, ambos pertenecientes al mismo clip y con hasta_frase >= desde_frase. Nunca inventes IDs. Para segmentos "recurso", indica clip_index (0-based), desde y hasta en segundos (1-4 s).${brollInstruction}`;
 }
 
 export async function runPhaseBGlobalScript({
@@ -765,6 +852,8 @@ export async function runPhaseBGlobalScript({
   sentencesByClip,
   clipDurations,
   revisionFeedback = null,
+  voiceoverBrollEnabled = false,
+  brollDensity = 'media',
 }) {
   const sections = orderedClipIndices.map((clipIdx, chronoPos) => {
     const log = clipLogsByIndex.get(clipIdx) || {};
@@ -785,13 +874,29 @@ export async function runPhaseBGlobalScript({
           .join('\n')
       : '  - (Sin frases destacadas)';
 
+    const recursosBlock =
+      voiceoverBrollEnabled && Array.isArray(log.recursos) && log.recursos.length > 0
+        ? `\nPlanos recurso disponibles (B-roll):\n${log.recursos
+            .map(
+              (r) =>
+                `  - clip_index=${clipIdx} [${Number(r.desde || 0).toFixed(1)}–${Number(
+                  r.hasta || 0
+                ).toFixed(1)}s, encuadreX=${Number(r.encuadreX ?? 0.5).toFixed(2)}]: ${
+                  r.descripcion || ''
+                }`
+            )
+            .join('\n')}`
+        : voiceoverBrollEnabled
+        ? '\nPlanos recurso disponibles (B-roll):\n  - (Ninguno inventariado explícitamente)'
+        : '';
+
     return `=== CLIP (clip_index=${clipIdx}, orden cronológico #${chronoPos + 1}, duración ${dur.toFixed(1)}s) ===
 Lugar: ${log.lugar || 'desconocido'}
 Resumen: ${log.resumen || 'Sin resumen'}
 Momentos visuales/habla:
 ${momentsText}
 Frases destacadas:
-${featuredText}
+${featuredText}${recursosBlock}
 Frases numeradas completas:
 ${formatSentencesForPrompt(sentences)}`;
   });
@@ -808,6 +913,10 @@ ${formatSentencesForPrompt(sentences)}`;
         .join('\n')}\n`
     : '';
 
+  const overlaysPromptLine = voiceoverBrollEnabled
+    ? `\n- overlays[]: planos recurso superpuestos mientras habla una frase incluida en \`segmentos\` (anchor_frase, clip_index, start_sec, end_sec, offset_sec, motivo, encuadreX).`
+    : '';
+
   const userPrompt = `Monta el guion global definitivo para un vídeo vertical de aproximadamente ${targetDurationSec} segundos (±15 %, es decir entre ${Math.round(
     targetDurationSec * 0.85
   )} s y ${Math.round(targetDurationSec * 1.15)} s).
@@ -821,15 +930,19 @@ Devuelve JSON con:
 - etiqueta: 1 sola palabra en MAYÚSCULAS sin tildes (ej. VIAJE, COCINA, VLOG, HUMOR).
 - gancho: la frase o momento gancho elegido para los primeros 0-3 s.
 - historia: resumen narrativo de 3 a 5 líneas explicando principio, nudo y final.
-- segmentos[]: lista ordenada de montaje ("frases" con desde_frase y hasta_frase exactos, o "recurso" con clip_index, desde y hasta de 1 a 4 s), cada uno con funcion y motivo.
+- segmentos[]: lista ordenada de montaje ("frases" con desde_frase y hasta_frase exactos, o "recurso" con clip_index, desde y hasta de 1 a 4 s), cada uno con funcion y motivo.${overlaysPromptLine}
 - guion_resultante: texto completo seguido de lo que se oirá en el vídeo final.`;
 
   return callGeminiGenerateContent({
     apiKey,
     model,
-    systemInstruction: buildPhaseBSystemInstruction(stylePreset),
+    systemInstruction: buildPhaseBSystemInstruction(
+      stylePreset,
+      voiceoverBrollEnabled,
+      brollDensity
+    ),
     parts: [{ text: userPrompt }],
-    responseSchema: PHASE_B_SCHEMA,
+    responseSchema: voiceoverBrollEnabled ? PHASE_B_WITH_OVERLAYS_SCHEMA : PHASE_B_SCHEMA,
     mediaResolution: 'MEDIA_RESOLUTION_LOW',
   });
 }
@@ -1393,6 +1506,290 @@ export async function runPhaseBWithValidationRetry({
   };
 }
 
+/**
+ * Maps Phase B overlay proposals referencing `anchor_frase` (`C{clip}-F{nnn}`)
+ * onto concrete spoken `PlanCut` IDs with `offsetSec` inside the matched cut.
+ */
+export function mapPhaseBOverlaysToCuts({ rawOverlays, cortes, sentencesByClip }) {
+  const safeRaw = Array.isArray(rawOverlays) ? rawOverlays : [];
+  const safeCuts = Array.isArray(cortes) ? cortes : [];
+  const notes = [];
+
+  if (safeRaw.length === 0) {
+    return { mappedOverlays: [], notes };
+  }
+
+  const sentenceById = new Map();
+  if (sentencesByClip instanceof Map) {
+    for (const [clipIdx, list] of sentencesByClip.entries()) {
+      for (const s of list || []) {
+        if (s?.id) {
+          sentenceById.set(String(s.id).trim(), {
+            clipIndex: clipIdx,
+            sentence: s,
+          });
+        }
+      }
+    }
+  }
+
+  const cutById = new Map(safeCuts.map((c) => [c.id, c]));
+  const mappedOverlays = [];
+
+  for (let i = 0; i < safeRaw.length; i += 1) {
+    const raw = safeRaw[i];
+    if (!raw || typeof raw !== 'object') continue;
+
+    // Direct anchorCutId already resolved
+    if (typeof raw.anchorCutId === 'string' && cutById.has(raw.anchorCutId)) {
+      mappedOverlays.push({
+        id: raw.id || `ov-${String(mappedOverlays.length + 1).padStart(3, '0')}`,
+        anchorCutId: raw.anchorCutId,
+        clip_index: Number(raw.clip_index),
+        start_sec: Number(raw.start_sec),
+        end_sec: Number(raw.end_sec),
+        offsetSec: round3(Math.max(0, Number(raw.offsetSec ?? raw.offset_sec) || 0)),
+        motivo: String(raw.motivo || 'Plano recurso').trim(),
+        encuadreX: Number.isFinite(Number(raw.encuadreX)) ? Number(raw.encuadreX) : 0.5,
+      });
+      continue;
+    }
+
+    const phraseId = String(raw.anchor_frase || '').trim();
+    const sentenceEntry = phraseId ? sentenceById.get(phraseId) : null;
+    if (!sentenceEntry) {
+      notes.push(
+        `Se descartó 1 overlay porque la frase ancla (${phraseId || 'vacía'}) no existe en la transcripción.`
+      );
+      continue;
+    }
+
+    const reqOffset = Math.max(0, Number(raw.offset_sec ?? raw.offsetSec) || 0);
+    const targetClipSec = sentenceEntry.sentence.start + reqOffset;
+
+    const spokenCandidates = safeCuts.filter(
+      (c) =>
+        c.funcion !== 'recurso' &&
+        c.clip_index === sentenceEntry.clipIndex &&
+        c.end_sec > sentenceEntry.sentence.start - 0.3 &&
+        c.start_sec < sentenceEntry.sentence.end + 0.3
+    );
+
+    if (spokenCandidates.length === 0) {
+      notes.push(
+        `Se descartó 1 overlay porque la frase ancla (${phraseId}) no quedó incluida en ningún corte hablado.`
+      );
+      continue;
+    }
+
+    // Prefer the sub-cut whose range contains targetClipSec, or nearest overlap
+    let matchedCut = spokenCandidates.find(
+      (c) => targetClipSec >= c.start_sec - 0.05 && targetClipSec <= c.end_sec + 0.05
+    );
+    if (!matchedCut) {
+      matchedCut = spokenCandidates[0];
+    }
+
+    const localOffset = round3(Math.max(0, targetClipSec - matchedCut.start_sec));
+    mappedOverlays.push({
+      id: raw.id || `ov-${String(mappedOverlays.length + 1).padStart(3, '0')}`,
+      anchorCutId: matchedCut.id,
+      clip_index: Number(raw.clip_index),
+      start_sec: Number(raw.start_sec),
+      end_sec: Number(raw.end_sec),
+      offsetSec: localOffset,
+      motivo: String(raw.motivo || 'Plano recurso').trim(),
+      encuadreX: Number.isFinite(Number(raw.encuadreX)) ? Number(raw.encuadreX) : 0.5,
+    });
+  }
+
+  return { mappedOverlays, notes };
+}
+
+/**
+ * Validates B-roll overlays against all editorial/technical constraints:
+ * 1. Duration strictly 1.5..5.0 s, inside source clip limits and anchor cut limits.
+ * 2. Never during the first 1.5 s of a "gancho" cut (speaker face must be visible).
+ * 3. Total overlay coverage on an anchor cut <= 70 % of that cut's duration.
+ * 4. No overlaps between overlays on the same anchor cut.
+ * 5. Density cap by setting: baja (max 1 per 20 s), media (1 per 10 s), alta (1 per 6 s).
+ */
+export function validateAndFilterOverlays({
+  overlays,
+  cortes,
+  clipDurations = [],
+  brollDensity = 'media',
+  voiceoverBrollEnabled = true,
+}) {
+  if (!voiceoverBrollEnabled) {
+    return { overlays: [], notas: [] };
+  }
+
+  const rawList = Array.isArray(overlays) ? overlays : [];
+  const safeCuts = Array.isArray(cortes) ? cortes : [];
+  if (rawList.length === 0 || safeCuts.length === 0) {
+    return { overlays: [], notas: [] };
+  }
+
+  const densityKey = normalizeBrollDensity(brollDensity, 'media');
+  const densityWindowSec = OVERLAY_DENSITY_WINDOWS_SEC[densityKey] || 10;
+
+  const cutInfoById = new Map();
+  let timelineCursor = 0;
+  for (let i = 0; i < safeCuts.length; i += 1) {
+    const cut = safeCuts[i];
+    const startSec = Number(cut.start_sec) || 0;
+    const endSec = Number(cut.end_sec) || 0;
+    const dur = Math.max(0, endSec - startSec);
+    cutInfoById.set(cut.id, {
+      index: i,
+      cut,
+      durationSec: dur,
+      timelineStartSec: timelineCursor,
+    });
+    timelineCursor += dur;
+  }
+
+  // Evaluate in timeline order when anchor cuts exist
+  const indexed = rawList.map((ov, idx) => {
+    const info = cutInfoById.get(ov?.anchorCutId);
+    const offsetSec = Number(ov?.offsetSec ?? ov?.offset_sec);
+    return {
+      ov,
+      originalIndex: idx,
+      cutIndex: info ? info.index : Number.MAX_SAFE_INTEGER,
+      offsetSort: Number.isFinite(offsetSec) ? offsetSec : 0,
+    };
+  });
+  indexed.sort((a, b) => a.cutIndex - b.cutIndex || a.offsetSort - b.offsetSort || a.originalIndex - b.originalIndex);
+
+  const accepted = [];
+  const notas = [];
+  const intervalsByCutId = new Map();
+  const coverageUsedByCutId = new Map();
+  const acceptedTimelineStarts = [];
+
+  for (const { ov } of indexed) {
+    if (!ov || typeof ov !== 'object') continue;
+
+    const cutInfo = cutInfoById.get(ov.anchorCutId);
+    if (!cutInfo) {
+      notas.push(`Se descartó 1 overlay por referenciar un corte ancla inexistente (${String(ov.anchorCutId || 'vacío')}).`);
+      continue;
+    }
+
+    const anchorCut = cutInfo.cut;
+    if (anchorCut.funcion === 'recurso') {
+      notas.push(`Se descartó 1 overlay porque el corte ancla (${anchorCut.id}) es un plano recurso sin voz.`);
+      continue;
+    }
+
+    const clipIndex = Number(ov.clip_index);
+    if (!Number.isInteger(clipIndex) || clipIndex < 0 || (clipDurations.length > 0 && clipIndex >= clipDurations.length)) {
+      notas.push(`Se descartó 1 overlay en ${anchorCut.id} por clip recurso inválido (${String(ov.clip_index)}).`);
+      continue;
+    }
+
+    const startSec = Number(ov.start_sec);
+    const endSec = Number(ov.end_sec);
+    const offsetSec = Number(ov.offsetSec ?? ov.offset_sec);
+
+    if (!Number.isFinite(startSec) || !Number.isFinite(endSec) || !Number.isFinite(offsetSec)) {
+      notas.push(`Se descartó 1 overlay en ${anchorCut.id} por tiempos no numéricos.`);
+      continue;
+    }
+
+    const clipDur = clipDurations.length > 0 ? Math.max(0, Number(clipDurations[clipIndex]) || 0) : Infinity;
+    if (startSec < -1e-6 || endSec <= startSec || (Number.isFinite(clipDur) && clipDur > 0 && endSec > clipDur + 1e-6)) {
+      notas.push(
+        `Se descartó 1 overlay en ${anchorCut.id} porque su tramo (${startSec.toFixed(1)}–${endSec.toFixed(1)} s) sale del clip ${clipIndex + 1}.`
+      );
+      continue;
+    }
+
+    const ovDur = round3(endSec - startSec);
+    if (ovDur < OVERLAY_MIN_SEC - 1e-6 || ovDur > OVERLAY_MAX_SEC + 1e-6) {
+      notas.push(
+        `Se descartó 1 overlay en ${anchorCut.id} por duración fuera de rango (${ovDur.toFixed(1)} s; permitido ${OVERLAY_MIN_SEC}–${OVERLAY_MAX_SEC} s).`
+      );
+      continue;
+    }
+
+    const anchorDur = cutInfo.durationSec;
+    if (offsetSec < -1e-6 || offsetSec + ovDur > anchorDur + 1e-6) {
+      notas.push(
+        `Se descartó 1 overlay en ${anchorCut.id} porque excede los límites del corte ancla (${offsetSec.toFixed(1)}+${ovDur.toFixed(1)} s > ${anchorDur.toFixed(1)} s).`
+      );
+      continue;
+    }
+
+    if (anchorCut.funcion === 'gancho' && offsetSec < OVERLAY_GANCHO_SAFE_START_SEC - 1e-6) {
+      notas.push(
+        `Se descartó 1 overlay en el gancho (${anchorCut.id}) por empezar antes de 1.5 s (${offsetSec.toFixed(1)} s).`
+      );
+      continue;
+    }
+
+    const priorCoverage = coverageUsedByCutId.get(anchorCut.id) || 0;
+    const maxCoverage = anchorDur * OVERLAY_MAX_ANCHOR_COVERAGE_RATIO;
+    if (priorCoverage + ovDur > maxCoverage + 1e-6) {
+      notas.push(
+        `Se descartó 1 overlay en ${anchorCut.id} porque superaría el 70 % de cobertura del corte ancla.`
+      );
+      continue;
+    }
+
+    const existingIntervals = intervalsByCutId.get(anchorCut.id) || [];
+    const safeOffset = round3(Math.max(0, offsetSec));
+    const ovEndInCut = round3(safeOffset + ovDur);
+    const hasOverlap = existingIntervals.some(
+      ([exStart, exEnd]) => safeOffset < exEnd - 1e-6 && exStart < ovEndInCut - 1e-6
+    );
+    if (hasOverlap) {
+      notas.push(
+        `Se descartó 1 overlay en ${anchorCut.id} por solaparse con otro recurso en el mismo tramo.`
+      );
+      continue;
+    }
+
+    const timelineStart = round3(cutInfo.timelineStartSec + safeOffset);
+    const violatesDensity = acceptedTimelineStarts.some(
+      (prevStart) => Math.abs(timelineStart - prevStart) < densityWindowSec - 1e-6
+    );
+    if (violatesDensity) {
+      notas.push(
+        `Se descartó 1 overlay en ${anchorCut.id} por superar la densidad "${densityKey}" (máx. 1 cada ${densityWindowSec} s).`
+      );
+      continue;
+    }
+
+    const rawEncuadre = Number(ov.encuadreX);
+    const encuadreX = Number.isFinite(rawEncuadre) ? round3(Math.max(0, Math.min(1, rawEncuadre))) : 0.5;
+    const cleanId =
+      typeof ov.id === 'string' && ov.id.trim()
+        ? ov.id.trim()
+        : `ov-${String(accepted.length + 1).padStart(3, '0')}`;
+
+    accepted.push({
+      id: cleanId,
+      anchorCutId: anchorCut.id,
+      clip_index: clipIndex,
+      start_sec: round3(Math.max(0, startSec)),
+      end_sec: round3(endSec),
+      offsetSec: safeOffset,
+      motivo: String(ov.motivo || 'Plano recurso').trim(),
+      encuadreX,
+    });
+
+    existingIntervals.push([safeOffset, ovEndInCut]);
+    intervalsByCutId.set(anchorCut.id, existingIntervals);
+    coverageUsedByCutId.set(anchorCut.id, priorCoverage + ovDur);
+    acceptedTimelineStarts.push(timelineStart);
+  }
+
+  return { overlays: accepted, notas };
+}
+
 // ---------- Phase C: Script Coherence Review ----------
 
 export async function runPhaseCScriptReview({ apiKey, model, cortes, guionResultante }) {
@@ -1464,6 +1861,8 @@ export async function analyzeCloudJob({
   const customInstruction = String(options.customInstruction || '').trim();
   const targetDurationSec = Math.max(15, Number(options.targetDurationSec) || 45);
   const silenceTrimEnabled = options.silenceTrimEnabled !== false;
+  const voiceoverBrollEnabled = options.voiceoverBrollEnabled !== false;
+  const brollDensity = normalizeBrollDensity(options.brollDensity, 'media');
   const clipCount = sourcePaths.length;
 
   const report = async (stage, progress) => {
@@ -1564,6 +1963,7 @@ export async function analyzeCloudJob({
         durationSec: clipDurations[i] || 10,
         fileUri: uploadedFile.uri,
         sentences: sentencesByClip.get(i) || [],
+        voiceoverBrollEnabled,
       });
       clipLogsByIndex.set(i, clipLog);
 
@@ -1601,6 +2001,8 @@ export async function analyzeCloudJob({
       sentencesByClip,
       clipDurations,
       revisionFeedback: feedback,
+      voiceoverBrollEnabled,
+      brollDensity,
     });
 
   let phaseBAttempt = await runPhaseBWithValidationRetry({
@@ -1645,9 +2047,29 @@ export async function analyzeCloudJob({
     });
   }
 
+  let validatedOverlays = [];
+  let overlayNotes = [];
+  if (voiceoverBrollEnabled) {
+    const mapped = mapPhaseBOverlaysToCuts({
+      rawOverlays: phaseBResult?.overlays,
+      cortes: converted.cortes,
+      sentencesByClip,
+    });
+    const validated = validateAndFilterOverlays({
+      overlays: mapped.mappedOverlays,
+      cortes: converted.cortes,
+      clipDurations,
+      brollDensity,
+      voiceoverBrollEnabled,
+    });
+    validatedOverlays = validated.overlays;
+    overlayNotes = [...mapped.notes, ...validated.notas];
+  }
+
   const notas = [
     ...(Array.isArray(converted.validationNotes) ? converted.validationNotes : []),
     ...converted.durationNotes,
+    ...overlayNotes,
     ...(Array.isArray(review?.problemas) ? review.problemas.filter(Boolean) : []),
     ...(Array.isArray(review?.cambios) ? review.cambios.filter(Boolean) : []),
   ]
@@ -1669,6 +2091,7 @@ export async function analyzeCloudJob({
       notas,
     },
     cortes: converted.cortes,
+    ...(voiceoverBrollEnabled ? { overlays: validatedOverlays } : {}),
   };
 }
 

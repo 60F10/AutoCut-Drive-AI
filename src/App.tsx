@@ -182,6 +182,10 @@ export default function App() {
     customInstruction,
     exportQuality: settings.exportQuality,
     tiktokOptions,
+    voiceoverBrollEnabled: settings.voiceoverBrollEnabled,
+    brollDensity: settings.brollDensity,
+    brollSmoothPanEnabled: settings.brollSmoothPanEnabled,
+    brollAmbientAudioEnabled: settings.brollAmbientAudioEnabled,
     itemsRef: queue.itemsRef,
     setItems: queue.setItems,
     updateQueueItem: queue.updateQueueItem,
@@ -214,6 +218,10 @@ export default function App() {
         watchIntervalSec: settings.watchIntervalSec,
         autoUploadEnabled: settings.autoUploadEnabled,
         hasFolderId: Boolean(settings.folderId),
+        voiceoverBrollEnabled: settings.voiceoverBrollEnabled,
+        brollDensity: settings.brollDensity,
+        brollSmoothPanEnabled: settings.brollSmoothPanEnabled,
+        brollAmbientAudioEnabled: settings.brollAmbientAudioEnabled,
       },
       tiktokOptions,
       stylePreset,
@@ -507,6 +515,8 @@ export default function App() {
               selectedItemId={studio.selectedStudioId}
               onSelectItem={studio.setSelectedStudioId}
               onToggleCut={studio.handleToggleCut}
+              onToggleOverlay={studio.handleToggleOverlay}
+              onDeleteOverlay={studio.handleDeleteOverlay}
               onSelectAllCuts={studio.handleSelectAllCuts}
               onReorderCut={studio.handleReorderCut}
               onUpdateCutTiming={studio.handleUpdateCutTiming}
