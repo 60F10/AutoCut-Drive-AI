@@ -399,6 +399,33 @@ export async function createGeminiProxyVideo(ffmpegBin, inputPath, outputProxyPa
 }
 
 /**
+ * Extrae `whisper-device: cuda/float16` (o `cpu/int8`) de stderr de transcribe.py.
+ */
+export function parseWhisperDeviceLine(stderr) {
+  const match = /whisper-device:\s*(cuda|cpu)\/([a-z0-9_]+)/i.exec(String(stderr || ''));
+  if (!match) return null;
+  return { device: match[1].toLowerCase(), computeType: match[2].toLowerCase() };
+}
+
+/**
+ * Quita de stderr las líneas informativas que no son errores (aviso de Hugging Face sobre
+ * peticiones no autenticadas, línea whisper-device y marca fallback-cpu).
+ */
+export function stripBenignWhisperStderr(stderr) {
+  return String(stderr || '')
+    .split(/\r?\n/)
+    .filter((line) => {
+      const lower = line.toLowerCase();
+      if (lower.includes('unauthenticated requests')) return false;
+      if (lower.includes('hf_token') && lower.includes('hf hub')) return false;
+      if (lower.startsWith('whisper-device:')) return false;
+      if (lower.trim() === 'fallback-cpu') return false;
+      return true;
+    })
+    .join('\n');
+}
+
+/**
  * Runs `worker/transcribe.py` via Python 3 and returns parsed transcript JSON.
  */
 export async function runWhisperTranscription({
@@ -411,6 +438,8 @@ export async function runWhisperTranscription({
   whisperComputeType = '',
   lang = 'es',
   onWhisperFallbackCpu,
+  onWhisperDevice,
+  env,
 }) {
   const device = normalizeWhisperDevice(whisperDevice, 'cpu');
   const args = [
@@ -430,14 +459,20 @@ export async function runWhisperTranscription({
     args.push('--compute-type', String(whisperComputeType).trim());
   }
 
-  const res = await runProcess(pythonBin, args);
+  const res = await runProcess(pythonBin, args, env ? { env } : {});
   if (typeof res.stderr === 'string' && res.stderr.includes('fallback-cpu')) {
     if (typeof onWhisperFallbackCpu === 'function') {
       await onWhisperFallbackCpu();
     }
   }
+  const reported = parseWhisperDeviceLine(res.stderr);
+  if (reported && typeof onWhisperDevice === 'function') {
+    await onWhisperDevice(reported.device, reported.computeType);
+  }
   if (res.code !== 0) {
-    throw new Error(`Fallo en Whisper (${whisperModel}): ${summarizeFfmpegError(res.stderr)}`);
+    throw new Error(
+      `Fallo en Whisper (${whisperModel}): ${summarizeFfmpegError(stripBenignWhisperStderr(res.stderr))}`
+    );
   }
   const raw = await fsp.readFile(outJsonPath, 'utf8');
   return JSON.parse(raw);
@@ -1848,6 +1883,8 @@ export async function analyzeCloudJob({
   saveCachedTranscript,
   onProgress,
   onWhisperFallbackCpu,
+  onWhisperDevice,
+  whisperEnv,
 }) {
   if (!apiKey) {
     throw new Error(
@@ -1920,6 +1957,8 @@ export async function analyzeCloudJob({
           whisperComputeType,
           lang: 'es',
           onWhisperFallbackCpu,
+          onWhisperDevice,
+          env: whisperEnv,
         });
         await fsp.rm(wavPath, { force: true }).catch(() => {});
       }
@@ -2121,6 +2160,8 @@ export async function orchestrateAnalyzeJob({
   patchManifest,
   onLog,
   onWhisperFallbackCpu,
+  onWhisperDevice,
+  whisperEnv,
 }) {
   const jobId = String(manifest.jobId || 'unknown').slice(0, 48);
   const tJobStart = Date.now();
@@ -2192,6 +2233,8 @@ export async function orchestrateAnalyzeJob({
       getCachedTranscript,
       saveCachedTranscript,
       onWhisperFallbackCpu,
+      onWhisperDevice,
+      whisperEnv,
       onProgress: async ({ stage, progress }) => {
         await writeProgress(stage, progress, false);
         onLog?.('INFO', 'analyze_progress', { jobId, stage, progress });

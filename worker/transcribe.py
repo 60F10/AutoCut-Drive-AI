@@ -22,15 +22,99 @@ Outputs JSON:
 """
 
 import argparse
+import glob
+import importlib.util
 import json
+import logging
 import os
 import sys
+import warnings
+
+_HF_UNAUTH_MARKER = "unauthenticated requests"
+
+
+class _HFUnauthenticatedFilter(logging.Filter):
+    """Descarta el aviso de Hugging Face sobre peticiones no autenticadas."""
+
+    def filter(self, record) -> bool:
+        try:
+            return _HF_UNAUTH_MARKER not in record.getMessage().lower()
+        except Exception:
+            return True
+
+
+def silence_hf_unauthenticated_warning() -> None:
+    logging.getLogger("huggingface_hub").addFilter(_HFUnauthenticatedFilter())
+    warnings.filterwarnings("ignore", message=".*unauthenticated requests.*")
+
+
+def register_cuda_dll_dirs(platform=None, find_spec=None, add_dll_directory=None, environ=None):
+    """En Windows, registra site-packages/nvidia/*/bin para que CTranslate2 encuentre cuBLAS/cuDNN.
+
+    Devuelve la lista de carpetas registradas. Los parámetros permiten simular win32 en tests.
+    """
+    if (platform or sys.platform) != "win32":
+        return []
+    find_spec = find_spec or importlib.util.find_spec
+    add_dll_directory = add_dll_directory or getattr(os, "add_dll_directory", None)
+    environ = os.environ if environ is None else environ
+
+    try:
+        spec = find_spec("nvidia")
+    except (ImportError, ValueError):
+        spec = None
+    if spec is None:
+        return []
+
+    roots = list(getattr(spec, "submodule_search_locations", None) or [])
+    registered = []
+    for root in roots:
+        for bin_dir in sorted(glob.glob(os.path.join(root, "*", "bin"))):
+            if not os.path.isdir(bin_dir):
+                continue
+            if add_dll_directory is not None:
+                try:
+                    add_dll_directory(bin_dir)
+                except OSError:
+                    continue
+            registered.append(bin_dir)
+
+    if registered:
+        current = environ.get("PATH", "")
+        existing = current.split(os.pathsep) if current else []
+        new_dirs = [d for d in registered if d not in existing]
+        if new_dirs:
+            environ["PATH"] = os.pathsep.join(new_dirs + ([current] if current else []))
+    return registered
+
+
+def emit_whisper_device(device: str, compute_type: str) -> None:
+    sys.stderr.write(f"whisper-device: {device}/{compute_type}\n")
+    sys.stderr.flush()
+
+
+def probe_device() -> tuple:
+    """Detecta el dispositivo real sin cargar el modelo (CUDA usable o CPU)."""
+    register_cuda_dll_dirs()
+    try:
+        import ctranslate2
+
+        if ctranslate2.get_cuda_device_count() > 0:
+            if sys.platform == "win32":
+                import ctypes
+
+                ctypes.WinDLL("cublas64_12.dll")
+            return "cuda", "float16"
+    except Exception:
+        pass
+    return "cpu", "int8"
 
 
 def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Transcribe audio WAV with faster-whisper")
-    parser.add_argument("--in", dest="input_path", required=True, help="Input 16kHz mono WAV path")
-    parser.add_argument("--out", dest="output_path", required=True, help="Output JSON path")
+    parser.add_argument("--probe", dest="probe", action="store_true", help="Solo detectar el dispositivo (sin cargar el modelo)")
+    parser.add_argument("--in", dest="input_path", help="Input 16kHz mono WAV path")
+    parser.add_argument("--out", dest="output_path", help="Output JSON path")
     parser.add_argument("--model", dest="model", default="small", help="Whisper model size (small/medium)")
     parser.add_argument("--lang", dest="lang", default="es", help="Language code (default: es)")
     parser.add_argument(
@@ -57,6 +141,8 @@ def resolve_compute_type(device: str, requested_compute_type: str = "") -> str:
 
 
 def load_whisper_model(model_name: str, device: str, compute_type: str = "", cpu_threads: int = 4):
+    register_cuda_dll_dirs()
+    silence_hf_unauthenticated_warning()
     from faster_whisper import WhisperModel
 
     requested_device = (device or "auto").strip().lower()
@@ -101,17 +187,25 @@ def load_whisper_model(model_name: str, device: str, compute_type: str = "", cpu
 
 def main(argv=None) -> int:
     args = parse_args(argv)
+    if args.probe:
+        device, compute = probe_device()
+        emit_whisper_device(device, compute)
+        return 0
+    if not args.input_path or not args.output_path:
+        sys.stderr.write("--in y --out son obligatorios.\n")
+        return 2
     if not os.path.isfile(args.input_path):
         sys.stderr.write("Input audio file not found.\n")
         return 1
 
     cpu_threads = os.cpu_count() or 4
-    model, _active_device, _active_compute = load_whisper_model(
+    model, active_device, active_compute = load_whisper_model(
         model_name=args.model,
         device=args.device,
         compute_type=args.compute_type,
         cpu_threads=cpu_threads,
     )
+    emit_whisper_device(active_device, active_compute)
 
     segments_iter, info = model.transcribe(
         args.input_path,

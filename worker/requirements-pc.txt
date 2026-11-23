@@ -1,0 +1,4 @@
+faster-whisper==1.*
+av<16
+nvidia-cublas-cu12
+nvidia-cudnn-cu12==9.*

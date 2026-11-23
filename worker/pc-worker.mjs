@@ -19,6 +19,7 @@
  * - NEVER logs tokens, API keys, transcripts, Drive IDs, paths, or user filenames.
  */
 
+import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
@@ -38,7 +39,20 @@ import {
   claimJobAtomically,
   normalizeWhisperDevice,
   orchestrateAnalyzeJob,
+  parseWhisperDeviceLine,
 } from './analyze-core.mjs';
+import {
+  CLEANUP_INTERVAL_MS,
+  COMMANDS_DIR_NAME,
+  cleanupStaleTempDirs,
+  createStorageReporter,
+  createTempWorkDir,
+  ensureWorkDir,
+  getWorkDirConfig,
+  releaseTempWorkDir,
+  resolveHfHome,
+  scanCleanupCommands,
+} from './cleanup.mjs';
 
 export { buildAssFileContent, escapePathForFfmpegFilter, sliceSubtitlesForSegment };
 
@@ -52,6 +66,37 @@ const DEFAULT_POLL_INTERVAL_MS = 3000;
 const HEARTBEAT_INTERVAL_MS = 60_000;
 const DEFAULT_LOG_MAX_BYTES = 5 * 1024 * 1024; // 5 MB
 const DEFAULT_LOG_MAX_FILES = 5;
+const COMMANDS_POLL_INTERVAL_MS = 5000;
+
+// Carpeta de trabajo activa (se fija en main() a partir de AUTOCUT_WORK_DIR).
+const runtimeConfig = { ...getWorkDirConfig({}), hfHome: '' };
+
+/**
+ * Ejecuta `transcribe.py --probe` (sin cargar el modelo) y devuelve { device, computeType } o null.
+ */
+export function probeWhisperDevice({ pythonBin, scriptPath, env = process.env, timeoutMs = 30_000 }) {
+  return new Promise((resolve) => {
+    execFile(
+      pythonBin,
+      [scriptPath, '--probe'],
+      { env, timeout: timeoutMs, windowsHide: true },
+      (error, _stdout, stderr) => {
+        if (error) return resolve(null);
+        resolve(parseWhisperDeviceLine(stderr));
+      }
+    );
+  });
+}
+
+/**
+ * Entorno para transcribe.py: hereda el del worker y fija HF_HOME si .env.local lo define.
+ */
+export function buildWhisperEnv(env = process.env) {
+  const out = { ...env };
+  const hfHome = String(env.HF_HOME || '').trim();
+  if (hfHome) out.HF_HOME = hfHome;
+  return out;
+}
 
 const SAFE_PC_LOG_KEYS = new Set([
   'jobId',
@@ -269,7 +314,8 @@ Opciones:
 
 Variables en worker/.env.local:
   GEMINI_API_KEY, AUTOCUT_DRIVE_DIR, WHISPER_MODEL (defecto: medium),
-  WHISPER_DEVICE (defecto: auto)
+  WHISPER_DEVICE (defecto: auto), AUTOCUT_WORK_DIR (carpeta de temporales),
+  HF_HOME (caché de modelos de Hugging Face)
 `);
 }
 
@@ -283,6 +329,8 @@ export function parseCliArgs(argv, env = process.env) {
     whisperModel: env.WHISPER_MODEL === 'small' ? 'small' : 'medium',
     whisperDevice: normalizeWhisperDevice(env.WHISPER_DEVICE, 'auto'),
     forceCpu: env.AUTOCUT_FORCE_CPU === '1' || env.AUTOCUT_FORCE_CPU === 'true',
+    workDir: String(env.AUTOCUT_WORK_DIR || '').trim(),
+    hfHome: String(env.HF_HOME || '').trim(),
     once: false,
     help: false,
   };
@@ -397,6 +445,7 @@ export async function writeWorkerHeartbeat({
   whisperDevice,
   whisperModel,
   busy,
+  storage,
 }) {
   const statusPath = path.join(jobsDir, WORKER_STATUS_FILENAME);
   const payload = {
@@ -407,6 +456,13 @@ export async function writeWorkerHeartbeat({
     whisperModel: whisperModel || 'medium',
     busy: Boolean(busy),
   };
+  if (storage && typeof storage === 'object') {
+    payload.storage = {
+      workDirMB: storage.workDirMB,
+      hfCacheMB: storage.hfCacheMB,
+      freeGB: storage.freeGB,
+    };
+  }
   try {
     await fsp.writeFile(statusPath, JSON.stringify(payload, null, 2), 'utf8');
   } catch {
@@ -477,7 +533,10 @@ async function processAnalyzeJob({
   }
 
   const claimedManifest = claimResult.manifest;
-  const tempWorkDir = await fsp.mkdtemp(path.join(os.tmpdir(), `autocut_pc_analyze_${jobId}_`));
+  const tempWorkDir = await createTempWorkDir({
+    workDir: runtimeConfig.workDir,
+    prefix: `autocut_pc_analyze_${jobId}_`,
+  });
   const cacheDir = path.join(jobsDir, CACHE_DIR_NAME);
   const transcribeScriptPath = path.join(workerDir, 'transcribe.py');
   const geminiApiKey = (process.env.GEMINI_API_KEY || '').trim();
@@ -500,7 +559,14 @@ async function processAnalyzeJob({
       pythonBin,
       transcribeScriptPath,
       whisperModel,
-      whisperDevice: whisperDeviceState.current,
+      whisperDevice: whisperDeviceState.requested ?? whisperDeviceState.current,
+      whisperEnv: buildWhisperEnv(),
+      onWhisperDevice: async (device) => {
+        if (whisperDeviceState.current !== device) {
+          whisperDeviceState.current = device;
+          if (onHeartbeatRefresh) await onHeartbeatRefresh();
+        }
+      },
       progressThrottleMs: 3000,
       prepareSourcePaths: async ({ manifest: current, writeProgress }) => {
         const resolvedPaths = [];
@@ -531,6 +597,7 @@ async function processAnalyzeJob({
       onLog: (level, stage, metrics) => logSafe(level, stage, metrics),
       onWhisperFallbackCpu: async () => {
         whisperDeviceState.current = 'cpu';
+        whisperDeviceState.requested = 'cpu';
         logSafe('WARN', 'whisper_fallback_cpu', { jobId, fallbackCpu: true, whisperDevice: 'cpu' });
         if (onHeartbeatRefresh) {
           await onHeartbeatRefresh();
@@ -540,7 +607,7 @@ async function processAnalyzeJob({
   } catch {
     // Error already persisted to manifest and logged by orchestrateAnalyzeJob
   } finally {
-    await fsp.rm(tempWorkDir, { recursive: true, force: true }).catch(() => {});
+    await releaseTempWorkDir(tempWorkDir);
   }
 }
 
@@ -576,7 +643,10 @@ async function processRenderJob({
   }
 
   const claimedManifest = claimResult.manifest;
-  const tempWorkDir = await fsp.mkdtemp(path.join(os.tmpdir(), `autocut_job_${jobId}_`));
+  const tempWorkDir = await createTempWorkDir({
+    workDir: runtimeConfig.workDir,
+    prefix: `autocut_job_${jobId}_`,
+  });
   const tJobStart = Date.now();
   const workingManifest = {
     ...claimedManifest,
@@ -681,7 +751,7 @@ async function processRenderJob({
       logSafe('ERROR', 'render_error_patch_failed', { jobId });
     }
   } finally {
-    await fsp.rm(tempWorkDir, { recursive: true, force: true }).catch(() => {});
+    await releaseTempWorkDir(tempWorkDir);
   }
 }
 
@@ -790,27 +860,88 @@ async function main() {
   await fsp.mkdir(jobsDir, { recursive: true });
   await fsp.mkdir(outputDir, { recursive: true });
 
+  const workCfg = getWorkDirConfig(process.env);
+  runtimeConfig.workDir = workCfg.workDir;
+  runtimeConfig.dedicated = workCfg.dedicated;
+  runtimeConfig.hfHome = resolveHfHome(process.env);
+  await ensureWorkDir(runtimeConfig.workDir);
+  const commandsDir = path.join(jobsDir, COMMANDS_DIR_NAME);
+  await fsp.mkdir(commandsDir, { recursive: true });
+  const storageReporter = createStorageReporter({
+    workDir: runtimeConfig.workDir,
+    dedicated: runtimeConfig.dedicated,
+    hfHome: runtimeConfig.hfHome,
+  });
+
   const encoder = await detectVideoEncoder(cli.ffmpegBin, cli.forceCpu);
   const zscaleAvailable = await hasZscaleFilter(cli.ffmpegBin);
   if (!zscaleAvailable) {
     logSafe('WARN', 'zscale_unavailable', { zscaleAvailable: false });
   }
 
-  const whisperDeviceState = { current: cli.whisperDevice };
+  const whisperDeviceState = { current: cli.whisperDevice, requested: cli.whisperDevice };
   let isBusy = false;
 
   const publishHeartbeat = async (busyOverride = isBusy) => {
     isBusy = Boolean(busyOverride);
+    let storage = null;
+    try {
+      storage = await storageReporter.get();
+    } catch {
+      storage = null;
+    }
     await writeWorkerHeartbeat({
       jobsDir,
       encoder: encoder.codec,
       whisperDevice: whisperDeviceState.current,
       whisperModel: cli.whisperModel,
       busy: isBusy,
+      storage,
     });
   };
 
   await publishHeartbeat(false);
+
+  // Dispositivo real de Whisper (sin cargar el modelo) para que el latido no se quede en "auto".
+  if (cli.whisperDevice !== 'cpu') {
+    const probed = await probeWhisperDevice({
+      pythonBin: cli.pythonBin,
+      scriptPath: path.join(workerDir, 'transcribe.py'),
+      env: buildWhisperEnv(),
+    });
+    if (probed) {
+      whisperDeviceState.current = probed.device;
+      await publishHeartbeat(false);
+    }
+  }
+
+  const runStaleCleanup = async () => {
+    const res = await cleanupStaleTempDirs({ workDir: runtimeConfig.workDir });
+    if (res.removed > 0) {
+      logSafe('INFO', 'stale_temp_cleanup', { count: res.removed, mb: Math.round(res.bytes / 1048576) });
+      storageReporter.invalidate();
+    }
+  };
+  await runStaleCleanup().catch(() => {});
+
+  const inFlightCommands = new Set();
+  const runCommandsScan = async () => {
+    const processed = await scanCleanupCommands({
+      commandsDir,
+      inFlight: inFlightCommands,
+      ctx: {
+        driveDir,
+        workDir: runtimeConfig.workDir,
+        dedicated: runtimeConfig.dedicated,
+      },
+    });
+    if (processed > 0) {
+      logSafe('INFO', 'cleanup_commands_processed', { count: processed });
+      storageReporter.invalidate();
+      await publishHeartbeat(isBusy);
+    }
+  };
+  await runCommandsScan().catch(() => {});
 
   logSafe('INFO', 'worker_started', {
     version: WORKER_VERSION,
@@ -869,10 +1000,20 @@ async function main() {
     void publishHeartbeat(isBusy);
   }, HEARTBEAT_INTERVAL_MS);
 
+  const cleanupIntervalId = setInterval(() => {
+    void runStaleCleanup().catch(() => {});
+  }, CLEANUP_INTERVAL_MS);
+
+  const commandsIntervalId = setInterval(() => {
+    void runCommandsScan().catch(() => {});
+  }, COMMANDS_POLL_INTERVAL_MS);
+
   const shutdown = () => {
     logSafe('INFO', 'worker_stopping');
     clearInterval(pollIntervalId);
     clearInterval(heartbeatIntervalId);
+    clearInterval(cleanupIntervalId);
+    clearInterval(commandsIntervalId);
     process.exit(0);
   };
 
